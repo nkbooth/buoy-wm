@@ -4,15 +4,6 @@
 //! `TagSet`: a `u64` bitset of tag membership, one bit per `TagId`
 //! (0..64 per ADR-006).
 
-// `TagSet::empty`/`contains`/`insert`/`remove` are only reached via
-// `WmCore::toggle_view_tag`, which remains unwired into `main.rs` —
-// deliberately out of scope for Story 1.7 (deferred to Epic 2's
-// assign-mode picker); `View`'s own `tags` field is constructed via
-// `Default::default()` in `register_view`, not `TagSet::empty()`.
-// Narrowly scoped to this module only, same precedent as Story 1.2's
-// original `mod wm_core` allow in `main.rs`.
-#![allow(dead_code)]
-
 /// A bitset of tag membership. Bit position `n` corresponds to
 /// `TagId(n)`; valid positions are `0..64` per ADR-006.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -20,6 +11,14 @@ pub struct TagSet(u64);
 
 impl TagSet {
     /// Returns a `TagSet` with no bits set.
+    // `contains`/`insert`/`remove` are now reached via
+    // `WmCore::toggle_view_tag`, wired since Story 2.1's IPC dispatch
+    // layer — but `View`'s own `tags` field is still constructed via
+    // `Default::default()` in `register_view`, not `TagSet::empty()`, so
+    // this one constructor remains genuinely unreached from production
+    // code. Narrowed to just this function, same precedent as
+    // `TagRegistry::new()`'s existing narrow allow.
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         TagSet(0)
     }

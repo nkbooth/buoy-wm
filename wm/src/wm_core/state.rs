@@ -48,6 +48,43 @@ pub enum WmCoreError {
     TagLimitReached,
 }
 
+/// A snapshot of one registered tag: its id and name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagSnapshot {
+    pub id: TagId,
+    pub name: String,
+}
+
+/// A snapshot of one registered view: its id, `app_id`, and current tag
+/// membership (ascending, registry-creation order — see
+/// [`WmCore::snapshot`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewSnapshot {
+    pub id: ViewId,
+    pub app_id: String,
+    pub tags: Vec<TagId>,
+}
+
+/// A snapshot of one registered output: its id and currently-displayed tag,
+/// if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputSnapshot {
+    pub id: OutputId,
+    pub current_tag: Option<TagId>,
+}
+
+/// A full, point-in-time, read-only view of a [`WmCore`]'s state: every
+/// registered tag/view/output plus the currently-focused view (if any).
+/// Plain data, no `serde` derives — `wm-core` stays protocol-agnostic; the
+/// IPC layer (`wm/src/ipc/`) owns converting this into wire types.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WmCoreSnapshot {
+    pub tags: Vec<TagSnapshot>,
+    pub views: Vec<ViewSnapshot>,
+    pub outputs: Vec<OutputSnapshot>,
+    pub focused_view: Option<ViewId>,
+}
+
 /// The single in-memory source of truth for window/tag membership, view
 /// geometry/floating state, focus, output current-tag, the tag registry,
 /// stacking/render order, and terminal-spawned status. Pure state + logic,
@@ -157,10 +194,11 @@ impl WmCore {
     /// adds it if absent, removes it if present. Fails with
     /// [`WmCoreError::UnknownView`] or [`WmCoreError::UnknownTag`] if
     /// either id is not registered, leaving state unchanged.
-    // Not yet wired into `main.rs` — deliberately out of scope for Story
-    // 1.7, which wires tag switching/creation but not window-tag toggling.
-    // View-tag assignment is Epic 2's assign-mode picker.
-    #[allow(dead_code)]
+    // Wired via `ipc::dispatch::handle_request`'s `Request::ToggleTag` arm
+    // since Story 2.1 — reachable and real today even though no client
+    // sends it in-process yet (Epic 2's assign-mode picker, Story 2.2+,
+    // doesn't exist until later stories; that distinction matters for an
+    // accurate comment).
     pub fn toggle_view_tag(&mut self, view_id: ViewId, tag_id: TagId) -> Result<(), WmCoreError> {
         if !self.tags.contains(tag_id) {
             return Err(WmCoreError::UnknownTag);
@@ -481,6 +519,62 @@ impl WmCore {
         self.set_focus(target)
             .expect("target was just read from this WmCore's own stacking order");
         Some(target)
+    }
+
+    /// A full, read-only snapshot of this `WmCore`'s current state — the
+    /// one new query this story adds to `wm-core`'s public API (every other
+    /// IPC-mutation handler reuses an existing mutator, no `wm-core`
+    /// changes needed). Views and outputs are sorted ascending by id for
+    /// deterministic output (`HashMap` iteration order is otherwise
+    /// unspecified) — both for test assertions and for real clients. A
+    /// pure query; never mutates `self`.
+    pub fn snapshot(&self) -> WmCoreSnapshot {
+        let all_tag_ids = self.tags.ids();
+
+        let tags = all_tag_ids
+            .iter()
+            .map(|&id| TagSnapshot {
+                id,
+                name: self
+                    .tags
+                    .get(id)
+                    .expect("id from ids() is always present")
+                    .name
+                    .clone(),
+            })
+            .collect();
+
+        let mut views: Vec<ViewSnapshot> = self
+            .views
+            .values()
+            .map(|view| ViewSnapshot {
+                id: view.id,
+                app_id: view.app_id.clone(),
+                tags: all_tag_ids
+                    .iter()
+                    .filter(|id| view.tags.contains(id.0))
+                    .copied()
+                    .collect(),
+            })
+            .collect();
+        views.sort_by_key(|v| v.id);
+
+        let mut outputs: Vec<OutputSnapshot> = self
+            .outputs
+            .values()
+            .map(|output| OutputSnapshot {
+                id: output.id,
+                current_tag: output.current_tag,
+            })
+            .collect();
+        outputs.sort_by_key(|o| o.id);
+
+        WmCoreSnapshot {
+            tags,
+            views,
+            outputs,
+            focused_view: self.focused_view,
+        }
     }
 }
 
@@ -1518,6 +1612,145 @@ mod tests {
     /// interaction in isolation, without any Wayland glue: a prior
     /// `raise_view` reorder (standing in for click-to-focus) must be what
     /// `cycle_focus` reads next, not a stale front.
+    #[test]
+    fn snapshot_of_empty_core_has_empty_collections_and_no_focus() {
+        let core = WmCore::new();
+        assert_eq!(
+            core.snapshot(),
+            super::WmCoreSnapshot {
+                tags: vec![],
+                views: vec![],
+                outputs: vec![],
+                focused_view: None,
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_includes_all_registered_tags_in_creation_order() {
+        let mut core = WmCore::new();
+        let tag_a = core.create_tag("a").unwrap();
+        let tag_b = core.create_tag("b").unwrap();
+        assert_eq!(
+            core.snapshot().tags,
+            vec![
+                super::TagSnapshot {
+                    id: tag_a,
+                    name: "a".into()
+                },
+                super::TagSnapshot {
+                    id: tag_b,
+                    name: "b".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_view_reports_its_own_tag_membership_as_sorted_tag_ids() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let tag_a = core.create_tag("a").unwrap();
+        let tag_b = core.create_tag("b").unwrap();
+        core.toggle_view_tag(view_id, tag_a).unwrap();
+        core.toggle_view_tag(view_id, tag_b).unwrap();
+        let snapshot = core.snapshot();
+        let view = snapshot
+            .views
+            .iter()
+            .find(|v| v.id == view_id)
+            .expect("registered view must be present in snapshot");
+        assert_eq!(view.tags, vec![tag_a, tag_b]);
+    }
+
+    #[test]
+    fn snapshot_view_with_no_tags_has_empty_tags_vec() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let snapshot = core.snapshot();
+        let view = snapshot
+            .views
+            .iter()
+            .find(|v| v.id == view_id)
+            .expect("registered view must be present in snapshot");
+        assert_eq!(view.tags, Vec::new());
+    }
+
+    #[test]
+    fn snapshot_outputs_report_current_tag_including_none() {
+        let mut core = WmCore::new();
+        let output_with_tag = core.register_output();
+        let output_without_tag = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        core.switch_tag(output_with_tag, tag_id).unwrap();
+        let snapshot = core.snapshot();
+        let with_tag = snapshot
+            .outputs
+            .iter()
+            .find(|o| o.id == output_with_tag)
+            .expect("output_with_tag must be present in snapshot");
+        let without_tag = snapshot
+            .outputs
+            .iter()
+            .find(|o| o.id == output_without_tag)
+            .expect("output_without_tag must be present in snapshot");
+        assert_eq!(with_tag.current_tag, Some(tag_id));
+        assert_eq!(without_tag.current_tag, None);
+    }
+
+    #[test]
+    fn snapshot_reports_focused_view_when_one_is_focused() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        core.set_focus(view_id).unwrap();
+        assert_eq!(core.snapshot().focused_view, Some(view_id));
+    }
+
+    #[test]
+    fn snapshot_reports_none_when_nothing_focused() {
+        let mut core = WmCore::new();
+        core.register_view("app-one");
+        assert_eq!(core.snapshot().focused_view, None);
+    }
+
+    #[test]
+    fn snapshot_views_and_outputs_are_sorted_ascending_by_id() {
+        let mut core = WmCore::new();
+        // Register out of any special order so a naive HashMap-iteration
+        // pass would not already happen to come back sorted.
+        let view_c = core.register_view("c");
+        let view_a = core.register_view("a");
+        let view_b = core.register_view("b");
+        let output_c = core.register_output();
+        let output_a = core.register_output();
+        let output_b = core.register_output();
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.views.iter().map(|v| v.id).collect::<Vec<_>>(), {
+            let mut ids = vec![view_c, view_a, view_b];
+            ids.sort();
+            ids
+        });
+        assert_eq!(snapshot.outputs.iter().map(|o| o.id).collect::<Vec<_>>(), {
+            let mut ids = vec![output_c, output_a, output_b];
+            ids.sort();
+            ids
+        });
+    }
+
+    #[test]
+    fn snapshot_is_a_pure_query_and_never_mutates_state() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let tag_id = core.create_tag("web").unwrap();
+        core.toggle_view_tag(view_id, tag_id).unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, tag_id).unwrap();
+        core.set_focus(view_id).unwrap();
+        let snapshot_before = core.clone();
+        let _ = core.snapshot();
+        assert_eq!(core, snapshot_before);
+    }
+
     #[test]
     fn cycle_focus_reflects_a_prior_raise_view_reordering() {
         let mut core = WmCore::new();

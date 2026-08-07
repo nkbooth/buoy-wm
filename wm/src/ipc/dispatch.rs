@@ -1,0 +1,332 @@
+// SPDX-FileCopyrightText: © 2026 Nick Booth
+// SPDX-License-Identifier: 0BSD
+
+//! The pure `Request` → `wm-core`-call → `Response` mapping. Deliberately
+//! factored out of `server.rs` so it can be reviewed and tested with zero
+//! socket/thread machinery in the loop, and so it is trivially diffable
+//! against Story 1.7's keybind call sites for the "same functions, no
+//! duplicate logic path" AC.
+
+use crate::ipc::protocol::{OutputDto, Request, Response, TagDto, ViewDto};
+use crate::wm_core::ids::{OutputId, TagId, ViewId};
+use crate::wm_core::state::{WmCore, WmCoreError, WmCoreSnapshot};
+
+impl From<WmCoreSnapshot> for Response {
+    fn from(snapshot: WmCoreSnapshot) -> Self {
+        Response::State {
+            tags: snapshot
+                .tags
+                .into_iter()
+                .map(|t| TagDto {
+                    id: t.id.0,
+                    name: t.name,
+                })
+                .collect(),
+            views: snapshot
+                .views
+                .into_iter()
+                .map(|v| ViewDto {
+                    id: v.id.0,
+                    app_id: v.app_id,
+                    tags: v.tags.into_iter().map(|t| t.0).collect(),
+                })
+                .collect(),
+            outputs: snapshot
+                .outputs
+                .into_iter()
+                .map(|o| OutputDto {
+                    id: o.id.0,
+                    current_tag: o.current_tag.map(|t| t.0),
+                })
+                .collect(),
+            focused_view: snapshot.focused_view.map(|v| v.0),
+        }
+    }
+}
+
+/// Maps a `WmCoreError` to the exact literal message string sent over the
+/// wire. `create-tag`'s registry-cap message ("tag limit reached (64)") is
+/// the single place that string is defined — Story 2.3's picker renders it
+/// verbatim, not a duplicated literal.
+fn describe_wm_core_error(e: WmCoreError) -> String {
+    match e {
+        WmCoreError::UnknownView => "unknown view".to_string(),
+        WmCoreError::UnknownTag => "unknown tag".to_string(),
+        WmCoreError::UnknownOutput => "unknown output".to_string(),
+        WmCoreError::TagLimitReached => "tag limit reached (64)".to_string(),
+    }
+}
+
+/// The single, pure, unit-tested mapping every socket connection calls
+/// into: dispatches a parsed [`Request`] to the matching `wm-core` call
+/// (the same functions Story 1.7's raw keybinds already exercise) and
+/// returns the [`Response`] to send back. Never panics (NFR2) — every
+/// `wm-core`-level error becomes `Response::Error`, not a propagated
+/// panic.
+pub fn handle_request(wm_core: &mut WmCore, request: Request) -> Response {
+    match request {
+        Request::GetState => Response::from(wm_core.snapshot()),
+        Request::ToggleTag { view_id, tag_id } => {
+            match wm_core.toggle_view_tag(ViewId(view_id), TagId(tag_id)) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: describe_wm_core_error(e),
+                },
+            }
+        }
+        Request::CreateTag { name } => match wm_core.create_tag(name) {
+            Ok(id) => Response::TagCreated { tag_id: id.0 },
+            Err(e) => Response::Error {
+                message: describe_wm_core_error(e),
+            },
+        },
+        Request::SwitchTag { output_id, tag_id } => {
+            match wm_core.switch_tag(OutputId(output_id), TagId(tag_id)) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error {
+                    message: describe_wm_core_error(e),
+                },
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::protocol::{Request, Response};
+    use crate::wm_core::ids::{OutputId, TagId, ViewId};
+    use crate::wm_core::state::WmCore;
+
+    #[test]
+    fn get_state_returns_state_response_matching_snapshot() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("foot");
+        let tag_id = core.create_tag("web").unwrap();
+        core.toggle_view_tag(view_id, tag_id).unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, tag_id).unwrap();
+        core.set_focus(view_id).unwrap();
+
+        let snapshot = core.snapshot();
+        let response = handle_request(&mut core, Request::GetState);
+
+        match response {
+            Response::State {
+                tags,
+                views,
+                outputs,
+                focused_view,
+            } => {
+                assert_eq!(tags.len(), snapshot.tags.len());
+                for (dto, snap) in tags.iter().zip(snapshot.tags.iter()) {
+                    assert_eq!(dto.id, snap.id.0);
+                    assert_eq!(dto.name, snap.name);
+                }
+                assert_eq!(views.len(), snapshot.views.len());
+                for (dto, snap) in views.iter().zip(snapshot.views.iter()) {
+                    assert_eq!(dto.id, snap.id.0);
+                    assert_eq!(dto.app_id, snap.app_id);
+                    assert_eq!(dto.tags, snap.tags.iter().map(|t| t.0).collect::<Vec<_>>());
+                }
+                assert_eq!(outputs.len(), snapshot.outputs.len());
+                for (dto, snap) in outputs.iter().zip(snapshot.outputs.iter()) {
+                    assert_eq!(dto.id, snap.id.0);
+                    assert_eq!(dto.current_tag, snap.current_tag.map(|t| t.0));
+                }
+                assert_eq!(focused_view, snapshot.focused_view.map(|v| v.0));
+            }
+            other => panic!("expected Response::State, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_tag_calls_wm_core_toggle_view_tag_and_returns_ok() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("foot");
+        let tag_id = core.create_tag("web").unwrap();
+        let response = handle_request(
+            &mut core,
+            Request::ToggleTag {
+                view_id: view_id.0,
+                tag_id: tag_id.0,
+            },
+        );
+        assert_eq!(response, Response::Ok);
+        assert_eq!(core.snapshot().views[0].tags, vec![tag_id]);
+    }
+
+    #[test]
+    fn toggle_tag_unknown_view_returns_error_not_panic() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("web").unwrap();
+        let response = handle_request(
+            &mut core,
+            Request::ToggleTag {
+                view_id: 9999,
+                tag_id: tag_id.0,
+            },
+        );
+        assert_eq!(
+            response,
+            Response::Error {
+                message: "unknown view".into()
+            }
+        );
+    }
+
+    #[test]
+    fn toggle_tag_unknown_tag_returns_error() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("foot");
+        let response = handle_request(
+            &mut core,
+            Request::ToggleTag {
+                view_id: view_id.0,
+                tag_id: 63,
+            },
+        );
+        assert_eq!(
+            response,
+            Response::Error {
+                message: "unknown tag".into()
+            }
+        );
+    }
+
+    #[test]
+    fn create_tag_calls_wm_core_create_tag_and_returns_tag_created_with_real_id() {
+        let mut core = WmCore::new();
+        let response = handle_request(&mut core, Request::CreateTag { name: "web".into() });
+        match response {
+            Response::TagCreated { tag_id } => {
+                assert!(
+                    core.snapshot()
+                        .tags
+                        .iter()
+                        .any(|t| t.id == TagId(tag_id) && t.name == "web")
+                );
+            }
+            other => panic!("expected Response::TagCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_tag_at_registry_cap_returns_the_picker_facing_error_message() {
+        let mut core = WmCore::new();
+        for i in 0..64 {
+            core.create_tag(format!("tag{i}")).unwrap();
+        }
+        let response = handle_request(
+            &mut core,
+            Request::CreateTag {
+                name: "one-too-many".into(),
+            },
+        );
+        assert_eq!(
+            response,
+            Response::Error {
+                message: "tag limit reached (64)".into()
+            }
+        );
+    }
+
+    #[test]
+    fn switch_tag_calls_wm_core_switch_tag_and_returns_ok() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        let response = handle_request(
+            &mut core,
+            Request::SwitchTag {
+                output_id: output_id.0,
+                tag_id: tag_id.0,
+            },
+        );
+        assert_eq!(response, Response::Ok);
+        assert_eq!(core.snapshot().outputs[0].current_tag, Some(tag_id));
+    }
+
+    #[test]
+    fn switch_tag_unknown_output_returns_error() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("web").unwrap();
+        let response = handle_request(
+            &mut core,
+            Request::SwitchTag {
+                output_id: 9999,
+                tag_id: tag_id.0,
+            },
+        );
+        assert_eq!(
+            response,
+            Response::Error {
+                message: "unknown output".into()
+            }
+        );
+    }
+
+    #[test]
+    fn switch_tag_unknown_tag_returns_error() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let response = handle_request(
+            &mut core,
+            Request::SwitchTag {
+                output_id: output_id.0,
+                tag_id: 63,
+            },
+        );
+        assert_eq!(
+            response,
+            Response::Error {
+                message: "unknown tag".into()
+            }
+        );
+    }
+
+    /// Regression guard for this story's NFR2 emphasis: sweep every
+    /// (valid, bogus) id combination for all three mutation variants and
+    /// assert `handle_request` returns (never panics) in every case.
+    #[test]
+    fn handle_request_never_panics_regardless_of_which_ids_are_bogus() {
+        let mut core = WmCore::new();
+        let valid_view = core.register_view("foot");
+        let valid_tag = core.create_tag("web").unwrap();
+        let valid_output = core.register_output();
+        let bogus_view = ViewId(9999);
+        let bogus_tag = TagId(63);
+        let bogus_output = OutputId(9999);
+
+        for view_id in [valid_view, bogus_view] {
+            for tag_id in [valid_tag, bogus_tag] {
+                let _ = handle_request(
+                    &mut core,
+                    Request::ToggleTag {
+                        view_id: view_id.0,
+                        tag_id: tag_id.0,
+                    },
+                );
+            }
+        }
+        for output_id in [valid_output, bogus_output] {
+            for tag_id in [valid_tag, bogus_tag] {
+                let _ = handle_request(
+                    &mut core,
+                    Request::SwitchTag {
+                        output_id: output_id.0,
+                        tag_id: tag_id.0,
+                    },
+                );
+            }
+        }
+        // CreateTag has no id arguments to sweep, but is included for
+        // completeness of "every mutation variant never panics."
+        let _ = handle_request(
+            &mut core,
+            Request::CreateTag {
+                name: "sweep".into(),
+            },
+        );
+    }
+}

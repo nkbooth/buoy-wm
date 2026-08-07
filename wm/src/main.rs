@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
+use std::sync::{Arc, Mutex};
 
 use wayland_backend::client::ObjectId;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, protocol::wl_registry};
@@ -40,6 +41,7 @@ mod river {
     wayland_scanner::generate_client_code!("./protocol/river-xkb-bindings-v1.xml");
 }
 
+mod ipc;
 mod wm_core;
 
 use wm_core::ids::{OutputId, TagId, ViewId};
@@ -99,7 +101,7 @@ struct WindowManager {
     windows: VecDeque<Window>,
     outputs: HashMap<ObjectId, Output>,
     seats: HashMap<ObjectId, Seat>,
-    wm_core: WmCore,
+    wm_core: Arc<Mutex<WmCore>>,
 }
 
 #[derive(Debug)]
@@ -230,7 +232,8 @@ impl WindowManager {
 
     fn remove_windows(&mut self) {
         let old_windows = std::mem::take(&mut self.windows);
-        let wm_core = &mut self.wm_core;
+        let mut wm_core_guard = ipc::lock_recovering(&self.wm_core);
+        let wm_core = &mut *wm_core_guard;
         self.windows = old_windows
             .into_iter()
             .filter(|window| {
@@ -285,24 +288,24 @@ impl WindowManager {
     }
 
     fn init_new_windows(&mut self) {
+        let mut wm_core = ipc::lock_recovering(&self.wm_core);
         for window in self.windows.iter_mut().filter(|w| w.new) {
-            let view_id = self.wm_core.register_view(&window.app_id);
+            let view_id = wm_core.register_view(&window.app_id);
             window.view_id = Some(view_id);
             if window.app_id == PINNED_TERM_APP_ID {
                 window.set_position(window.x, window.y);
                 window.proxy.propose_dimensions(window.width, window.height);
                 log_wm_core_err(
-                    self.wm_core.set_view_floating(view_id, false),
+                    wm_core.set_view_floating(view_id, false),
                     "Failed to set pinned terminal non-floating",
                 );
                 log_wm_core_err(
-                    self.wm_core.lower_view(view_id),
+                    wm_core.lower_view(view_id),
                     "Failed to lower pinned terminal in stacking order",
                 );
             } else {
                 log_wm_core_err(
-                    self.wm_core
-                        .set_view_geometry(view_id, DEFAULT_FLOATING_GEOMETRY),
+                    wm_core.set_view_geometry(view_id, DEFAULT_FLOATING_GEOMETRY),
                     "Failed to set default floating geometry",
                 );
                 window.set_position(DEFAULT_FLOATING_GEOMETRY.x, DEFAULT_FLOATING_GEOMETRY.y);
@@ -323,7 +326,7 @@ impl WindowManager {
     /// deliberately called after (not during) the seat loop that holds
     /// `wm_core`'s mutable borrow.
     fn ensure_pinned_terminal_spawned(&mut self, tag_id: TagId) {
-        match self.wm_core.claim_pinned_terminal_spawn(tag_id) {
+        match ipc::lock_recovering(&self.wm_core).claim_pinned_terminal_spawn(tag_id) {
             Ok(Some(session_name)) => spawn_pinned_terminal(&session_name),
             Ok(None) => {}
             Err(e) => {
@@ -398,7 +401,8 @@ impl WindowManager {
         // 1.7).
         let active_output_id = self.active_output_id();
         let mut pending_terminal_spawns: Vec<TagId> = Vec::new();
-        let wm_core = &mut self.wm_core;
+        let mut wm_core_guard = ipc::lock_recovering(&self.wm_core);
+        let wm_core = &mut *wm_core_guard;
         for seat in self.seats.values_mut() {
             // Code review follow-up (Story 1.5, finding #2): when the
             // interacted window is the pinned terminal, this pass already
@@ -469,6 +473,13 @@ impl WindowManager {
                 seat.op_manage();
             }
         }
+        // Story 2.1: explicitly drop the lock before
+        // `ensure_pinned_terminal_spawned` below re-locks the same mutex —
+        // `std::sync::Mutex` is not reentrant, so holding this guard across
+        // that call would deadlock the very thread that's supposed to
+        // recover from a *different* thread's poisoning, the first time
+        // this loop is non-empty.
+        drop(wm_core_guard);
         // First production call site for `ensure_pinned_terminal_spawned`
         // (dormant since Story 1.5): run after the seat loop, not inside
         // it, so this borrow starts only once `wm_core`'s mutable borrow
@@ -915,7 +926,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
             Event::SessionUnlocked => {}
             Event::Window { id } => state.wm.windows.push_back(Window::new(id, qh)),
             Event::Output { id } => {
-                let output_id = state.wm.wm_core.register_output();
+                let output_id = ipc::lock_recovering(&state.wm.wm_core).register_output();
                 state.wm.outputs.insert(id.id(), Output::new(id, output_id));
             }
             Event::Seat { id } => {
@@ -1101,6 +1112,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if app_data.river_xkb.is_none() {
         eprintln!("river_xkb_bindings_v1 global not found! Is river running with xkb support?");
         std::process::exit(1);
+    }
+
+    // A failed IPC-server bind (e.g. a permissions issue) is logged and
+    // does not abort WM startup: the WM's core job — managing windows —
+    // must not depend on the IPC server. Deliberate degrade-not-crash
+    // choice, consistent with NFR2's priority ordering, and mirrors this
+    // file's existing `log_wm_core_err`-style "log, don't abort"
+    // convention rather than `std::process::exit`, which this file
+    // otherwise reserves for unrecoverable Wayland-protocol-level
+    // failures only.
+    let socket_path = ipc::server::default_socket_path();
+    if let Err(e) = ipc::server::spawn(Arc::clone(&app_data.wm.wm_core), &socket_path) {
+        eprintln!("Failed to start IPC server on {socket_path:?}: {e}");
     }
 
     loop {
