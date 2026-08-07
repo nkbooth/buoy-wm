@@ -1,0 +1,46 @@
+# DO NOT EDIT -- overwritten on every update.
+#
+# Workflow customization surface for bmad-create-architecture. Mirrors the
+# agent customization shape under the [workflow] namespace.
+
+[workflow]
+
+# --- Configurable below. Overrides merge per BMad structural rules: ---
+#   scalars: override wins • arrays (persistent_facts, activation_steps_*): append
+#   arrays-of-tables with `code`/`id`: replace matching items, append new ones.
+
+# Steps to run before the standard activation (config load, greet).
+# Overrides append. Use for pre-flight loads, compliance checks, etc.
+
+activation_steps_prepend = []
+
+# Steps to run after greet but before the workflow begins.
+# Overrides append. Use for context-heavy setup that should happen
+# once the user has been acknowledged.
+
+activation_steps_append = []
+
+# Persistent facts the workflow keeps in mind for the whole run
+# (standards, compliance constraints, stylistic guardrails).
+# Distinct from the runtime memory sidecar — these are static context
+# loaded on activation. Overrides append.
+#
+# Each entry is either:
+#   - a literal sentence, e.g. "Our org is AWS-only -- do not propose GCP or Azure."
+#   - a file reference prefixed with `file:`, e.g. "file:{project-root}/docs/standards.md"
+#     (glob patterns are supported; the file's contents are loaded and treated as facts).
+
+persistent_facts = [
+  "file:{project-root}/**/project-context.md",
+  "Language selection rules (apply before recommending any technology): Rust — compiled/binary backend, performance-critical, standalone binary. Python — quick scripts, data work, service APIs where iteration speed matters. Bash — shell glue, CI steps, system automation. C#/.NET — Windows-adjacent or enterprise .NET ecosystem requirements. TypeScript+React — frontend/SPA only, Vite as build tool, TypeScript always. Do NOT suggest Go, Java, PHP, or Ruby unless the user explicitly overrides this constraint.",
+  "Every project must include a devcontainer (.devcontainer/devcontainer.json) and a CI workflow. The architecture document must specify the devcontainer base image for the chosen language stack. Development toolchains are never installed on the host.",
+  "Package managers by stack: uv for Python, native cargo for Rust, dotnet SDK for C#, npm for TypeScript. For containerised services: prefer UBI9 base images (ubi for build stages, ubi-minimal for runtime stages).",
+  "Testing strategy must be explicit in the architecture: specify test framework, coverage expectations, and confirm TDD (test-first) as the required development practice.",
+  "Secrets management standard — all projects must follow this: (1) Local dev: commit .env.template with op://project-name/ITEM_NAME/credential URIs; .env is always gitignored; devcontainer installs op CLI; commands run via 'op run --env-file .env.template -- <command>'. (2) Vault layout: one 1Password vault per project, named after the project in kebab-case matching the repo name; item names are SCREAMING_SNAKE_CASE env var names; field is 'credential', 'password', or 'token'. (3) CI: use 1password/load-secrets-action@v2; OP_SERVICE_ACCOUNT_TOKEN is the one allowed raw CI secret; mark unimplemented wiring with '# TODO(1password): create service account and set OP_SERVICE_ACCOUNT_TOKEN in repo secrets'. (4) Secret scanning: gitleaks pre-commit hook required. The architecture document must name the 1Password vault for this project and enumerate all required secrets with their op:// URIs.",
+]
+
+# Scalar: executed when the workflow reaches Step 8 (Architecture Completion & Handoff),
+# after the architecture document frontmatter is updated and next-steps guidance is given.
+# Override wins. Leave empty for no custom post-completion behavior.
+
+on_complete = ""
