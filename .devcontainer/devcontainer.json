@@ -1,0 +1,35 @@
+{
+  // SPDX-FileCopyrightText: © 2026 Nick Booth
+  // SPDX-License-Identifier: 0BSD
+  //
+  // Rust toolchain lives only in this container — buoy-wm never assumes a
+  // host-installed cargo. libwayland-dev + pkg-config are required to link
+  // wayland-client/wayland-backend (wm/Cargo.toml deps).
+  //
+  // `act` runs CI locally (Story 1.1 Task 4) without a GitHub remote. It
+  // needs a container engine to launch runner images. docker-in-docker
+  // fails under this host's rootless Podman (nested dockerd can't get
+  // cgroup/AppArmor delegation in a user-namespaced container), and the
+  // devcontainers/features docker-outside-of-docker feature hardcodes a
+  // default source mount of the host's /var/run/docker.sock — which on
+  // this host is a root-owned symlink to the *rootful* Podman socket, not
+  // reachable by an unprivileged user. So this is wired up by hand instead:
+  // bind-mount the host user's own rootless Podman socket
+  // (/run/user/<uid>/podman/podman.sock, Podman speaks the Docker API on
+  // it) straight into the container and point DOCKER_HOST at it. Assumes
+  // uid 1000 on the host (true for this machine) — adjust the mount source
+  // for a different host/uid.
+  "name": "buoy-wm",
+  "image": "mcr.microsoft.com/devcontainers/rust:1",
+  "mounts": [
+    "source=/run/user/1000/podman/podman.sock,target=/var/run/docker-host.sock,type=bind"
+  ],
+  "containerEnv": {
+    "DOCKER_HOST": "unix:///var/run/docker-host.sock"
+  },
+  // Debian suite for the Docker apt repo is derived from /etc/os-release
+  // (not hardcoded) so this survives the base image being retagged to a
+  // different Debian release without 404ing on `apt-get update`.
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config pre-commit ca-certificates curl && sudo install -m 0755 -d /etc/apt/keyrings && curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg && sudo chmod a+r /etc/apt/keyrings/docker.gpg && . /etc/os-release && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $VERSION_CODENAME stable\" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && sudo apt-get update && sudo apt-get install -y --no-install-recommends docker-ce-cli && sudo rm -rf /var/lib/apt/lists/* && curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/nektos/act/v0.2.89/install.sh | sudo bash -s -- -b /usr/local/bin v0.2.89",
+  "workspaceFolder": "/workspaces/buoy-wm"
+}

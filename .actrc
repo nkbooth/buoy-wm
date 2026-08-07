@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: 0BSD
+#
+# Pins act's runner image so `act` (Story 1.1 Task 4 CI verification, run
+# inside the devcontainer) doesn't hit an interactive image-size picker on
+# first run. Medium: best default action compatibility without the ~17GB
+# "Large" image's disk footprint.
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+# This workflow's steps never need Docker themselves; disable act's default
+# bind-mount of the docker socket into job containers (it otherwise tries to
+# re-mount our own forwarded host socket inside the nested job container,
+# which fails under this host's rootless-Podman setup).
+--container-daemon-socket -

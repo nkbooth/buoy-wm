@@ -1,0 +1,22 @@
+# Runs in-container only (pre-commit run --all-files, via
+# `devpod ssh buoy-wm`). Deliberately NOT `pre-commit install`ed: commits
+# happen on the host, where neither the pre-commit binary nor a cargo
+# toolchain exist, so the git-hook shim would fail closed.
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt-check
+        name: cargo fmt --check
+        language: system
+        entry: cargo fmt --manifest-path wm/Cargo.toml --all -- --check
+        # Manifest/lockfile changes (e.g. a dependency bump) can change what
+        # clippy lints or how fmt formats generated-adjacent code, so they
+        # need the same gate as source changes, not just *.rs.
+        files: ^wm/(src/.*\.rs|Cargo\.(toml|lock))$
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        language: system
+        entry: cargo clippy --manifest-path wm/Cargo.toml --all-targets -- -D warnings
+        files: ^wm/(src/.*\.rs|Cargo\.(toml|lock))$
+        pass_filenames: false

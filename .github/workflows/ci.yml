@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: 0BSD
+#
+# Story 1.1: cargo build + cargo test on push. Verified locally via `act`
+# inside the devcontainer (no GitHub remote exists for this repo yet).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Required to link wayland-client/wayland-backend (wm/Cargo.toml deps).
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config
+
+      - name: cargo build
+        run: cargo build --manifest-path wm/Cargo.toml
+
+      # tinyrwm ships no test suite yet — 0 tests run, exit 0 is expected
+      # and correct here, not a broken step.
+      - name: cargo test
+        run: cargo test --manifest-path wm/Cargo.toml
