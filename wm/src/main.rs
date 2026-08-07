@@ -40,13 +40,10 @@ mod river {
     wayland_scanner::generate_client_code!("./protocol/river-xkb-bindings-v1.xml");
 }
 
-// `wm_core` is not yet wired to the Dispatch handlers below (Story 1.4's
-// job) — it is unit-tested directly via its own public API for now, so
-// its production (non-test) call graph is legitimately unreachable from
-// `main.rs` until that wiring lands. Narrowly scoped to this module only
-// (not a blanket crate-wide allow) per Story 1.2's Technical notes.
-#[allow(dead_code)]
 mod wm_core;
+
+use wm_core::ids::ViewId;
+use wm_core::state::{PINNED_TERM_APP_ID, WmCore};
 
 #[derive(Debug, Clone, Copy)]
 enum Action {
@@ -89,6 +86,7 @@ struct WindowManager {
     windows: VecDeque<Window>,
     outputs: HashMap<ObjectId, Output>,
     seats: HashMap<ObjectId, Seat>,
+    wm_core: WmCore,
 }
 
 #[derive(Debug)]
@@ -104,6 +102,8 @@ struct Window {
     pointer_move_requested: Option<RiverSeatV1>,
     pointer_resize_requested: Option<RiverSeatV1>,
     pointer_resize_requested_edges: Edges,
+    app_id: String,
+    view_id: Option<ViewId>,
 }
 
 #[derive(Debug)]
@@ -216,6 +216,7 @@ impl WindowManager {
 
     fn remove_windows(&mut self) {
         let old_windows = std::mem::take(&mut self.windows);
+        let wm_core = &mut self.wm_core;
         self.windows = old_windows
             .into_iter()
             .filter(|window| {
@@ -232,6 +233,18 @@ impl WindowManager {
                             if window_proxy == &window.proxy {
                                 seat.op_end();
                             }
+                        }
+                    }
+                    if let Some(id) = window.view_id {
+                        // This id is always valid through this call path —
+                        // only this module ever registers/removes a
+                        // `wm-core` view id — so a failure here is believed
+                        // structurally unreachable; log rather than
+                        // silently swallow, so a future regression that
+                        // does hit `Err` stays visible (NFR2, error
+                        // propagation).
+                        if let Err(e) = wm_core.unregister_view(id) {
+                            eprintln!("Failed to unregister view {id:?} from wm_core: {e:?}");
                         }
                     }
                     return false;
@@ -261,6 +274,8 @@ impl WindowManager {
         for window in self.windows.iter_mut().filter(|w| w.new) {
             window.set_position(window.x, window.y);
             window.proxy.propose_dimensions(window.width, window.height);
+            let view_id = self.wm_core.register_view(&window.app_id);
+            window.view_id = Some(view_id);
             window.new = false;
         }
     }
@@ -309,6 +324,7 @@ impl WindowManager {
     }
 
     fn manage_seats(&mut self, wm_proxy: &RiverWindowManagerV1) {
+        let wm_core = &mut self.wm_core;
         for seat in self.seats.values_mut() {
             if let Some(window_proxy) = seat.interacted.take() {
                 let i = self
@@ -317,10 +333,21 @@ impl WindowManager {
                     .position(|window| window.proxy == window_proxy)
                     .expect("Interacted window not found");
                 let window = self.windows.remove(i).unwrap();
+                // Keep wm_core's stacking_order synchronized with the real
+                // z-order on every click-to-focus reorder, not just on
+                // FocusNext — otherwise stacking_order silently and
+                // permanently diverges from self.windows after the first
+                // mouse click, which Story 1.6's tiling geometry will read
+                // from (Story 1.4 code-review follow-up).
+                if let Some(view_id) = window.view_id
+                    && let Err(e) = wm_core.raise_view(view_id)
+                {
+                    eprintln!("Failed to raise view {view_id:?} in wm_core stacking order: {e:?}");
+                }
                 self.windows.push_back(window);
             }
-            seat.focus_top(&self.windows);
-            seat.do_action(&mut self.windows, wm_proxy);
+            seat.focus_top(&self.windows, wm_core);
+            seat.do_action(&mut self.windows, wm_proxy, wm_core);
             if seat.op_release {
                 seat.op_end();
                 seat.op_release = false;
@@ -346,6 +373,8 @@ impl Window {
             pointer_move_requested: None,
             pointer_resize_requested: None,
             pointer_resize_requested_edges: Edges::None,
+            app_id: String::new(),
+            view_id: None,
         }
     }
 
@@ -413,7 +442,12 @@ impl Seat {
         self.pointer_bindings.insert(binding.proxy.id(), binding);
     }
 
-    fn do_action(&mut self, windows: &mut VecDeque<Window>, wm_proxy: &RiverWindowManagerV1) {
+    fn do_action(
+        &mut self,
+        windows: &mut VecDeque<Window>,
+        wm_proxy: &RiverWindowManagerV1,
+        wm_core: &mut WmCore,
+    ) {
         match self.pending_action {
             Action::None => {}
             // Don't pass WAYLAND_DEBUG on to children, the added noise makes
@@ -426,14 +460,47 @@ impl Seat {
                 Err(e) => eprintln!("Failed to spawn foot: {e}"),
             },
             Action::Close => {
+                // Check the pinned-terminal exclusion against this seat's
+                // own real focus target (self.focused's Window.app_id),
+                // not wm_core.closable_focused_view()'s single, WM-wide
+                // focused_view — with multiple seats, the global field can
+                // reflect a *different* seat's focus by the time this runs
+                // (last-seat-processed-in-manage_seats wins), which could
+                // let the pinned terminal be closed via this seat's own
+                // request even though it isn't this seat's real focus, or
+                // could spuriously block a legitimate close. Looking the
+                // window up in `windows` and reading its own `app_id`
+                // keeps the decision local and per-seat-correct regardless
+                // of seat count or wm_core's global focus state (Story 1.4
+                // code-review follow-up).
                 if let Some(window_proxy) = self.focused.as_ref() {
-                    window_proxy.close();
+                    let is_pinned_terminal = windows
+                        .iter()
+                        .find(|window| &window.proxy == window_proxy)
+                        .is_some_and(|window| window.app_id == PINNED_TERM_APP_ID);
+                    if !is_pinned_terminal {
+                        window_proxy.close();
+                    }
                 }
             }
             Action::FocusNext => {
-                if !windows.is_empty() {
-                    windows.rotate_left(1);
-                    self.focus_top(windows);
+                // wm_core.cycle_focus()'s returned ViewId is the source of
+                // truth for which window to focus next — look it up in
+                // `windows` and move it to the back (real z-order) rather
+                // than independently rotating `windows` and letting the
+                // two mechanisms diverge (Story 1.4 code-review
+                // follow-up). `focus_top` then issues the real
+                // focus_window/place_top proxy calls against
+                // `windows.back()`, which is now guaranteed to be the same
+                // window cycle_focus just chose.
+                if let Some(next_view_id) = wm_core.cycle_focus()
+                    && let Some(i) = windows
+                        .iter()
+                        .position(|window| window.view_id == Some(next_view_id))
+                {
+                    let window = windows.remove(i).unwrap();
+                    windows.push_back(window);
+                    self.focus_top(windows, wm_core);
                 }
             }
             Action::Move => {
@@ -495,16 +562,30 @@ impl Seat {
         }
     }
 
-    fn focus_top(&mut self, windows: &VecDeque<Window>) {
+    fn focus_top(&mut self, windows: &VecDeque<Window>, wm_core: &mut WmCore) {
         match windows.back() {
             Some(window) => {
                 self.proxy.focus_window(&window.proxy);
                 window.node.place_top();
                 self.focused = Some(window.proxy.clone());
+                let view_id = window.view_id.expect(
+                    "every window reaches focus_top only after init_new_windows registered it earlier in the same handle_manage_start call",
+                );
+                // set_focus is expected to succeed here: view_id was
+                // registered in wm_core by init_new_windows earlier in the
+                // same handle_manage_start call, so it should not be
+                // unknown to wm_core; log rather than silently swallow an
+                // Err, so a future regression that does hit it stays
+                // visible (NFR2, error propagation), same pattern as
+                // remove_windows' unregister_view logging.
+                if let Err(e) = wm_core.set_focus(view_id) {
+                    eprintln!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
+                }
             }
             None => {
                 self.proxy.clear_focus();
                 self.focused = None;
+                wm_core.clear_focus();
             }
         }
     }
@@ -658,7 +739,10 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 max_height: _,
             } => {}
             Event::Dimensions { width, height } => (window.width, window.height) = (width, height),
-            Event::AppId { app_id: _ } => {}
+            // Protocol allows app_id == null (window never set one, or
+            // cleared it); treat that the same as Window's own default of
+            // an empty string rather than panicking (NFR2).
+            Event::AppId { app_id } => window.app_id = app_id.unwrap_or_default(),
             Event::Title { title: _ } => {}
             Event::Parent { parent: _ } => {}
             Event::DecorationHint { hint: _ } => {}

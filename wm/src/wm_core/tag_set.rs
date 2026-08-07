@@ -4,6 +4,14 @@
 //! `TagSet`: a `u64` bitset of tag membership, one bit per `TagId`
 //! (0..64 per ADR-006).
 
+// `TagSet::empty`/`contains`/`insert`/`remove` are only reached via
+// `WmCore::toggle_view_tag`, which isn't wired into `main.rs` until
+// Story 1.7 (tag switching); `View`'s own `tags` field is constructed via
+// `Default::default()` in `register_view`, not `TagSet::empty()`.
+// Narrowly scoped to this module only, same precedent as Story 1.2's
+// original `mod wm_core` allow in `main.rs`.
+#![allow(dead_code)]
+
 /// A bitset of tag membership. Bit position `n` corresponds to
 /// `TagId(n)`; valid positions are `0..64` per ADR-006.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -5,6 +5,14 @@
 //! bitset (ADR-006). Tag creation is idempotent by name; there is no
 //! delete-tag API in v1 — that omission is deliberate, not an oversight.
 
+// This module's public API (`WmCore::create_tag`/`toggle_view_tag`/
+// `mark_terminal_spawned`/`switch_tag` are its only production entry
+// points) is not yet wired into `main.rs` — that lands in Story 1.5
+// (pinned terminal) and Story 1.7 (tag switching). Narrowly scoped to
+// this module only (not a blanket crate-wide allow), same precedent as
+// Story 1.2's original `mod wm_core` allow in `main.rs`.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use super::ids::TagId;

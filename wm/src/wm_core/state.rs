@@ -11,6 +11,14 @@ use super::output::Output;
 use super::tag::{TagRegistry, TagRegistryError};
 use super::view::{Geometry, View};
 
+/// The `app_id` reserved for the lazily-spawned pinned terminal (Story
+/// 1.5 will pass this literal to `foot -a pinned-term`). Views registered
+/// with this `app_id` are never returned by
+/// [`WmCore::closable_focused_view`] — the architectural constraint that
+/// the pinned terminal is never closed via a routed keybind
+/// (`architectural-constraints.md`).
+pub const PINNED_TERM_APP_ID: &str = "pinned-term";
+
 /// Errors returned by [`WmCore`]'s mutating API. Every variant indicates a
 /// reference to an id that is not currently registered; no `WmCore`
 /// mutator panics on invalid input (NFR2).
@@ -23,10 +31,22 @@ pub enum WmCoreError {
     /// No view with the given `ViewId` is registered.
     UnknownView,
     /// No tag with the given `TagId` is registered.
+    // Not yet constructed by any production call path — the tag-mutating
+    // methods that can return it (`toggle_view_tag`/`set_output_current_tag`/
+    // `switch_tag`/`mark_terminal_spawned`) aren't wired into `main.rs`
+    // until Story 1.5 (pinned terminal)/1.7 (tag switching).
+    #[allow(dead_code)]
     UnknownTag,
     /// No output with the given `OutputId` is registered.
+    // Not yet constructed by any production call path — `set_output_current_tag`/
+    // `switch_tag` aren't wired into `main.rs` until Story 1.7 (tag
+    // switching).
+    #[allow(dead_code)]
     UnknownOutput,
     /// The tag registry already holds the maximum of 64 tags (ADR-006).
+    // Not yet constructed by any production call path — `create_tag`
+    // isn't wired into `main.rs` until Story 1.7 (tag switching).
+    #[allow(dead_code)]
     TagLimitReached,
 }
 
@@ -53,6 +73,11 @@ pub struct WmCore {
 
 impl WmCore {
     /// Returns a new, empty `WmCore`.
+    // Not yet called from production `main.rs` — `WindowManager`'s
+    // `#[derive(Default)]` constructs its `wm_core` field via
+    // `WmCore::default()` instead. Kept as public constructor API/for
+    // test ergonomics.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         WmCore::default()
     }
@@ -63,6 +88,9 @@ impl WmCore {
     /// [`TagRegistry::create_tag`](super::tag::TagRegistry::create_tag)).
     /// Fails with [`WmCoreError::TagLimitReached`] if the registry already
     /// holds 64 tags.
+    // Not yet wired into `main.rs` — no keybind creates tags yet (Story
+    // 1.7).
+    #[allow(dead_code)]
     pub fn create_tag(&mut self, name: impl Into<String>) -> Result<TagId, WmCoreError> {
         let name = name.into();
         self.tags.create_tag(&name).map_err(|err| match err {
@@ -110,6 +138,9 @@ impl WmCore {
     /// adds it if absent, removes it if present. Fails with
     /// [`WmCoreError::UnknownView`] or [`WmCoreError::UnknownTag`] if
     /// either id is not registered, leaving state unchanged.
+    // Not yet wired into `main.rs` — no keybind toggles view tags yet
+    // (Story 1.7).
+    #[allow(dead_code)]
     pub fn toggle_view_tag(&mut self, view_id: ViewId, tag_id: TagId) -> Result<(), WmCoreError> {
         if !self.tags.contains(tag_id) {
             return Err(WmCoreError::UnknownTag);
@@ -128,6 +159,9 @@ impl WmCore {
 
     /// Sets a view's geometry. Fails with [`WmCoreError::UnknownView`] for
     /// an unregistered id, leaving state unchanged.
+    // Not yet wired into `main.rs` — floating placement/geometry lands
+    // in Story 1.6.
+    #[allow(dead_code)]
     pub fn set_view_geometry(&mut self, id: ViewId, geometry: Geometry) -> Result<(), WmCoreError> {
         let view = self.views.get_mut(&id).ok_or(WmCoreError::UnknownView)?;
         view.geometry = geometry;
@@ -136,6 +170,9 @@ impl WmCore {
 
     /// Sets a view's floating flag. Fails with [`WmCoreError::UnknownView`]
     /// for an unregistered id, leaving state unchanged.
+    // Not yet wired into `main.rs` — floating placement lands in Story
+    // 1.6.
+    #[allow(dead_code)]
     pub fn set_view_floating(&mut self, id: ViewId, floating: bool) -> Result<(), WmCoreError> {
         let view = self.views.get_mut(&id).ok_or(WmCoreError::UnknownView)?;
         view.floating = floating;
@@ -171,6 +208,9 @@ impl WmCore {
 
     /// Registers a new output, returning a fresh, unique [`OutputId`].
     /// The new output starts with `current_tag == None`.
+    // Not yet wired into `main.rs` — no `Event::Output` handler
+    // registers a `wm-core` output yet (Story 1.7, tag switching).
+    #[allow(dead_code)]
     pub fn register_output(&mut self) -> OutputId {
         let id = OutputId(self.next_output_id);
         self.next_output_id += 1;
@@ -191,6 +231,8 @@ impl WmCore {
     /// Leaves state unchanged on any error. This is the raw field-level
     /// primitive only — one-tag-per-output enforcement belongs to
     /// [`WmCore::switch_tag`], layered on top.
+    // Not yet wired into `main.rs` — tag switching lands in Story 1.7.
+    #[allow(dead_code)]
     pub fn set_output_current_tag(
         &mut self,
         output_id: OutputId,
@@ -220,6 +262,9 @@ impl WmCore {
     /// unregistered id never has the side effect of clearing a real,
     /// unrelated output's tag: fails with [`WmCoreError::UnknownOutput`]
     /// or [`WmCoreError::UnknownTag`] and leaves all state unchanged.
+    // Not yet wired into `main.rs` — no keybind switches tags yet
+    // (Story 1.7).
+    #[allow(dead_code)]
     pub fn switch_tag(&mut self, output_id: OutputId, tag_id: TagId) -> Result<(), WmCoreError> {
         if !self.tags.contains(tag_id) {
             return Err(WmCoreError::UnknownTag);
@@ -239,6 +284,9 @@ impl WmCore {
     /// Idempotent: calling this again on an already-spawned tag is a
     /// no-op success. Fails with [`WmCoreError::UnknownTag`] for an
     /// unregistered id.
+    // Not yet wired into `main.rs` — the lazy-spawn-once terminal lands
+    // in Story 1.5.
+    #[allow(dead_code)]
     pub fn mark_terminal_spawned(&mut self, id: TagId) -> Result<(), WmCoreError> {
         self.tags
             .mark_terminal_spawned(id)
@@ -247,6 +295,14 @@ impl WmCore {
 
     /// Returns the stacking/render order, front-to-back (front=bottom,
     /// back=top).
+    // Story 1.4 code-review follow-up (efficiency): `cycle_focus` now
+    // reads `self.stacking_order.front()` directly (O(1), no allocation)
+    // instead of going through this O(n)-allocating accessor, so this has
+    // no current production call site. Kept as public API and exercised
+    // extensively by existing tests (whole-order assertions read far more
+    // naturally as a `Vec`) — Story 1.6's floating-placement work is a
+    // plausible future production caller.
+    #[allow(dead_code)]
     pub fn stacking_order(&self) -> Vec<ViewId> {
         self.stacking_order.iter().copied().collect()
     }
@@ -262,11 +318,54 @@ impl WmCore {
         self.stacking_order.push_back(id);
         Ok(())
     }
+
+    /// Returns the currently-focused view's id, unless it is the pinned
+    /// terminal (`app_id == PINNED_TERM_APP_ID`) or nothing is focused. A
+    /// pure decision query, not a close operation — the actual close
+    /// request and eventual `unregister_view` still happen separately,
+    /// driven by the compositor's own `Closed` event. Never panics
+    /// (NFR2).
+    // Story 1.4 code-review follow-up: no longer called from `main.rs`'s
+    // `Action::Close` arm. This query reflects `WmCore`'s single WM-wide
+    // `focused_view`, which can diverge from a specific seat's own real
+    // focus target under multiple seats (last-seat-processed-wins races
+    // ahead of this call) — using it as the pinned-terminal-close gate
+    // could let the exclusion be bypassed. `main.rs` now checks the
+    // acting seat's own focused `Window.app_id` directly instead. Kept as
+    // public, still-tested API — pure query, harmless, and cheap to
+    // rewire if a future story needs a WM-wide "what's focused and
+    // closable" answer.
+    #[allow(dead_code)]
+    pub fn closable_focused_view(&self) -> Option<ViewId> {
+        let id = self.focused_view?;
+        let view = self.views.get(&id)?;
+        (view.app_id != PINNED_TERM_APP_ID).then_some(id)
+    }
+
+    /// Cycles keyboard focus to the next view in stacking order (FR12):
+    /// moves the front (bottom) of the stacking order to the back (top)
+    /// and focuses it, returning its id. Returns `None` if no views are
+    /// registered, leaving state unchanged. `raise_view`/`set_focus` on
+    /// the front id are guaranteed to succeed since it was just read from
+    /// this same `WmCore`'s own stacking order, so their `Result`s are
+    /// unwrapped rather than propagated (NFR2: safe-by-construction, not
+    /// caller-facing).
+    pub fn cycle_focus(&mut self) -> Option<ViewId> {
+        // `.front()` reads the same element `stacking_order()` would have
+        // returned as its first entry, without that accessor's O(n)
+        // `Vec` clone (Story 1.4 code-review follow-up, efficiency).
+        let front = self.stacking_order.front().copied()?;
+        self.raise_view(front)
+            .expect("front was just read from this WmCore's own stacking order");
+        self.set_focus(front)
+            .expect("front was just read from this WmCore's own stacking order");
+        Some(front)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{WmCore, WmCoreError};
+    use super::{PINNED_TERM_APP_ID, WmCore, WmCoreError};
     use crate::wm_core::ids::{TagId, ViewId};
     use crate::wm_core::view::Geometry;
 
@@ -881,5 +980,123 @@ mod tests {
 
         assert_eq!(core.raise_view(bogus_view), Err(WmCoreError::UnknownView));
         assert_eq!(core, snapshot);
+    }
+
+    #[test]
+    fn closable_focused_view_returns_focused_id_when_not_pinned() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("foot");
+        core.set_focus(view_id).unwrap();
+        assert_eq!(core.closable_focused_view(), Some(view_id));
+    }
+
+    #[test]
+    fn closable_focused_view_returns_none_when_nothing_focused() {
+        let mut core = WmCore::new();
+        core.register_view("foot");
+        assert_eq!(core.closable_focused_view(), None);
+    }
+
+    #[test]
+    fn closable_focused_view_returns_none_for_pinned_terminal_app_id() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view(PINNED_TERM_APP_ID);
+        core.set_focus(view_id).unwrap();
+        assert_eq!(core.closable_focused_view(), None);
+    }
+
+    #[test]
+    fn closable_focused_view_is_a_pure_query_and_never_mutates_state() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("foot");
+        core.set_focus(view_id).unwrap();
+        let snapshot = core.clone();
+        assert_eq!(core.closable_focused_view(), Some(view_id));
+        assert_eq!(
+            core, snapshot,
+            "Some case: closable_focused_view must not mutate state"
+        );
+
+        let mut core = WmCore::new();
+        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        core.set_focus(pinned).unwrap();
+        let snapshot = core.clone();
+        assert_eq!(core.closable_focused_view(), None);
+        assert_eq!(
+            core, snapshot,
+            "None case: closable_focused_view must not mutate state"
+        );
+    }
+
+    #[test]
+    fn cycle_focus_returns_none_when_no_views_registered() {
+        let mut core = WmCore::new();
+        assert_eq!(core.cycle_focus(), None);
+    }
+
+    #[test]
+    fn cycle_focus_moves_front_of_stacking_order_to_back_and_focuses_it() {
+        let mut core = WmCore::new();
+        let a = core.register_view("a");
+        let b = core.register_view("b");
+        let c = core.register_view("c");
+        assert_eq!(core.stacking_order(), vec![a, b, c]);
+
+        assert_eq!(core.cycle_focus(), Some(a));
+        assert_eq!(core.stacking_order(), vec![b, c, a]);
+        assert!(core.views.get(&a).unwrap().focused);
+    }
+
+    #[test]
+    fn cycle_focus_repeated_calls_return_to_original_order_after_a_full_rotation() {
+        let mut core = WmCore::new();
+        let a = core.register_view("a");
+        let b = core.register_view("b");
+        let c = core.register_view("c");
+
+        assert_eq!(core.cycle_focus(), Some(a));
+        assert_eq!(core.stacking_order(), vec![b, c, a]);
+
+        assert_eq!(core.cycle_focus(), Some(b));
+        assert_eq!(core.stacking_order(), vec![c, a, b]);
+
+        assert_eq!(core.cycle_focus(), Some(c));
+        assert_eq!(core.stacking_order(), vec![a, b, c]);
+    }
+
+    #[test]
+    fn cycle_focus_single_view_is_idempotent() {
+        let mut core = WmCore::new();
+        let id = core.register_view("only");
+        assert_eq!(core.cycle_focus(), Some(id));
+        assert_eq!(core.stacking_order(), vec![id]);
+        assert!(core.views.get(&id).unwrap().focused);
+    }
+
+    /// Regression guard for the Story 1.4 code-review follow-up
+    /// (`main.rs`'s click-to-focus path must call `raise_view` to keep
+    /// `wm_core`'s `stacking_order` synchronized with real z-order — see
+    /// `manage_seats`). Exercises the same `raise_view`-then-`cycle_focus`
+    /// interaction in isolation, without any Wayland glue: a prior
+    /// `raise_view` reorder (standing in for click-to-focus) must be what
+    /// `cycle_focus` reads next, not a stale front.
+    #[test]
+    fn cycle_focus_reflects_a_prior_raise_view_reordering() {
+        let mut core = WmCore::new();
+        let a = core.register_view("a");
+        let b = core.register_view("b");
+        let c = core.register_view("c");
+        assert_eq!(core.stacking_order(), vec![a, b, c]);
+
+        // Simulate click-to-focus on `b`: raises it to the back, same as
+        // `manage_seats`'s `interacted` handling now does.
+        core.raise_view(b).unwrap();
+        assert_eq!(core.stacking_order(), vec![a, c, b]);
+
+        // cycle_focus must operate on the resulting order (front == a),
+        // not any order predating the raise_view call.
+        assert_eq!(core.cycle_focus(), Some(a));
+        assert_eq!(core.stacking_order(), vec![c, b, a]);
+        assert!(core.views.get(&a).unwrap().focused);
     }
 }
