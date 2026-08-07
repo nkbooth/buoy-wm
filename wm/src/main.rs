@@ -43,7 +43,18 @@ mod river {
 mod wm_core;
 
 use wm_core::ids::{TagId, ViewId};
-use wm_core::state::{PINNED_TERM_APP_ID, WmCore};
+use wm_core::state::{PINNED_TERM_APP_ID, WmCore, WmCoreError};
+use wm_core::view::DEFAULT_FLOATING_GEOMETRY;
+
+/// Logs `result`'s error (if any) as `"{context}: {e:?}"`, otherwise no-ops.
+/// `wm_core` mutators only fail on invalid/unknown ids that call sites here
+/// already guard against structurally (NFR2) — this exists purely so a
+/// future regression is visible instead of silently discarded.
+fn log_wm_core_err(result: Result<(), WmCoreError>, context: &str) {
+    if let Err(e) = result {
+        eprintln!("{context}: {e:?}");
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum Action {
@@ -272,17 +283,31 @@ impl WindowManager {
 
     fn init_new_windows(&mut self) {
         for window in self.windows.iter_mut().filter(|w| w.new) {
-            window.set_position(window.x, window.y);
-            window.proxy.propose_dimensions(window.width, window.height);
             let view_id = self.wm_core.register_view(&window.app_id);
             window.view_id = Some(view_id);
             if window.app_id == PINNED_TERM_APP_ID {
-                if let Err(e) = self.wm_core.set_view_floating(view_id, false) {
-                    eprintln!("Failed to set pinned terminal non-floating: {e:?}");
-                }
-                if let Err(e) = self.wm_core.lower_view(view_id) {
-                    eprintln!("Failed to lower pinned terminal in stacking order: {e:?}");
-                }
+                window.set_position(window.x, window.y);
+                window.proxy.propose_dimensions(window.width, window.height);
+                log_wm_core_err(
+                    self.wm_core.set_view_floating(view_id, false),
+                    "Failed to set pinned terminal non-floating",
+                );
+                log_wm_core_err(
+                    self.wm_core.lower_view(view_id),
+                    "Failed to lower pinned terminal in stacking order",
+                );
+            } else {
+                log_wm_core_err(
+                    self.wm_core
+                        .set_view_geometry(view_id, DEFAULT_FLOATING_GEOMETRY),
+                    "Failed to set default floating geometry",
+                );
+                window.set_position(DEFAULT_FLOATING_GEOMETRY.x, DEFAULT_FLOATING_GEOMETRY.y);
+                window.proxy.propose_dimensions(
+                    DEFAULT_FLOATING_GEOMETRY.width,
+                    DEFAULT_FLOATING_GEOMETRY.height,
+                );
+                window.node.place_top();
             }
             window.new = false;
         }

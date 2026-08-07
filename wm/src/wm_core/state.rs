@@ -159,9 +159,9 @@ impl WmCore {
 
     /// Sets a view's geometry. Fails with [`WmCoreError::UnknownView`] for
     /// an unregistered id, leaving state unchanged.
-    // Not yet wired into `main.rs` — floating placement/geometry lands
-    // in Story 1.6.
-    #[allow(dead_code)]
+    // Wired into `main.rs`'s `init_new_windows` since Story 1.6, which
+    // applies `DEFAULT_FLOATING_GEOMETRY` to every non-pinned view on
+    // registration.
     pub fn set_view_geometry(&mut self, id: ViewId, geometry: Geometry) -> Result<(), WmCoreError> {
         let view = self.views.get_mut(&id).ok_or(WmCoreError::UnknownView)?;
         view.geometry = geometry;
@@ -441,7 +441,7 @@ impl WmCore {
 mod tests {
     use super::{PINNED_TERM_APP_ID, WmCore, WmCoreError};
     use crate::wm_core::ids::{TagId, ViewId};
-    use crate::wm_core::view::Geometry;
+    use crate::wm_core::view::{DEFAULT_FLOATING_GEOMETRY, Geometry};
 
     #[test]
     fn register_view_returns_fresh_unique_ids() {
@@ -582,6 +582,37 @@ mod tests {
             core.set_view_geometry(bogus_view, geometry),
             Err(WmCoreError::UnknownView)
         );
+    }
+
+    #[test]
+    fn default_floating_geometry_has_expected_literal_value() {
+        assert_eq!(
+            DEFAULT_FLOATING_GEOMETRY,
+            Geometry {
+                x: 100,
+                y: 100,
+                width: 800,
+                height: 600,
+            }
+        );
+    }
+
+    #[test]
+    fn default_floating_geometry_applies_independently_to_multiple_views() {
+        let mut core = WmCore::new();
+        let view_a = core.register_view("app-a");
+        let view_b = core.register_view("app-b");
+        core.set_view_geometry(view_a, DEFAULT_FLOATING_GEOMETRY)
+            .unwrap();
+        core.set_view_geometry(view_b, DEFAULT_FLOATING_GEOMETRY)
+            .unwrap();
+
+        let recorded_a = core.views.get(&view_a).unwrap();
+        let recorded_b = core.views.get(&view_b).unwrap();
+        assert_eq!(recorded_a.geometry, DEFAULT_FLOATING_GEOMETRY);
+        assert_eq!(recorded_b.geometry, DEFAULT_FLOATING_GEOMETRY);
+        assert!(recorded_a.floating);
+        assert!(recorded_b.floating);
     }
 
     #[test]
