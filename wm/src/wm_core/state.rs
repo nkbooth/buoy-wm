@@ -189,8 +189,8 @@ impl WmCore {
     /// always succeeds and clears the field. Fails with
     /// [`WmCoreError::UnknownOutput`] if `output_id` is not registered.
     /// Leaves state unchanged on any error. This is the raw field-level
-    /// primitive only — one-tag-per-output enforcement belongs to a later
-    /// story's `switch_tag` operation layered on top.
+    /// primitive only — one-tag-per-output enforcement belongs to
+    /// [`WmCore::switch_tag`], layered on top.
     pub fn set_output_current_tag(
         &mut self,
         output_id: OutputId,
@@ -207,6 +207,32 @@ impl WmCore {
             .ok_or(WmCoreError::UnknownOutput)?;
         output.current_tag = tag_id;
         Ok(())
+    }
+
+    /// Displays `tag_id` on `output_id`, enforcing the ADR-005 one-tag-
+    /// per-output invariant (FR2): if `tag_id` is currently displayed on a
+    /// *different* registered output, that output's `current_tag` is
+    /// cleared (rerouted) before the target output is updated, so no two
+    /// outputs ever simultaneously report the same `Some(tag)`. Reroutes
+    /// rather than rejects (see this story's Technical notes). A no-op
+    /// success if `tag_id` is already `output_id`'s current tag. Both
+    /// `output_id` and `tag_id` are validated before any mutation, so an
+    /// unregistered id never has the side effect of clearing a real,
+    /// unrelated output's tag: fails with [`WmCoreError::UnknownOutput`]
+    /// or [`WmCoreError::UnknownTag`] and leaves all state unchanged.
+    pub fn switch_tag(&mut self, output_id: OutputId, tag_id: TagId) -> Result<(), WmCoreError> {
+        if !self.tags.contains(tag_id) {
+            return Err(WmCoreError::UnknownTag);
+        }
+        if !self.outputs.contains_key(&output_id) {
+            return Err(WmCoreError::UnknownOutput);
+        }
+        for (&other_id, other) in self.outputs.iter_mut() {
+            if other_id != output_id && other.current_tag == Some(tag_id) {
+                other.current_tag = None;
+            }
+        }
+        self.set_output_current_tag(output_id, Some(tag_id))
     }
 
     /// Marks the tag's lazy-spawn-once terminal as having been spawned.
@@ -492,6 +518,176 @@ mod tests {
             .unwrap();
         core.set_output_current_tag(output_id, None).unwrap();
         assert_eq!(core.outputs.get(&output_id).unwrap().current_tag, None);
+    }
+
+    #[test]
+    fn switch_tag_sets_current_tag_on_output_showing_none() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        assert_eq!(core.switch_tag(output_id, tag_id), Ok(()));
+        assert_eq!(
+            core.outputs.get(&output_id).unwrap().current_tag,
+            Some(tag_id)
+        );
+    }
+
+    #[test]
+    fn switch_tag_replaces_output_own_previously_displayed_tag() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_a = core.create_tag("web").unwrap();
+        let tag_b = core.create_tag("term").unwrap();
+        core.switch_tag(output_id, tag_a).unwrap();
+        assert_eq!(core.switch_tag(output_id, tag_b), Ok(()));
+        assert_eq!(
+            core.outputs.get(&output_id).unwrap().current_tag,
+            Some(tag_b)
+        );
+    }
+
+    #[test]
+    fn switch_tag_already_displayed_on_same_output_is_idempotent_no_op() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        core.switch_tag(output_id, tag_id).unwrap();
+        assert_eq!(core.switch_tag(output_id, tag_id), Ok(()));
+        assert_eq!(
+            core.outputs.get(&output_id).unwrap().current_tag,
+            Some(tag_id)
+        );
+    }
+
+    #[test]
+    fn switch_tag_reroutes_tag_away_from_previous_output() {
+        let mut core = WmCore::new();
+        let o1 = core.register_output();
+        let o2 = core.register_output();
+        let tag_b = core.create_tag("web").unwrap();
+        core.switch_tag(o1, tag_b).unwrap();
+
+        assert_eq!(core.switch_tag(o2, tag_b), Ok(()));
+        assert_eq!(core.outputs.get(&o2).unwrap().current_tag, Some(tag_b));
+        assert_eq!(
+            core.outputs.get(&o1).unwrap().current_tag,
+            None,
+            "rerouting tag_b onto o2 must clear it from o1"
+        );
+    }
+
+    #[test]
+    fn switch_tag_reroute_leaves_unrelated_outputs_and_tags_untouched() {
+        let mut core = WmCore::new();
+        let o1 = core.register_output();
+        let o2 = core.register_output();
+        let o3 = core.register_output();
+        let tag_b = core.create_tag("web").unwrap();
+        let tag_c = core.create_tag("term").unwrap();
+        core.switch_tag(o1, tag_b).unwrap();
+        core.switch_tag(o2, tag_c).unwrap();
+
+        assert_eq!(core.switch_tag(o3, tag_b), Ok(()));
+        assert_eq!(
+            core.outputs.get(&o1).unwrap().current_tag,
+            None,
+            "o1 loses tag_b to the reroute"
+        );
+        assert_eq!(
+            core.outputs.get(&o2).unwrap().current_tag,
+            Some(tag_c),
+            "o2's unrelated tag_c must be untouched by a tag_b reroute"
+        );
+        assert_eq!(core.outputs.get(&o3).unwrap().current_tag, Some(tag_b));
+    }
+
+    /// Scans `outputs` for two different outputs simultaneously reporting
+    /// the same `Some(tag)` — the ADR-005 invariant `switch_tag` must
+    /// never let slip, even transiently between calls in a sequence.
+    fn assert_no_duplicate_current_tags(core: &WmCore) {
+        let mut seen = Vec::new();
+        for output in core.outputs.values() {
+            if let Some(tag) = output.current_tag {
+                assert!(
+                    !seen.contains(&tag),
+                    "tag {tag:?} is simultaneously displayed on two outputs"
+                );
+                seen.push(tag);
+            }
+        }
+    }
+
+    #[test]
+    fn switch_tag_sequence_across_three_outputs_never_duplicates_a_tag() {
+        let mut core = WmCore::new();
+        let o1 = core.register_output();
+        let o2 = core.register_output();
+        let o3 = core.register_output();
+        let tag_b = core.create_tag("web").unwrap();
+        let tag_c = core.create_tag("term").unwrap();
+
+        core.switch_tag(o1, tag_b).unwrap();
+        assert_no_duplicate_current_tags(&core);
+
+        core.switch_tag(o2, tag_b).unwrap();
+        assert_no_duplicate_current_tags(&core);
+
+        core.switch_tag(o1, tag_c).unwrap();
+        assert_no_duplicate_current_tags(&core);
+
+        core.switch_tag(o3, tag_b).unwrap();
+        assert_no_duplicate_current_tags(&core);
+    }
+
+    #[test]
+    fn switch_tag_unregistered_output_returns_error_and_leaves_state_unchanged() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("web").unwrap();
+        let bogus_output = crate::wm_core::ids::OutputId(999);
+        let snapshot = core.clone();
+        assert_eq!(
+            core.switch_tag(bogus_output, tag_id),
+            Err(WmCoreError::UnknownOutput)
+        );
+        assert_eq!(core, snapshot);
+    }
+
+    #[test]
+    fn switch_tag_unregistered_tag_returns_error_and_leaves_state_unchanged() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let bogus_tag = TagId(63);
+        let snapshot = core.clone();
+        assert_eq!(
+            core.switch_tag(output_id, bogus_tag),
+            Err(WmCoreError::UnknownTag)
+        );
+        assert_eq!(core, snapshot);
+    }
+
+    /// Regression guard: an unregistered `tag_id` must fail validation
+    /// before the reroute loop ever runs, so a real, unrelated, valid
+    /// output's real tag is never cleared as a side effect of a failed
+    /// call. Would fail under a naive "reroute first, validate last"
+    /// ordering (the reroute loop would find no output showing the bogus
+    /// tag and leave O1 alone by coincidence in the 2-output case, but the
+    /// point is to lock the *ordering* in place as a named guard against
+    /// that bug class regardless of implementation strategy).
+    #[test]
+    fn switch_tag_bogus_tag_cannot_clear_unrelated_valid_output() {
+        let mut core = WmCore::new();
+        let o1 = core.register_output();
+        let o2 = core.register_output();
+        let tag_a = core.create_tag("web").unwrap();
+        core.switch_tag(o1, tag_a).unwrap();
+        let bogus_tag = TagId(63);
+
+        assert_eq!(core.switch_tag(o2, bogus_tag), Err(WmCoreError::UnknownTag));
+        assert_eq!(
+            core.outputs.get(&o1).unwrap().current_tag,
+            Some(tag_a),
+            "a failed switch_tag call must not clear an unrelated, valid output's tag"
+        );
     }
 
     #[test]
