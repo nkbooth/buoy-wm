@@ -31,22 +31,20 @@ pub enum WmCoreError {
     /// No view with the given `ViewId` is registered.
     UnknownView,
     /// No tag with the given `TagId` is registered.
-    // Not yet constructed by any production call path — the tag-mutating
-    // methods that can return it (`toggle_view_tag`/`set_output_current_tag`/
-    // `switch_tag`/`mark_terminal_spawned`) aren't wired into `main.rs`
-    // until Story 1.5 (pinned terminal)/1.7 (tag switching).
-    #[allow(dead_code)]
+    // Constructible via a live path since Story 1.7 wired `switch_tag`
+    // (through `cycle_tag`), `set_output_current_tag`, and `create_tag`
+    // into `main.rs`'s tag-cycle/tag-create keybinds. `toggle_view_tag`
+    // remains unwired (deferred to Epic 2's assign-mode picker), but this
+    // variant has other live producers.
     UnknownTag,
     /// No output with the given `OutputId` is registered.
-    // Not yet constructed by any production call path — `set_output_current_tag`/
-    // `switch_tag` aren't wired into `main.rs` until Story 1.7 (tag
-    // switching).
-    #[allow(dead_code)]
+    // Constructible via a live path since Story 1.7 wired `switch_tag`
+    // (through `cycle_tag`) into `main.rs`'s tag-cycle keybind.
     UnknownOutput,
     /// The tag registry already holds the maximum of 64 tags (ADR-006).
-    // Not yet constructed by any production call path — `create_tag`
-    // isn't wired into `main.rs` until Story 1.7 (tag switching).
-    #[allow(dead_code)]
+    // Constructible via a live path since Story 1.7 wired `create_tag`
+    // (through `create_tag_with_generated_name`) into `main.rs`'s
+    // tag-create keybind.
     TagLimitReached,
 }
 
@@ -88,15 +86,36 @@ impl WmCore {
     /// [`TagRegistry::create_tag`](super::tag::TagRegistry::create_tag)).
     /// Fails with [`WmCoreError::TagLimitReached`] if the registry already
     /// holds 64 tags.
-    // Not yet wired into `main.rs` — no keybind creates tags yet (Story
-    // 1.7).
-    #[allow(dead_code)]
+    // Wired into `main.rs`'s tag-create keybind since Story 1.7, via
+    // `create_tag_with_generated_name`.
     pub fn create_tag(&mut self, name: impl Into<String>) -> Result<TagId, WmCoreError> {
         let name = name.into();
         self.tags.create_tag(&name).map_err(|err| match err {
             TagRegistryError::Full => WmCoreError::TagLimitReached,
             TagRegistryError::UnknownTag => WmCoreError::UnknownTag,
         })
+    }
+
+    /// Creates a tag with a generated placeholder name (`tag<N>`, where
+    /// `N` is the registry's current tag count at the moment of creation),
+    /// delegating entirely to [`WmCore::create_tag`] — no separately
+    /// invented id-assignment or dedup logic. This is the pure decision
+    /// `main.rs`'s tag-create keybind calls in place of a text-input UI
+    /// that doesn't exist yet (Epic 2). Fails with
+    /// [`WmCoreError::TagLimitReached`] if the registry already holds 64
+    /// tags.
+    ///
+    /// Known, accepted collision risk: since `create_tag` is idempotent by
+    /// name, a tag literally named `tag<N>` created through some other path
+    /// (e.g. Epic 2's future free-text picker) before this generator's own
+    /// counter reaches `N` would cause this method to silently return that
+    /// existing tag's id rather than creating a new one. Harmless (no data
+    /// corruption, no panic) but flagged, not hidden — see this story's
+    /// Technical notes ("Generated-name collision risk"). Not a concern
+    /// today: this keybind is the only tag-creation path that exists.
+    pub fn create_tag_with_generated_name(&mut self) -> Result<TagId, WmCoreError> {
+        let name = format!("tag{}", self.tags.count());
+        self.create_tag(name)
     }
 
     /// Registers a new view for `app_id`, returning a fresh, unique
@@ -138,8 +157,9 @@ impl WmCore {
     /// adds it if absent, removes it if present. Fails with
     /// [`WmCoreError::UnknownView`] or [`WmCoreError::UnknownTag`] if
     /// either id is not registered, leaving state unchanged.
-    // Not yet wired into `main.rs` — no keybind toggles view tags yet
-    // (Story 1.7).
+    // Not yet wired into `main.rs` — deliberately out of scope for Story
+    // 1.7, which wires tag switching/creation but not window-tag toggling.
+    // View-tag assignment is Epic 2's assign-mode picker.
     #[allow(dead_code)]
     pub fn toggle_view_tag(&mut self, view_id: ViewId, tag_id: TagId) -> Result<(), WmCoreError> {
         if !self.tags.contains(tag_id) {
@@ -207,9 +227,9 @@ impl WmCore {
 
     /// Registers a new output, returning a fresh, unique [`OutputId`].
     /// The new output starts with `current_tag == None`.
-    // Not yet wired into `main.rs` — no `Event::Output` handler
-    // registers a `wm-core` output yet (Story 1.7, tag switching).
-    #[allow(dead_code)]
+    // Wired into `main.rs`'s `Event::Output` handler since Story 1.7,
+    // which registers a fresh `wm-core` output the moment a real output
+    // appears.
     pub fn register_output(&mut self) -> OutputId {
         let id = OutputId(self.next_output_id);
         self.next_output_id += 1;
@@ -230,8 +250,8 @@ impl WmCore {
     /// Leaves state unchanged on any error. This is the raw field-level
     /// primitive only — one-tag-per-output enforcement belongs to
     /// [`WmCore::switch_tag`], layered on top.
-    // Not yet wired into `main.rs` — tag switching lands in Story 1.7.
-    #[allow(dead_code)]
+    // Wired into `main.rs` since Story 1.7, transitively via `switch_tag`
+    // (itself called from `cycle_tag`, the tag-cycle keybind's decision).
     pub fn set_output_current_tag(
         &mut self,
         output_id: OutputId,
@@ -261,9 +281,9 @@ impl WmCore {
     /// unregistered id never has the side effect of clearing a real,
     /// unrelated output's tag: fails with [`WmCoreError::UnknownOutput`]
     /// or [`WmCoreError::UnknownTag`] and leaves all state unchanged.
-    // Not yet wired into `main.rs` — no keybind switches tags yet
-    // (Story 1.7).
-    #[allow(dead_code)]
+    // Wired into `main.rs`'s tag-cycle keybind since Story 1.7, via
+    // `cycle_tag` (which composes this rather than duplicating its
+    // enforcement).
     pub fn switch_tag(&mut self, output_id: OutputId, tag_id: TagId) -> Result<(), WmCoreError> {
         if !self.tags.contains(tag_id) {
             return Err(WmCoreError::UnknownTag);
@@ -279,13 +299,42 @@ impl WmCore {
         self.set_output_current_tag(output_id, Some(tag_id))
     }
 
+    /// Advances `output_id`'s current tag to the next tag in the registry's
+    /// creation order (wrapping back to the first tag after the last, and
+    /// starting at the first tag when `current_tag` is `None` or is a tag
+    /// no longer found in the registry — defensive only; unreachable today
+    /// since tags are never deleted, ADR-006). Returns `Ok(Some(next_tag))`
+    /// on success, or `Ok(None)` (no mutation) if the registry holds no
+    /// tags. Fails with [`WmCoreError::UnknownOutput`] for an unregistered
+    /// `output_id`, leaving state unchanged.
+    ///
+    /// This is the pure decision `main.rs`'s tag-cycle keybind calls. It
+    /// deliberately delegates the actual field write and ADR-005
+    /// cross-output reroute enforcement to [`WmCore::switch_tag`] rather
+    /// than reimplementing it — the same functions Epic 2's IPC handlers
+    /// will call, so there is only one place the "next tag" rule can live.
+    pub fn cycle_tag(&mut self, output_id: OutputId) -> Result<Option<TagId>, WmCoreError> {
+        let output = self
+            .outputs
+            .get(&output_id)
+            .ok_or(WmCoreError::UnknownOutput)?;
+        let current_tag = output.current_tag;
+        let ids = self.tags.ids();
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let next = match current_tag.and_then(|current| ids.iter().position(|&id| id == current)) {
+            Some(index) => ids[(index + 1) % ids.len()],
+            None => ids[0],
+        };
+        self.switch_tag(output_id, next)?;
+        Ok(Some(next))
+    }
+
     /// Marks the tag's lazy-spawn-once terminal as having been spawned.
     /// Idempotent: calling this again on an already-spawned tag is a
     /// no-op success. Fails with [`WmCoreError::UnknownTag`] for an
     /// unregistered id.
-    // Not yet wired into `main.rs` — the lazy-spawn-once terminal lands
-    // in Story 1.5.
-    #[allow(dead_code)]
     pub fn mark_terminal_spawned(&mut self, id: TagId) -> Result<(), WmCoreError> {
         self.tags
             .mark_terminal_spawned(id)
@@ -304,10 +353,8 @@ impl WmCore {
     /// `tag_terminal_spawned`/`tag_name` queries, so no caller can
     /// accidentally check without claiming or claim twice. Fails with
     /// [`WmCoreError::UnknownTag`] for an unregistered id.
-    // Not yet wired into `main.rs` — the lazy-spawn-once terminal's
-    // production call site lands in Story 1.7 (see `main.rs`'s
-    // `ensure_pinned_terminal_spawned`, dormant until then).
-    #[allow(dead_code)]
+    // Wired into `main.rs`'s tag-cycle/tag-create keybind path since Story
+    // 1.7, via `ensure_pinned_terminal_spawned`.
     pub fn claim_pinned_terminal_spawn(
         &mut self,
         tag_id: TagId,
@@ -895,6 +942,119 @@ mod tests {
     }
 
     #[test]
+    fn cycle_tag_from_none_current_selects_first_tag_in_registry() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_a = core.create_tag("a").unwrap();
+        let _tag_b = core.create_tag("b").unwrap();
+        assert_eq!(core.cycle_tag(output_id), Ok(Some(tag_a)));
+        assert_eq!(
+            core.outputs.get(&output_id).unwrap().current_tag,
+            Some(tag_a)
+        );
+    }
+
+    #[test]
+    fn cycle_tag_advances_to_next_tag_in_creation_order() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let _tag_a = core.create_tag("a").unwrap();
+        let tag_b = core.create_tag("b").unwrap();
+        core.cycle_tag(output_id).unwrap();
+        assert_eq!(core.cycle_tag(output_id), Ok(Some(tag_b)));
+    }
+
+    #[test]
+    fn cycle_tag_wraps_around_to_first_tag_after_last() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_a = core.create_tag("a").unwrap();
+        let _tag_b = core.create_tag("b").unwrap();
+        core.cycle_tag(output_id).unwrap();
+        core.cycle_tag(output_id).unwrap();
+        assert_eq!(core.cycle_tag(output_id), Ok(Some(tag_a)));
+    }
+
+    #[test]
+    fn cycle_tag_returns_ok_none_when_no_tags_registered() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        assert_eq!(core.cycle_tag(output_id), Ok(None));
+        assert_eq!(core.outputs.get(&output_id).unwrap().current_tag, None);
+    }
+
+    #[test]
+    fn cycle_tag_unknown_output_returns_error_and_leaves_state_unchanged() {
+        let mut core = WmCore::new();
+        core.create_tag("a").unwrap();
+        let bogus_output = crate::wm_core::ids::OutputId(999);
+        let snapshot = core.clone();
+        assert_eq!(
+            core.cycle_tag(bogus_output),
+            Err(WmCoreError::UnknownOutput)
+        );
+        assert_eq!(core, snapshot);
+    }
+
+    #[test]
+    fn cycle_tag_reuses_switch_tag_enforcement_and_reroutes_away_from_other_output() {
+        let mut core = WmCore::new();
+        let o1 = core.register_output();
+        let o2 = core.register_output();
+        let tag_a = core.create_tag("a").unwrap();
+        core.switch_tag(o1, tag_a).unwrap();
+
+        assert_eq!(core.cycle_tag(o2), Ok(Some(tag_a)));
+        assert_eq!(core.outputs.get(&o2).unwrap().current_tag, Some(tag_a));
+        assert_eq!(
+            core.outputs.get(&o1).unwrap().current_tag,
+            None,
+            "cycle_tag must reuse switch_tag's own reroute enforcement, not a separate write path"
+        );
+    }
+
+    #[test]
+    fn create_tag_with_generated_name_uses_tag_n_naming_convention() {
+        let mut core = WmCore::new();
+        let first = core.create_tag_with_generated_name().unwrap();
+        assert_eq!(core.tags.get(first).unwrap().name, "tag0");
+        let second = core.create_tag_with_generated_name().unwrap();
+        assert_eq!(core.tags.get(second).unwrap().name, "tag1");
+    }
+
+    #[test]
+    fn create_tag_with_generated_name_returns_fresh_ids_on_repeated_calls() {
+        let mut core = WmCore::new();
+        let first = core.create_tag_with_generated_name().unwrap();
+        let second = core.create_tag_with_generated_name().unwrap();
+        let third = core.create_tag_with_generated_name().unwrap();
+        assert_ne!(first, second);
+        assert_ne!(second, third);
+        assert_ne!(first, third);
+    }
+
+    #[test]
+    fn create_tag_with_generated_name_fails_when_registry_full() {
+        let mut core = WmCore::new();
+        for i in 0..64 {
+            core.create_tag(format!("tag{i}")).unwrap();
+        }
+        assert_eq!(
+            core.create_tag_with_generated_name(),
+            Err(WmCoreError::TagLimitReached)
+        );
+        assert_eq!(core.tags.count(), 64);
+    }
+
+    #[test]
+    fn create_tag_with_generated_name_delegates_to_create_tag_no_new_ids_by_construction() {
+        let mut core = WmCore::new();
+        let id = core.create_tag_with_generated_name().unwrap();
+        let tag = core.tags.get(id).expect("id must be a real, present tag");
+        assert_eq!(tag.name, "tag0");
+    }
+
+    #[test]
     fn create_tag_returns_fresh_id_via_public_api() {
         let mut core = WmCore::new();
         let id = core.create_tag("web").unwrap();
@@ -1238,6 +1398,12 @@ mod tests {
         assert_eq!(
             core.set_output_current_tag(valid_output, Some(bogus_tag)),
             Err(WmCoreError::UnknownTag)
+        );
+        assert_eq!(core, snapshot);
+
+        assert_eq!(
+            core.cycle_tag(bogus_output),
+            Err(WmCoreError::UnknownOutput)
         );
         assert_eq!(core, snapshot);
 

@@ -42,7 +42,7 @@ mod river {
 
 mod wm_core;
 
-use wm_core::ids::{TagId, ViewId};
+use wm_core::ids::{OutputId, TagId, ViewId};
 use wm_core::state::{PINNED_TERM_APP_ID, WmCore, WmCoreError};
 use wm_core::view::DEFAULT_FLOATING_GEOMETRY;
 
@@ -65,6 +65,8 @@ enum Action {
     Move,
     Resize,
     Exit,
+    TagCycle,
+    TagCreate,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +123,7 @@ struct Window {
 struct Output {
     proxy: RiverOutputV1,
     removed: bool,
+    output_id: OutputId,
 }
 
 #[derive(Debug)]
@@ -313,17 +316,12 @@ impl WindowManager {
         }
     }
 
-    /// Composes Tasks 2-3: claims the lazy-spawn-once pinned-terminal slot
-    /// for `tag_id` and, if this is the first claim, spawns it. This is
-    /// the method Story 1.7's tag-switch keybind handler will call
-    /// immediately after a successful `self.wm_core.switch_tag(output_id,
-    /// tag_id)` — deliberately *not* calling `switch_tag` itself, so this
-    /// story doesn't have to pre-decide Story 1.7's own call convention
-    /// (e.g. which output, how the active output is determined) for a
-    /// keybind that doesn't exist yet.
-    // No production call site yet — Story 1.7 adds the tag-switch keybind
-    // that calls this after `wm_core.switch_tag`.
-    #[allow(dead_code)]
+    /// Composes Story 1.5's Tasks 2-3: claims the lazy-spawn-once
+    /// pinned-terminal slot for `tag_id` and, if this is the first claim,
+    /// spawns it. Called from `manage_seats`, once per tag that a seat's
+    /// `Action::TagCycle` just switched an output onto (Story 1.7) —
+    /// deliberately called after (not during) the seat loop that holds
+    /// `wm_core`'s mutable borrow.
     fn ensure_pinned_terminal_spawned(&mut self, tag_id: TagId) {
         match self.wm_core.claim_pinned_terminal_spawn(tag_id) {
             Ok(Some(session_name)) => spawn_pinned_terminal(&session_name),
@@ -340,6 +338,8 @@ impl WindowManager {
         const N: u32 = 0x6e;
         const Q: u32 = 0x71;
         const ESC: u32 = 0xff1b;
+        const TAB: u32 = 0xff09;
+        const T: u32 = 0x74;
         // See linux/input-event-codes.h
         const BTN_LEFT: u32 = 0x110;
         const BTN_RIGHT: u32 = 0x111;
@@ -351,6 +351,8 @@ impl WindowManager {
                 seat.create_xkb_binding(river_xkb, qh, mods, Q, Action::Close);
                 seat.create_xkb_binding(river_xkb, qh, mods, N, Action::FocusNext);
                 seat.create_xkb_binding(river_xkb, qh, mods, ESC, Action::Exit);
+                seat.create_xkb_binding(river_xkb, qh, mods, TAB, Action::TagCycle);
+                seat.create_xkb_binding(river_xkb, qh, mods, T, Action::TagCreate);
                 seat.create_pointer_binding(qh, mods, BTN_LEFT, Action::Move);
                 seat.create_pointer_binding(qh, mods, BTN_RIGHT, Action::Resize);
                 seat.new = false;
@@ -377,7 +379,25 @@ impl WindowManager {
         }
     }
 
+    /// The deterministic "active output" for keybind-driven tag actions:
+    /// the lowest-`OutputId` (first-registered) output. Real focused-output
+    /// tracking has no live protocol signal to compute from yet (see Story
+    /// 1.7's Description/Technical notes) — this is a conscious,
+    /// documented scope boundary, correct-by-construction for the dominant
+    /// single-output case (ADR-005) and at least deterministic under
+    /// multi-output, not a hidden guess.
+    fn active_output_id(&self) -> Option<OutputId> {
+        self.outputs.values().map(|o| o.output_id).min()
+    }
+
     fn manage_seats(&mut self, wm_proxy: &RiverWindowManagerV1) {
+        // Computed before the `&mut self.wm_core` borrow below begins:
+        // `active_output_id` is a whole-`&self` method call (it reads
+        // `self.outputs`), which cannot run *during* the loop's mutable
+        // `wm_core` borrow even though the two fields are disjoint (Story
+        // 1.7).
+        let active_output_id = self.active_output_id();
+        let mut pending_terminal_spawns: Vec<TagId> = Vec::new();
         let wm_core = &mut self.wm_core;
         for seat in self.seats.values_mut() {
             // Code review follow-up (Story 1.5, finding #2): when the
@@ -437,13 +457,28 @@ impl WindowManager {
             if !pinned_terminal_focused_directly {
                 seat.focus_top(&self.windows, wm_core);
             }
-            seat.do_action(&mut self.windows, wm_proxy, wm_core);
+            if let Some(tag_id) =
+                seat.do_action(&mut self.windows, wm_proxy, wm_core, active_output_id)
+            {
+                pending_terminal_spawns.push(tag_id);
+            }
             if seat.op_release {
                 seat.op_end();
                 seat.op_release = false;
             } else {
                 seat.op_manage();
             }
+        }
+        // First production call site for `ensure_pinned_terminal_spawned`
+        // (dormant since Story 1.5): run after the seat loop, not inside
+        // it, so this borrow starts only once `wm_core`'s mutable borrow
+        // above has ended (NLL). Multiple seats cycling onto the same tag
+        // in one pass is harmless — `claim_pinned_terminal_spawn` is
+        // already idempotent (Story 1.5), so a duplicate entry here just
+        // resolves to a no-op `Ok(None)` on the second call (YAGNI: no
+        // dedup needed).
+        for tag_id in pending_terminal_spawns {
+            self.ensure_pinned_terminal_spawned(tag_id);
         }
     }
 }
@@ -476,10 +511,11 @@ impl Window {
 }
 
 impl Output {
-    fn new(proxy: RiverOutputV1) -> Self {
+    fn new(proxy: RiverOutputV1, output_id: OutputId) -> Self {
         Self {
             proxy,
             removed: false,
+            output_id,
         }
     }
 }
@@ -490,10 +526,8 @@ impl Output {
 /// reinvention). Arguments are passed individually to `Command`, not
 /// through a shell, so arbitrary tag names in `session_name` carry no
 /// shell-injection risk regardless of their contents.
-// No production call site yet — `ensure_pinned_terminal_spawned` is the
-// only caller, and it has no call site until Story 1.7 adds the tag-switch
-// keybind that triggers this whole chain.
-#[allow(dead_code)]
+// Called from `ensure_pinned_terminal_spawned`, which gained its own
+// production call site in `manage_seats` in Story 1.7.
 fn spawn_pinned_terminal(session_name: &str) {
     match std::process::Command::new("foot")
         .arg("-a")
@@ -558,23 +592,38 @@ impl Seat {
         self.pointer_bindings.insert(binding.proxy.id(), binding);
     }
 
+    /// Executes `self.pending_action`, returning `Some(tag_id)` when the
+    /// action just switched the active output onto `tag_id` — the signal
+    /// `manage_seats` uses, after this seat loop ends, to ensure that tag's
+    /// pinned terminal is spawned (`WindowManager::ensure_pinned_terminal_spawned`).
+    /// Every other arm returns `None`. `active_output_id` is the
+    /// deterministic "active output" `Action::TagCycle` acts on (see
+    /// `WindowManager::active_output_id`); `Action::TagCreate` never
+    /// switches any output (AC: "creating a tag does not switch any output
+    /// to it"), so it never returns `Some`.
     fn do_action(
         &mut self,
         windows: &mut VecDeque<Window>,
         wm_proxy: &RiverWindowManagerV1,
         wm_core: &mut WmCore,
-    ) {
-        match self.pending_action {
-            Action::None => {}
+        active_output_id: Option<OutputId>,
+    ) -> Option<TagId> {
+        let pending_action = self.pending_action;
+        self.pending_action = Action::None;
+        match pending_action {
+            Action::None => None,
             // Don't pass WAYLAND_DEBUG on to children, the added noise makes
             // debugging the window manager itself impractical.
-            Action::SpawnFoot => match std::process::Command::new("foot")
-                .env_remove("WAYLAND_DEBUG")
-                .spawn()
-            {
-                Ok(_) => {}
-                Err(e) => eprintln!("Failed to spawn foot: {e}"),
-            },
+            Action::SpawnFoot => {
+                match std::process::Command::new("foot")
+                    .env_remove("WAYLAND_DEBUG")
+                    .spawn()
+                {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Failed to spawn foot: {e}"),
+                }
+                None
+            }
             Action::Close => {
                 // Check the pinned-terminal exclusion against this seat's
                 // own real focus target (self.focused's Window.app_id),
@@ -598,6 +647,7 @@ impl Seat {
                         window_proxy.close();
                     }
                 }
+                None
             }
             Action::FocusNext => {
                 // wm_core.cycle_focus()'s returned ViewId is the source of
@@ -641,6 +691,7 @@ impl Seat {
                         self.focus_top(windows, wm_core);
                     }
                 }
+                None
             }
             Action::Move => {
                 if let (Some(window_proxy), SeatOp::None) = (self.hovered.as_ref(), &self.op) {
@@ -650,6 +701,7 @@ impl Seat {
                         .expect("Hovered window not found");
                     self.pointer_move(window);
                 }
+                None
             }
             Action::Resize => {
                 if let (Some(window_proxy), SeatOp::None) = (self.hovered.as_ref(), &self.op) {
@@ -659,10 +711,33 @@ impl Seat {
                         .expect("Hovered window not found");
                     self.pointer_resize(window, Edges::Bottom.union(Edges::Right));
                 }
+                None
             }
-            Action::Exit => wm_proxy.exit_session(),
+            Action::Exit => {
+                wm_proxy.exit_session();
+                None
+            }
+            Action::TagCycle => match active_output_id {
+                Some(output_id) => match wm_core.cycle_tag(output_id) {
+                    Ok(Some(tag_id)) => Some(tag_id),
+                    Ok(None) => None,
+                    Err(e) => {
+                        eprintln!("Failed to cycle tag on output {output_id:?}: {e:?}");
+                        None
+                    }
+                },
+                None => {
+                    eprintln!("Tag-cycle keybind pressed but no output is registered yet");
+                    None
+                }
+            },
+            Action::TagCreate => {
+                if let Err(e) = wm_core.create_tag_with_generated_name() {
+                    eprintln!("Failed to create tag: {e:?}");
+                }
+                None
+            }
         }
-        self.pending_action = Action::None;
     }
 
     fn op_end(&mut self) {
@@ -840,7 +915,8 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
             Event::SessionUnlocked => {}
             Event::Window { id } => state.wm.windows.push_back(Window::new(id, qh)),
             Event::Output { id } => {
-                state.wm.outputs.insert(id.id(), Output::new(id));
+                let output_id = state.wm.wm_core.register_output();
+                state.wm.outputs.insert(id.id(), Output::new(id, output_id));
             }
             Event::Seat { id } => {
                 state.wm.seats.insert(id.id(), Seat::new(id));

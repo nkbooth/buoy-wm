@@ -5,8 +5,9 @@
 //! (0..64 per ADR-006).
 
 // `TagSet::empty`/`contains`/`insert`/`remove` are only reached via
-// `WmCore::toggle_view_tag`, which isn't wired into `main.rs` until
-// Story 1.7 (tag switching); `View`'s own `tags` field is constructed via
+// `WmCore::toggle_view_tag`, which remains unwired into `main.rs` —
+// deliberately out of scope for Story 1.7 (deferred to Epic 2's
+// assign-mode picker); `View`'s own `tags` field is constructed via
 // `Default::default()` in `register_view`, not `TagSet::empty()`.
 // Narrowly scoped to this module only, same precedent as Story 1.2's
 // original `mod wm_core` allow in `main.rs`.

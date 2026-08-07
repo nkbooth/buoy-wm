@@ -5,14 +5,15 @@
 //! bitset (ADR-006). Tag creation is idempotent by name; there is no
 //! delete-tag API in v1 — that omission is deliberate, not an oversight.
 
-// This module's public API (`WmCore::create_tag`/`toggle_view_tag`/
-// `mark_terminal_spawned`/`switch_tag` are its only production entry
-// points) is not yet wired into `main.rs` — that lands in Story 1.5
-// (pinned terminal) and Story 1.7 (tag switching). Narrowly scoped to
-// this module only (not a blanket crate-wide allow), same precedent as
-// Story 1.2's original `mod wm_core` allow in `main.rs`.
-#![allow(dead_code)]
-
+// This module's public API is wired into `main.rs` as of Story 1.7:
+// `create_tag` (via `WmCore::create_tag`/`create_tag_with_generated_name`,
+// the tag-create keybind), `mark_terminal_spawned` (via
+// `WmCore::claim_pinned_terminal_spawn`/`ensure_pinned_terminal_spawned`,
+// the pinned-terminal lazy-spawn), and this registry's ordering (via
+// `ids()`, which `WmCore::cycle_tag` composes with `switch_tag` for the
+// tag-cycle keybind). `WmCore::toggle_view_tag` remains unwired —
+// deferred to Epic 2's assign-mode picker — but nothing in this module is
+// unreachable on its account alone.
 use std::collections::HashMap;
 
 use super::ids::TagId;
@@ -50,6 +51,11 @@ pub struct TagRegistry {
 
 impl TagRegistry {
     /// Returns a new, empty tag registry.
+    // Not called from production code — `WmCore`'s `#[derive(Default)]`
+    // constructs its `tags` field via `TagRegistry::default()` instead,
+    // same as `WmCore::new()`'s own precedent. Kept as public constructor
+    // API/for test ergonomics.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         TagRegistry::default()
     }
@@ -57,6 +63,13 @@ impl TagRegistry {
     /// Returns the number of registered tags.
     pub fn count(&self) -> usize {
         self.tags.len()
+    }
+
+    /// Returns every registered tag's id, in creation (registration) order
+    /// — the order [`WmCore::cycle_tag`](super::state::WmCore::cycle_tag)
+    /// treats as canonical. A pure query; never mutates.
+    pub fn ids(&self) -> Vec<TagId> {
+        self.tags.iter().map(|t| t.id).collect()
     }
 
     /// Creates a tag with the given `name`, or returns the existing
@@ -145,5 +158,20 @@ mod tests {
         let again = registry.create_tag("web").unwrap();
         assert_eq!(first, again);
         assert_eq!(registry.count(), 1);
+    }
+
+    #[test]
+    fn ids_returns_empty_vec_when_registry_is_empty() {
+        let registry = TagRegistry::new();
+        assert_eq!(registry.ids(), Vec::new());
+    }
+
+    #[test]
+    fn ids_returns_ids_in_creation_order() {
+        let mut registry = TagRegistry::new();
+        let id_a = registry.create_tag("a").unwrap();
+        let id_b = registry.create_tag("b").unwrap();
+        let id_c = registry.create_tag("c").unwrap();
+        assert_eq!(registry.ids(), vec![id_a, id_b, id_c]);
     }
 }
