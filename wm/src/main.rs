@@ -40,6 +40,14 @@ mod river {
     wayland_scanner::generate_client_code!("./protocol/river-xkb-bindings-v1.xml");
 }
 
+// `wm_core` is not yet wired to the Dispatch handlers below (Story 1.4's
+// job) — it is unit-tested directly via its own public API for now, so
+// its production (non-test) call graph is legitimately unreachable from
+// `main.rs` until that wiring lands. Narrowly scoped to this module only
+// (not a blanket crate-wide allow) per Story 1.2's Technical notes.
+#[allow(dead_code)]
+mod wm_core;
+
 #[derive(Debug, Clone, Copy)]
 enum Action {
     None,
