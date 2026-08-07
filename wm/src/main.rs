@@ -42,7 +42,7 @@ mod river {
 
 mod wm_core;
 
-use wm_core::ids::ViewId;
+use wm_core::ids::{TagId, ViewId};
 use wm_core::state::{PINNED_TERM_APP_ID, WmCore};
 
 #[derive(Debug, Clone, Copy)]
@@ -276,7 +276,36 @@ impl WindowManager {
             window.proxy.propose_dimensions(window.width, window.height);
             let view_id = self.wm_core.register_view(&window.app_id);
             window.view_id = Some(view_id);
+            if window.app_id == PINNED_TERM_APP_ID {
+                if let Err(e) = self.wm_core.set_view_floating(view_id, false) {
+                    eprintln!("Failed to set pinned terminal non-floating: {e:?}");
+                }
+                if let Err(e) = self.wm_core.lower_view(view_id) {
+                    eprintln!("Failed to lower pinned terminal in stacking order: {e:?}");
+                }
+            }
             window.new = false;
+        }
+    }
+
+    /// Composes Tasks 2-3: claims the lazy-spawn-once pinned-terminal slot
+    /// for `tag_id` and, if this is the first claim, spawns it. This is
+    /// the method Story 1.7's tag-switch keybind handler will call
+    /// immediately after a successful `self.wm_core.switch_tag(output_id,
+    /// tag_id)` — deliberately *not* calling `switch_tag` itself, so this
+    /// story doesn't have to pre-decide Story 1.7's own call convention
+    /// (e.g. which output, how the active output is determined) for a
+    /// keybind that doesn't exist yet.
+    // No production call site yet — Story 1.7 adds the tag-switch keybind
+    // that calls this after `wm_core.switch_tag`.
+    #[allow(dead_code)]
+    fn ensure_pinned_terminal_spawned(&mut self, tag_id: TagId) {
+        match self.wm_core.claim_pinned_terminal_spawn(tag_id) {
+            Ok(Some(session_name)) => spawn_pinned_terminal(&session_name),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("Failed to check pinned-terminal spawn state for tag {tag_id:?}: {e:?}")
+            }
         }
     }
 
@@ -326,6 +355,16 @@ impl WindowManager {
     fn manage_seats(&mut self, wm_proxy: &RiverWindowManagerV1) {
         let wm_core = &mut self.wm_core;
         for seat in self.seats.values_mut() {
+            // Code review follow-up (Story 1.5, finding #2): when the
+            // interacted window is the pinned terminal, this pass already
+            // gives it real Wayland keyboard focus directly below, so the
+            // unconditional `seat.focus_top` call further down (which
+            // always targets `self.windows.back()`, and thus would
+            // immediately re-focus + re-`place_top()` whatever real window
+            // is actually on top) must be skipped for this one pass —
+            // otherwise it would instantly undo the direct focus call in
+            // the same iteration.
+            let mut pinned_terminal_focused_directly = false;
             if let Some(window_proxy) = seat.interacted.take() {
                 let i = self
                     .windows
@@ -338,15 +377,41 @@ impl WindowManager {
                 // FocusNext — otherwise stacking_order silently and
                 // permanently diverges from self.windows after the first
                 // mouse click, which Story 1.6's tiling geometry will read
-                // from (Story 1.4 code-review follow-up).
+                // from (Story 1.4 code-review follow-up). `raise_view`
+                // itself already no-ops for the pinned terminal
+                // (wm_core::state), so this call is safe regardless.
                 if let Some(view_id) = window.view_id
                     && let Err(e) = wm_core.raise_view(view_id)
                 {
                     eprintln!("Failed to raise view {view_id:?} in wm_core stacking order: {e:?}");
                 }
-                self.windows.push_back(window);
+                if window.app_id == PINNED_TERM_APP_ID {
+                    // FR4: the pinned terminal must always render at the
+                    // bottom of the real z-order, so — unlike every other
+                    // window — it must not be pushed to the back of
+                    // `self.windows` (which is what drives `focus_top`'s
+                    // `place_top()` call). It can still receive real
+                    // keyboard focus though: issue the same underlying
+                    // Wayland-focus + wm_core::set_focus calls `focus_top`
+                    // would perform, just without `place_top()` or the
+                    // reorder, and re-insert it at its original position so
+                    // it isn't dropped from `self.windows`.
+                    seat.proxy.focus_window(&window.proxy);
+                    seat.focused = Some(window.proxy.clone());
+                    if let Some(view_id) = window.view_id
+                        && let Err(e) = wm_core.set_focus(view_id)
+                    {
+                        eprintln!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
+                    }
+                    self.windows.insert(i, window);
+                    pinned_terminal_focused_directly = true;
+                } else {
+                    self.windows.push_back(window);
+                }
             }
-            seat.focus_top(&self.windows, wm_core);
+            if !pinned_terminal_focused_directly {
+                seat.focus_top(&self.windows, wm_core);
+            }
             seat.do_action(&mut self.windows, wm_proxy, wm_core);
             if seat.op_release {
                 seat.op_end();
@@ -391,6 +456,32 @@ impl Output {
             proxy,
             removed: false,
         }
+    }
+}
+
+/// Spawns the pinned terminal: `foot -a pinned-term zellij attach --create
+/// <session_name>`. Same `WAYLAND_DEBUG` removal and `Ok`/`Err` handling as
+/// `Seat::do_action`'s `Action::SpawnFoot` arm (consistency, not
+/// reinvention). Arguments are passed individually to `Command`, not
+/// through a shell, so arbitrary tag names in `session_name` carry no
+/// shell-injection risk regardless of their contents.
+// No production call site yet — `ensure_pinned_terminal_spawned` is the
+// only caller, and it has no call site until Story 1.7 adds the tag-switch
+// keybind that triggers this whole chain.
+#[allow(dead_code)]
+fn spawn_pinned_terminal(session_name: &str) {
+    match std::process::Command::new("foot")
+        .arg("-a")
+        .arg(PINNED_TERM_APP_ID)
+        .arg("zellij")
+        .arg("attach")
+        .arg("--create")
+        .arg(session_name)
+        .env_remove("WAYLAND_DEBUG")
+        .spawn()
+    {
+        Ok(_) => {}
+        Err(e) => eprintln!("Failed to spawn pinned terminal: {e}"),
     }
 }
 
@@ -498,9 +589,32 @@ impl Seat {
                         .iter()
                         .position(|window| window.view_id == Some(next_view_id))
                 {
-                    let window = windows.remove(i).unwrap();
-                    windows.push_back(window);
-                    self.focus_top(windows, wm_core);
+                    // Defensive guard (Story 1.5 code review follow-up,
+                    // finding #2): `wm_core::state::cycle_focus` already
+                    // excludes the pinned terminal from its candidates, so
+                    // `next_view_id` should never actually resolve to it —
+                    // but check the real `Window`'s own `app_id` here too,
+                    // so this arm is correct on its own terms rather than
+                    // correct only by accident of `cycle_focus`'s behavior
+                    // elsewhere. If it somehow did resolve to the pinned
+                    // terminal, skip the `windows.remove`/`push_back`/
+                    // `place_top()` reorder (FR4: always bottom) but still
+                    // give it real keyboard focus, same direct-focus
+                    // pattern click-to-focus uses in `manage_seats`.
+                    if windows[i].app_id == PINNED_TERM_APP_ID {
+                        let window = &windows[i];
+                        self.proxy.focus_window(&window.proxy);
+                        self.focused = Some(window.proxy.clone());
+                        if let Err(e) = wm_core.set_focus(next_view_id) {
+                            eprintln!(
+                                "Failed to set focus for view {next_view_id:?} in wm_core: {e:?}"
+                            );
+                        }
+                    } else {
+                        let window = windows.remove(i).unwrap();
+                        windows.push_back(window);
+                        self.focus_top(windows, wm_core);
+                    }
                 }
             }
             Action::Move => {

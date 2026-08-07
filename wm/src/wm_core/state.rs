@@ -170,9 +170,8 @@ impl WmCore {
 
     /// Sets a view's floating flag. Fails with [`WmCoreError::UnknownView`]
     /// for an unregistered id, leaving state unchanged.
-    // Not yet wired into `main.rs` — floating placement lands in Story
-    // 1.6.
-    #[allow(dead_code)]
+    // Wired into `main.rs`'s `init_new_windows` since Story 1.5, which
+    // forces the pinned terminal non-floating on registration.
     pub fn set_view_floating(&mut self, id: ViewId, floating: bool) -> Result<(), WmCoreError> {
         let view = self.views.get_mut(&id).ok_or(WmCoreError::UnknownView)?;
         view.floating = floating;
@@ -293,6 +292,36 @@ impl WmCore {
             .map_err(|_| WmCoreError::UnknownTag)
     }
 
+    /// The single atomic "check + claim" decision for the pinned
+    /// terminal's lazy-spawn-once invariant: if `tag_id`'s terminal has
+    /// not yet been spawned, marks it spawned and returns
+    /// `Ok(Some("tag-<name>"))` — the zellij session name the caller
+    /// should spawn `foot -a pinned-term zellij attach --create` with. On
+    /// every subsequent call for the same tag, returns `Ok(None)` without
+    /// side effects. Deliberately bundled into one method (mirroring
+    /// `cycle_focus`'s precedent of composing several `wm-core`-internal
+    /// steps into one atomic call) rather than exposing separate
+    /// `tag_terminal_spawned`/`tag_name` queries, so no caller can
+    /// accidentally check without claiming or claim twice. Fails with
+    /// [`WmCoreError::UnknownTag`] for an unregistered id.
+    // Not yet wired into `main.rs` — the lazy-spawn-once terminal's
+    // production call site lands in Story 1.7 (see `main.rs`'s
+    // `ensure_pinned_terminal_spawned`, dormant until then).
+    #[allow(dead_code)]
+    pub fn claim_pinned_terminal_spawn(
+        &mut self,
+        tag_id: TagId,
+    ) -> Result<Option<String>, WmCoreError> {
+        let tag = self.tags.get(tag_id).ok_or(WmCoreError::UnknownTag)?;
+        if tag.terminal_spawned {
+            return Ok(None);
+        }
+        let session_name = format!("tag-{}", tag.name);
+        self.mark_terminal_spawned(tag_id)
+            .expect("tag_id was just confirmed registered above");
+        Ok(Some(session_name))
+    }
+
     /// Returns the stacking/render order, front-to-back (front=bottom,
     /// back=top).
     // Story 1.4 code-review follow-up (efficiency): `cycle_focus` now
@@ -308,14 +337,39 @@ impl WmCore {
     }
 
     /// Moves an already-registered view to the back (top) of the stacking
-    /// order. Fails with [`WmCoreError::UnknownView`] for an unregistered
-    /// id.
+    /// order. A no-op success (state unchanged) for the pinned terminal
+    /// (`app_id == PINNED_TERM_APP_ID`): FR4 requires it always be
+    /// rendered at the bottom of the render order, and both of `main.rs`'s
+    /// reordering call sites — `cycle_focus` (via `Action::FocusNext`) and
+    /// click-to-focus (`manage_seats`'s `interacted` handling) — route
+    /// through this method, so guarding it here is the single place that
+    /// covers both without duplicating an `app_id` check at each call site
+    /// (Task 6). The pinned terminal can still be focused by either path
+    /// (`set_focus` is unaffected by this guard) — only its position in
+    /// the stacking order is pinned. Fails with
+    /// [`WmCoreError::UnknownView`] for an unregistered id.
     pub fn raise_view(&mut self, id: ViewId) -> Result<(), WmCoreError> {
+        let view = self.views.get(&id).ok_or(WmCoreError::UnknownView)?;
+        if view.app_id == PINNED_TERM_APP_ID {
+            return Ok(());
+        }
+        self.stacking_order.retain(|&v| v != id);
+        self.stacking_order.push_back(id);
+        Ok(())
+    }
+
+    /// Moves an already-registered view to the front (bottom) of the
+    /// stacking order — the exact mirror of [`WmCore::raise_view`]. This is
+    /// the primitive Task 5's `init_new_windows` wiring uses to satisfy
+    /// FR4's "always rendered at the bottom of render order" for the pinned
+    /// terminal. Fails with [`WmCoreError::UnknownView`] for an
+    /// unregistered id.
+    pub fn lower_view(&mut self, id: ViewId) -> Result<(), WmCoreError> {
         if !self.views.contains_key(&id) {
             return Err(WmCoreError::UnknownView);
         }
         self.stacking_order.retain(|&v| v != id);
-        self.stacking_order.push_back(id);
+        self.stacking_order.push_front(id);
         Ok(())
     }
 
@@ -343,23 +397,43 @@ impl WmCore {
     }
 
     /// Cycles keyboard focus to the next view in stacking order (FR12):
-    /// moves the front (bottom) of the stacking order to the back (top)
-    /// and focuses it, returning its id. Returns `None` if no views are
-    /// registered, leaving state unchanged. `raise_view`/`set_focus` on
-    /// the front id are guaranteed to succeed since it was just read from
-    /// this same `WmCore`'s own stacking order, so their `Result`s are
-    /// unwrapped rather than propagated (NFR2: safe-by-construction, not
-    /// caller-facing).
+    /// finds the first view in `stacking_order` (front to back) that is
+    /// *not* the pinned terminal, moves it to the back (top) of the
+    /// stacking order, and focuses it, returning its id. Returns `None` if
+    /// no such view exists — either `stacking_order` is empty, or the
+    /// pinned terminal is the only registered view — leaving state
+    /// unchanged either way.
+    ///
+    /// Code review follow-up (Story 1.5): the pinned terminal is
+    /// permanently fixed at `stacking_order.front()` (`lower_view`, and
+    /// `raise_view`'s own no-op guard for it), so a naive "always target
+    /// `front()`" implementation would get permanently stuck returning the
+    /// pinned terminal's id on every call once one exists, and
+    /// `FocusNext` could never reach any other window again. Skipping over
+    /// it here — rather than merely deprioritizing it — means it is never
+    /// selected as a `FocusNext` target at all; it remains directly
+    /// focusable via a click (`main.rs`'s click-to-focus path), but never
+    /// via cycling. Since the chosen target is still moved to the back by
+    /// `raise_view` and the pinned terminal is excluded from both that
+    /// reordering and this selection, repeated calls naturally round-robin
+    /// through the non-pinned views while the pinned terminal stays fixed
+    /// at the bottom.
+    ///
+    /// `raise_view`/`set_focus` on the found target are guaranteed to
+    /// succeed since it was just read from this same `WmCore`'s own
+    /// stacking order, so their `Result`s are unwrapped rather than
+    /// propagated (NFR2: safe-by-construction, not caller-facing).
     pub fn cycle_focus(&mut self) -> Option<ViewId> {
-        // `.front()` reads the same element `stacking_order()` would have
-        // returned as its first entry, without that accessor's O(n)
-        // `Vec` clone (Story 1.4 code-review follow-up, efficiency).
-        let front = self.stacking_order.front().copied()?;
-        self.raise_view(front)
-            .expect("front was just read from this WmCore's own stacking order");
-        self.set_focus(front)
-            .expect("front was just read from this WmCore's own stacking order");
-        Some(front)
+        let target = self.stacking_order.iter().copied().find(|&id| {
+            self.views
+                .get(&id)
+                .is_some_and(|view| view.app_id != PINNED_TERM_APP_ID)
+        })?;
+        self.raise_view(target)
+            .expect("target was just read from this WmCore's own stacking order");
+        self.set_focus(target)
+            .expect("target was just read from this WmCore's own stacking order");
+        Some(target)
     }
 }
 
@@ -886,6 +960,170 @@ mod tests {
     }
 
     #[test]
+    fn lower_view_moves_view_to_front() {
+        let mut core = WmCore::new();
+        let a = core.register_view("app-one");
+        let b = core.register_view("app-two");
+        assert_eq!(core.stacking_order(), vec![a, b]);
+        core.lower_view(b).unwrap();
+        assert_eq!(core.stacking_order(), vec![b, a]);
+    }
+
+    #[test]
+    fn lower_view_on_already_front_view_is_idempotent() {
+        let mut core = WmCore::new();
+        let a = core.register_view("app-one");
+        let b = core.register_view("app-two");
+        core.lower_view(a).unwrap();
+        assert_eq!(core.stacking_order(), vec![a, b]);
+    }
+
+    #[test]
+    fn lower_view_unknown_id_returns_error() {
+        let mut core = WmCore::new();
+        let bogus_view = ViewId(999);
+        assert_eq!(core.lower_view(bogus_view), Err(WmCoreError::UnknownView));
+    }
+
+    #[test]
+    fn claim_pinned_terminal_spawn_returns_session_name_first_time() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("web").unwrap();
+        assert_eq!(
+            core.claim_pinned_terminal_spawn(tag_id),
+            Ok(Some("tag-web".to_string()))
+        );
+        assert!(core.tags.get(tag_id).unwrap().terminal_spawned);
+    }
+
+    #[test]
+    fn claim_pinned_terminal_spawn_is_idempotent_returns_none_after_first_claim() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("web").unwrap();
+        core.claim_pinned_terminal_spawn(tag_id).unwrap();
+        assert_eq!(core.claim_pinned_terminal_spawn(tag_id), Ok(None));
+    }
+
+    #[test]
+    fn claim_pinned_terminal_spawn_unknown_tag_returns_error() {
+        let mut core = WmCore::new();
+        let bogus_tag = TagId(63);
+        assert_eq!(
+            core.claim_pinned_terminal_spawn(bogus_tag),
+            Err(WmCoreError::UnknownTag)
+        );
+    }
+
+    #[test]
+    fn claim_pinned_terminal_spawn_session_name_uses_tag_dash_prefix_convention() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("my-tag-name").unwrap();
+        assert_eq!(
+            core.claim_pinned_terminal_spawn(tag_id),
+            Ok(Some("tag-my-tag-name".to_string()))
+        );
+    }
+
+    #[test]
+    fn claim_pinned_terminal_spawn_reachable_via_switch_tag_alone_without_any_keybind() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        core.switch_tag(output_id, tag_id).unwrap();
+        assert_eq!(
+            core.claim_pinned_terminal_spawn(tag_id),
+            Ok(Some("tag-web".to_string()))
+        );
+    }
+
+    /// Task 6 RED: `raise_view` (the primitive both `cycle_focus` and
+    /// `main.rs`'s click-to-focus path use to reorder) must never move the
+    /// pinned terminal off the bottom of the stacking order — a real FR4
+    /// violation Story 1.4's `cycle_focus`/click-to-focus code didn't
+    /// account for since the pinned terminal didn't exist yet.
+    #[test]
+    fn raise_view_is_a_no_op_for_the_pinned_terminal() {
+        let mut core = WmCore::new();
+        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let other = core.register_view("app-one");
+        assert_eq!(core.stacking_order(), vec![pinned, other]);
+        core.raise_view(pinned).unwrap();
+        assert_eq!(
+            core.stacking_order(),
+            vec![pinned, other],
+            "raise_view must not move the pinned terminal off the bottom"
+        );
+    }
+
+    /// Task 6 RED: the same guard exercised through `cycle_focus` (as
+    /// `Action::FocusNext` does) rather than calling `raise_view` directly
+    /// — cycling focus onto the pinned terminal must not move it off the
+    /// bottom of the stacking order.
+    #[test]
+    fn cycle_focus_does_not_move_pinned_terminal_from_bottom_of_stacking_order() {
+        let mut core = WmCore::new();
+        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let other = core.register_view("app-one");
+        core.lower_view(pinned).unwrap();
+        assert_eq!(core.stacking_order(), vec![pinned, other]);
+
+        core.cycle_focus();
+        assert_eq!(
+            core.stacking_order().first(),
+            Some(&pinned),
+            "cycling focus onto the pinned terminal must not move it off the bottom"
+        );
+    }
+
+    /// Code review follow-up (finding #1): `cycle_focus` must never select
+    /// the pinned terminal as a target, even though it permanently
+    /// occupies `stacking_order.front()` (Task 5/6's own lower-to-bottom
+    /// invariant). Before this fix, `cycle_focus` unconditionally read
+    /// `front()` and used it as the target, so once a pinned terminal
+    /// existed, every `FocusNext` press would repeatedly return the pinned
+    /// terminal's id and never advance — this test proves it round-robins
+    /// through the two non-pinned views instead, never once returning the
+    /// pinned terminal's id.
+    #[test]
+    fn cycle_focus_skips_pinned_terminal_and_round_robins_through_others() {
+        let mut core = WmCore::new();
+        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let a = core.register_view("a");
+        let b = core.register_view("b");
+        core.lower_view(pinned).unwrap();
+        assert_eq!(core.stacking_order(), vec![pinned, a, b]);
+
+        for _ in 0..10 {
+            let next = core.cycle_focus();
+            assert_ne!(
+                next,
+                Some(pinned),
+                "cycle_focus must never select the pinned terminal"
+            );
+            assert!(
+                next == Some(a) || next == Some(b),
+                "cycle_focus must only ever return one of the non-pinned views, got {next:?}"
+            );
+        }
+        assert_eq!(
+            core.stacking_order().first(),
+            Some(&pinned),
+            "the pinned terminal must remain fixed at the bottom of stacking_order"
+        );
+    }
+
+    /// Code review follow-up (finding #1), edge case: when the pinned
+    /// terminal is the *only* registered view, there is nothing valid to
+    /// cycle to — `cycle_focus` must return `None` rather than falling back
+    /// to selecting the pinned terminal itself.
+    #[test]
+    fn cycle_focus_returns_none_when_only_pinned_terminal_registered() {
+        let mut core = WmCore::new();
+        core.register_view(PINNED_TERM_APP_ID);
+        assert_eq!(core.cycle_focus(), None);
+    }
+
+    #[test]
     fn fresh_wm_core_is_fully_empty() {
         let core = WmCore::new();
         assert_eq!(core.tags.count(), 0);
@@ -979,6 +1217,9 @@ mod tests {
         assert_eq!(core, snapshot);
 
         assert_eq!(core.raise_view(bogus_view), Err(WmCoreError::UnknownView));
+        assert_eq!(core, snapshot);
+
+        assert_eq!(core.lower_view(bogus_view), Err(WmCoreError::UnknownView));
         assert_eq!(core, snapshot);
     }
 
