@@ -8,15 +8,17 @@ repos:
       - id: cargo-fmt-check
         name: cargo fmt --check
         language: system
-        entry: cargo fmt --manifest-path wm/Cargo.toml --all -- --check
+        entry: cargo fmt --all -- --check
         # Manifest/lockfile changes (e.g. a dependency bump) can change what
         # clippy lints or how fmt formats generated-adjacent code, so they
-        # need the same gate as source changes, not just *.rs.
-        files: ^wm/(src/.*\.rs|Cargo\.(toml|lock))$
+        # need the same gate as source changes, not just *.rs. Story 2.2:
+        # widened workspace-wide to cover either member plus the root
+        # manifest/lockfile.
+        files: ^(wm|tag-picker)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
         pass_filenames: false
       - id: cargo-clippy
         name: cargo clippy
         language: system
-        entry: cargo clippy --manifest-path wm/Cargo.toml --all-targets -- -D warnings
-        files: ^wm/(src/.*\.rs|Cargo\.(toml|lock))$
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        files: ^(wm|tag-picker)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
         pass_filenames: false

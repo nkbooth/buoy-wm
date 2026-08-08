@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use wayland_backend::client::ObjectId;
@@ -69,6 +70,7 @@ enum Action {
     Exit,
     TagCycle,
     TagCreate,
+    OpenTagPicker,
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +345,10 @@ impl WindowManager {
         const ESC: u32 = 0xff1b;
         const TAB: u32 = 0xff09;
         const T: u32 = 0x74;
+        // Story 2.2 gap #4: `Mod4+A` ("Assign") opens the tag-manager
+        // picker, following this file's existing single-letter-mnemonic
+        // convention.
+        const A: u32 = 0x61;
         // See linux/input-event-codes.h
         const BTN_LEFT: u32 = 0x110;
         const BTN_RIGHT: u32 = 0x111;
@@ -356,6 +362,7 @@ impl WindowManager {
                 seat.create_xkb_binding(river_xkb, qh, mods, ESC, Action::Exit);
                 seat.create_xkb_binding(river_xkb, qh, mods, TAB, Action::TagCycle);
                 seat.create_xkb_binding(river_xkb, qh, mods, T, Action::TagCreate);
+                seat.create_xkb_binding(river_xkb, qh, mods, A, Action::OpenTagPicker);
                 seat.create_pointer_binding(qh, mods, BTN_LEFT, Action::Move);
                 seat.create_pointer_binding(qh, mods, BTN_RIGHT, Action::Resize);
                 seat.new = false;
@@ -528,6 +535,23 @@ impl Output {
             removed: false,
             output_id,
         }
+    }
+}
+
+/// Code review follow-up (Story 2.2, finding #1): resolves the `tag-picker`
+/// binary's path as a sibling of the WM's own running executable, rather
+/// than trusting `$PATH` — nothing in this repo installs the built
+/// `tag-picker` binary onto `PATH`, and both binaries land in the same
+/// Cargo workspace `target/{profile}/` directory, so `wm_exe`'s parent
+/// directory is exactly where `tag-picker` lives too. Falls back to the
+/// bare name if `wm_exe` unexpectedly has no parent (e.g. a bare filename
+/// with no directory component) — `Command::spawn()` will then fail the
+/// same `$PATH`-dependent way the old code always did, handled by the
+/// existing error-logging call site rather than invented here.
+fn tag_picker_path(wm_exe: &Path) -> PathBuf {
+    match wm_exe.parent() {
+        Some(dir) => dir.join("tag-picker"),
+        None => PathBuf::from("tag-picker"),
     }
 }
 
@@ -745,6 +769,40 @@ impl Seat {
             Action::TagCreate => {
                 if let Err(e) = wm_core.create_tag_with_generated_name() {
                     eprintln!("Failed to create tag: {e:?}");
+                }
+                None
+            }
+            // Story 2.2: fire-and-forget process spawn, no `wm_core` access.
+            // `tag-picker` resolves the focused view itself via its own
+            // `get-state` IPC call, so this arm never switches an output's
+            // active tag (same reasoning `Action::TagCreate`'s own `None`
+            // return already documents) and thus never triggers
+            // `manage_seats`' pinned-terminal-spawn signal.
+            //
+            // Code review follow-up (finding #1): spawning `"tag-picker"` by
+            // bare name relied on `$PATH`, but nothing in this repo installs
+            // the built binary there — in a real session this silently
+            // ENOENTs and `Mod4+A` does nothing. Resolve the sibling
+            // binary's path relative to the WM's own running executable
+            // instead (`tag_picker_path`); if `current_exe()` itself fails,
+            // log and skip spawning rather than guessing a path or
+            // panicking (NFR2). Once resolved, the spawn/error-handling
+            // shape is otherwise byte-for-byte the same as
+            // `Action::SpawnFoot`'s above.
+            Action::OpenTagPicker => {
+                match std::env::current_exe() {
+                    Ok(wm_exe) => {
+                        match std::process::Command::new(tag_picker_path(&wm_exe))
+                            .env_remove("WAYLAND_DEBUG")
+                            .spawn()
+                        {
+                            Ok(_) => {}
+                            Err(e) => eprintln!("Failed to spawn tag-picker: {e}"),
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to resolve wm's own executable path: {e}")
+                    }
                 }
                 None
             }
@@ -1129,5 +1187,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         event_queue.blocking_dispatch(&mut app_data)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Code review follow-up (Story 2.2, finding #1): `tag_picker_path` is
+    // the pure path-resolution logic pulled out of `Action::OpenTagPicker`'s
+    // handler so it's testable without actually calling `current_exe()`.
+    // The `current_exe()`/`Command::spawn()` call site itself stays
+    // untested I/O glue, same carve-out as the rest of this file.
+
+    #[test]
+    fn tag_picker_path_resolves_to_sibling_of_debug_wm_exe() {
+        assert_eq!(
+            tag_picker_path(Path::new("/workspaces/buoy-wm/target/debug/wm")),
+            PathBuf::from("/workspaces/buoy-wm/target/debug/tag-picker")
+        );
+    }
+
+    #[test]
+    fn tag_picker_path_resolves_to_sibling_of_release_wm_exe() {
+        assert_eq!(
+            tag_picker_path(Path::new("/workspaces/buoy-wm/target/release/wm")),
+            PathBuf::from("/workspaces/buoy-wm/target/release/tag-picker")
+        );
+    }
+
+    #[test]
+    fn tag_picker_path_falls_back_to_bare_name_when_wm_exe_has_no_parent() {
+        // `Path::parent()` returns `None` only when the path terminates in a
+        // root or prefix (or is empty) — `/` is the concrete case that hits
+        // the fallback branch, not just a single-component relative path
+        // (whose `.parent()` is `Some("")`, which `join` already reduces to
+        // the bare name anyway).
+        assert_eq!(tag_picker_path(Path::new("/")), PathBuf::from("tag-picker"));
     }
 }

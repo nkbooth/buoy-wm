@@ -21,10 +21,11 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config
 
+      # Story 2.2: workspace-wide, from the repo root, so both `wm` and
+      # `tag-picker` build/test in one pass rather than needing a
+      # per-member step each.
       - name: cargo build
-        run: cargo build --manifest-path wm/Cargo.toml
+        run: cargo build --workspace
 
-      # tinyrwm ships no test suite yet — 0 tests run, exit 0 is expected
-      # and correct here, not a broken step.
       - name: cargo test
-        run: cargo test --manifest-path wm/Cargo.toml
+        run: cargo test --workspace

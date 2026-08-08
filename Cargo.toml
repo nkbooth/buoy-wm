@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: 0BSD
+#
+# Story 2.2 Task 2: workspace root manifest, added when `tag-picker` became
+# the first second Cargo target. `wm/` remains a normal member manifest
+# (no `[workspace]` table of its own); Story 2.1's Technical notes deferred
+# exactly this conversion to "whichever future story first adds
+# `tag-picker`/`status-bar` as actual separate Cargo targets."
+
+[workspace]
+resolver = "2"
+members = ["wm", "tag-picker"]
