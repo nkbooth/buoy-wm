@@ -59,10 +59,21 @@ pub fn render_fuzzel_input(entries: &[ChecklistEntry]) -> String {
         .iter()
         .map(|e| {
             let glyph = if e.checked { "[✓]" } else { "[ ]" };
-            let sanitized_name = e.name.replace(['\t', '\n'], " ");
-            format!("{glyph} {sanitized_name}\t{}\n", e.tag_id)
+            format!("{glyph} {}\t{}\n", sanitize_name(&e.name), e.tag_id)
         })
         .collect()
+}
+
+/// Replaces embedded tabs/newlines in a tag name with a plain space, so a
+/// name containing either can never corrupt the tab-delimited
+/// `--with-nth`/`--accept-nth` row format both [`render_fuzzel_input`] and
+/// [`render_switch_list`] emit (`wm_core::create_tag` accepts any string
+/// with no charset validation — ADR-006/YAGNI). Shared here since this is
+/// the second real occurrence of the identical one-line operation, not
+/// speculative abstraction (Technical notes "Consistency with the existing
+/// three-strike DRY rule").
+fn sanitize_name(name: &str) -> String {
+    name.replace(['\t', '\n'], " ")
 }
 
 /// One outcome of a single `fuzzel` invocation: an existing tag was
@@ -203,6 +214,53 @@ pub fn toggle_local_membership(tags: &mut Vec<u8>, tag_id: u8) {
 /// a view is focused.
 pub fn should_open_picker(focused_view: Option<u64>) -> bool {
     focused_view.is_some()
+}
+
+/// One outcome of a single switch-mode `fuzzel` invocation (Story 2.4):
+/// an existing tag was selected (switch to it), or the invocation is
+/// treated as cancelled. Deliberately no `CreateTag`-shaped variant —
+/// switching only ever operates on existing tags (EXPERIENCE.md), unlike
+/// assign mode's [`PickerAction`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SwitchAction {
+    Selected(u8),
+    Cancelled,
+}
+
+/// Renders `tags` into `fuzzel --dmenu`'s tab-delimited stdin format for
+/// switch mode: one plain row per tag, `"<name>\t<tag_id>\n"` — no
+/// `[✓]`/`[ ]` checkbox glyph prefix, since membership isn't the concept
+/// in switch mode at all (contrast with [`render_fuzzel_input`]'s
+/// glyph-prefixed rows).
+pub fn render_switch_list(tags: &[TagDto]) -> String {
+    tags.iter()
+        .map(|t| format!("{}\t{}\n", sanitize_name(&t.name), t.id))
+        .collect()
+}
+
+/// Decides the outcome of one switch-mode `fuzzel` invocation from its
+/// exit status, captured stdout, and the tag ids actually rendered this
+/// invocation (`known_tag_ids`). Structurally the same shape as
+/// [`parse_fuzzel_output`] minus the `CreateTag` catch-all arm: anything
+/// that isn't a real matched row (non-success exit, empty stdout,
+/// non-numeric text, or an in-range-but-unregistered numeral) is simply
+/// `Cancelled`, never treated as a create attempt.
+pub fn parse_switch_selection(
+    exit_success: bool,
+    stdout: &str,
+    known_tag_ids: &[u8],
+) -> SwitchAction {
+    if !exit_success {
+        return SwitchAction::Cancelled;
+    }
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return SwitchAction::Cancelled;
+    }
+    match trimmed.parse::<u8>() {
+        Ok(id) if known_tag_ids.contains(&id) => SwitchAction::Selected(id),
+        _ => SwitchAction::Cancelled,
+    }
 }
 
 #[cfg(test)]
@@ -557,5 +615,86 @@ mod tests {
         // Code review follow-up, finding 2: the two synthetic notice rows
         // must never be visually/textually confusable with each other.
         assert_ne!(CREATE_APPLY_FAILED_MESSAGE, REJECTION_MESSAGE);
+    }
+
+    // --- Story 2.4: switch-mode rendering and selection parsing ---
+
+    #[test]
+    fn render_switch_list_formats_one_plain_row_per_tag() {
+        assert_eq!(
+            render_switch_list(&[tag(0, "web"), tag(1, "chat")]),
+            "web\t0\nchat\t1\n"
+        );
+    }
+
+    #[test]
+    fn render_switch_list_of_empty_tags_is_empty_string() {
+        assert_eq!(render_switch_list(&[]), "");
+    }
+
+    #[test]
+    fn render_switch_list_replaces_embedded_tab_and_newline_in_tag_name() {
+        // Same corruption-avoidance rationale as
+        // `render_fuzzel_input_replaces_embedded_tab_and_newline_in_tag_name`
+        // above — the second real occurrence of this sanitization rule.
+        assert_eq!(
+            render_switch_list(&[tag(2, "we\tb\nsite")]),
+            "we b site\t2\n"
+        );
+    }
+
+    #[test]
+    fn parse_switch_selection_returns_selected_for_a_known_tag_id() {
+        assert_eq!(
+            parse_switch_selection(true, "1\n", &[0, 1, 2]),
+            SwitchAction::Selected(1)
+        );
+    }
+
+    #[test]
+    fn parse_switch_selection_returns_cancelled_for_nonzero_exit() {
+        assert_eq!(
+            parse_switch_selection(false, "1\n", &[0, 1, 2]),
+            SwitchAction::Cancelled
+        );
+    }
+
+    #[test]
+    fn parse_switch_selection_returns_cancelled_for_empty_stdout() {
+        assert_eq!(
+            parse_switch_selection(true, "", &[0, 1, 2]),
+            SwitchAction::Cancelled
+        );
+    }
+
+    #[test]
+    fn parse_switch_selection_returns_cancelled_for_freeform_text_not_a_known_id() {
+        // The deliberate, load-bearing difference from assign mode's
+        // `parse_fuzzel_output`: switch mode has no create-tag branch at
+        // all, so anything that isn't a real matched row is simply
+        // cancelled, never treated as a create attempt.
+        assert_eq!(
+            parse_switch_selection(true, "deploy-watch\n", &[0, 1, 2]),
+            SwitchAction::Cancelled
+        );
+    }
+
+    #[test]
+    fn parse_switch_selection_returns_cancelled_for_a_numeral_not_among_known_ids() {
+        // An in-range but unregistered numeral is not a valid selection in
+        // switch mode, unlike assign mode where it would become a
+        // `CreateTag` attempt.
+        assert_eq!(
+            parse_switch_selection(true, "99\n", &[0, 1, 2]),
+            SwitchAction::Cancelled
+        );
+    }
+
+    #[test]
+    fn parse_switch_selection_trims_whitespace_consistently_with_toggle_parsing() {
+        assert_eq!(
+            parse_switch_selection(true, " 1 \n", &[0, 1, 2]),
+            SwitchAction::Selected(1)
+        );
     }
 }

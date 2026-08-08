@@ -71,6 +71,7 @@ enum Action {
     TagCycle,
     TagCreate,
     OpenTagPicker,
+    TagSwitch,
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +350,9 @@ impl WindowManager {
         // picker, following this file's existing single-letter-mnemonic
         // convention.
         const A: u32 = 0x61;
+        // Story 2.4: `Mod4+S` ("Switch") opens the same picker in
+        // switch mode, same single-letter-mnemonic convention as `A`.
+        const S: u32 = 0x73;
         // See linux/input-event-codes.h
         const BTN_LEFT: u32 = 0x110;
         const BTN_RIGHT: u32 = 0x111;
@@ -363,6 +367,7 @@ impl WindowManager {
                 seat.create_xkb_binding(river_xkb, qh, mods, TAB, Action::TagCycle);
                 seat.create_xkb_binding(river_xkb, qh, mods, T, Action::TagCreate);
                 seat.create_xkb_binding(river_xkb, qh, mods, A, Action::OpenTagPicker);
+                seat.create_xkb_binding(river_xkb, qh, mods, S, Action::TagSwitch);
                 seat.create_pointer_binding(qh, mods, BTN_LEFT, Action::Move);
                 seat.create_pointer_binding(qh, mods, BTN_RIGHT, Action::Resize);
                 seat.new = false;
@@ -802,6 +807,45 @@ impl Seat {
                     }
                     Err(e) => {
                         eprintln!("Failed to resolve wm's own executable path: {e}")
+                    }
+                }
+                None
+            }
+            // Story 2.4: `Mod4+S` ("Switch") spawns the same `tag-picker`
+            // binary in switch mode, passing the WM's own deterministic
+            // `active_output_id` resolution across the process boundary as
+            // a CLI argument — `tag-picker` never re-derives "the active
+            // output" itself (Task 1.2). Same fire-and-forget spawn shape
+            // as `Action::OpenTagPicker` above, plus the same
+            // `None`-output defensive no-op shape as `Action::TagCycle`.
+            // Always returns `None`: this arm never itself mutates
+            // `wm_core` or triggers `manage_seats`' pinned-terminal-spawn
+            // signal — the eventual `switch-tag` IPC call and its
+            // pinned-terminal follow-up (Task 2) both happen later,
+            // asynchronously, once the user picks a tag in the spawned
+            // process.
+            Action::TagSwitch => {
+                match active_output_id {
+                    Some(output_id) => match std::env::current_exe() {
+                        Ok(wm_exe) => {
+                            match std::process::Command::new(tag_picker_path(&wm_exe))
+                                .arg("switch")
+                                .arg(output_id.0.to_string())
+                                .env_remove("WAYLAND_DEBUG")
+                                .spawn()
+                            {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    eprintln!("Failed to spawn tag-picker in switch mode: {e}")
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to resolve wm's own executable path: {e}")
+                        }
+                    },
+                    None => {
+                        eprintln!("Tag-switch keybind pressed but no output is registered yet")
                     }
                 }
                 None

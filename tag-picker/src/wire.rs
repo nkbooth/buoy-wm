@@ -8,22 +8,26 @@
 //! there are exactly two (`wm`'s and this one) — one below the threshold. A
 //! shared crate is deferred to whichever story first gives `status-bar`
 //! (Story 2.5) the same need, a genuine third consumer. As of Story 2.3,
-//! `tag-picker` sends `get-state`/`toggle-tag`/`create-tag` and understands
-//! the `state`/`ok`/`tag-created`/`error` responses those produce; `wm`'s
-//! own `switch-tag` request remains unmodeled here (Story 2.4's job), and
-//! `State`/`ViewDto` still omit `outputs`/`app_id` — fields this client has
-//! no use for, tolerated as unknown fields by serde's default leniency.
+//! `tag-picker` sends `get-state`/`toggle-tag`/`create-tag`/`switch-tag` and
+//! understands the `state`/`ok`/`tag-created`/`error` responses those
+//! produce (Story 2.4 adds `switch-tag`, the switch-mode picker's sole
+//! mutation). `State`/`ViewDto` still omit `outputs`/`app_id` — fields this
+//! client has no use for, tolerated as unknown fields by serde's default
+//! leniency.
 
 use serde::{Deserialize, Serialize};
 
-/// A request this client can send. Narrower than `wm`'s own `Request`
-/// enum — `tag-picker` never sends `switch-tag` (Story 2.4's job).
+/// A request this client can send. Mirrors `wm`'s own `Request`
+/// (`wm/src/ipc/protocol.rs`) shape-for-shape for every variant this client
+/// uses — `switch-tag` (Story 2.4) is the switch-mode picker's sole
+/// mutation, sent once per single-shot invocation.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Request {
     GetState,
     ToggleTag { view_id: u64, tag_id: u8 },
     CreateTag { name: String },
+    SwitchTag { output_id: u64, tag_id: u8 },
 }
 
 /// A tag as it appears on the wire: `id` and `name`.
@@ -44,8 +48,11 @@ pub struct ViewDto {
 }
 
 /// A response this client can receive. Narrower than `wm`'s own `Response`
-/// enum — no `outputs` field on `State` — since `tag-picker` never sends
-/// the request (`switch-tag`) that field is for.
+/// enum — no `outputs` field on `State`, since `switch-tag`'s `output_id`
+/// argument (Story 2.4) comes from `wm`'s own CLI-argument spawn, never
+/// from parsing this client's own `get-state` snapshot (Task 1.2). No new
+/// `Response` variant is needed for `switch-tag` either — it only ever
+/// produces `Ok`/`Error`, both already modeled below.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Response {
@@ -115,6 +122,20 @@ mod tests {
         assert_eq!(
             serialize_request(&Request::CreateTag { name: "web".into() }),
             r#"{"type":"create-tag","name":"web"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_switch_tag_request() {
+        // Byte-for-byte matching `wm`'s own `protocol.rs`'s
+        // `parses_switch_tag` fixture, so the two ends are provably
+        // wire-compatible.
+        assert_eq!(
+            serialize_request(&Request::SwitchTag {
+                output_id: 0,
+                tag_id: 2
+            }),
+            r#"{"type":"switch-tag","output_id":0,"tag_id":2}"#
         );
     }
 

@@ -1,19 +1,24 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
 // SPDX-License-Identifier: 0BSD
 
-//! `tag-picker`: a companion binary spawned by `wm`'s `Mod4+A` keybind
-//! (Story 2.2 Task 7). Connects to `wm`'s IPC socket, fetches the focused
-//! view's current tags, and drives a sequential `fuzzel --dmenu`
-//! toggle-and-reopen loop (see `docs/planning/epics/story-2-2.md`'s
-//! Technical notes "Spike finding" for why this loop shape, not a single
-//! native multi-select, is the only interaction fuzzel's real flag surface
-//! supports). This module is process-spawn and live-socket I/O glue only
-//! — every decision it makes (what to render, how to parse `fuzzel`'s
-//! output, how to detect cancel) is unit-tested in `checklist`/`wire`;
-//! nothing here has its own RED/GREEN tests (same carve-out class as
-//! `wm/src/main.rs`'s Wayland-`Dispatch` glue).
+//! `tag-picker`: a companion binary spawned by `wm`'s `Mod4+A` ("assign
+//! mode", Story 2.2 Task 7) and `Mod4+S` ("switch mode", Story 2.4 Task 7)
+//! keybinds. Connects to `wm`'s IPC socket and fetches state, then either
+//! drives a sequential `fuzzel --dmenu` toggle-and-reopen loop (assign
+//! mode — see `docs/planning/epics/story-2-2.md`'s Technical notes "Spike
+//! finding" for why this loop shape, not a single native multi-select, is
+//! the only interaction fuzzel's real flag surface supports) or a single-
+//! shot select-or-cancel invocation (switch mode — see
+//! `docs/planning/epics/story-2-4.md`'s Technical notes "Switch mode's
+//! single-shot shape vs. assign mode's toggle-and-reopen loop"). This
+//! module is process-spawn and live-socket I/O glue only — every decision
+//! it makes (what to render, how to parse `fuzzel`'s output, how to
+//! detect cancel, which mode argv selects) is unit-tested in
+//! `checklist`/`wire`/`mode`; nothing here has its own RED/GREEN tests
+//! (same carve-out class as `wm/src/main.rs`'s Wayland-`Dispatch` glue).
 
 mod checklist;
+mod mode;
 mod socket_path;
 mod wire;
 
@@ -122,7 +127,19 @@ fn run_fuzzel(input: &str, initial_search: Option<&str>) -> (bool, String) {
     result
 }
 
-fn main() {
+/// Connects to `wm`'s IPC socket, sends `get-state`, and returns the
+/// writer/reader pair plus the parsed state (Task 6.1's mechanical
+/// extraction — shared boilerplate both assign and switch mode need
+/// before doing anything mode-specific). Exits the process on any
+/// connection/request/response failure, exactly as `main`'s own inline
+/// version did before this extraction — no behavioral change.
+fn connect_and_get_state() -> (
+    UnixStream,
+    BufReader<UnixStream>,
+    Vec<wire::TagDto>,
+    Vec<wire::ViewDto>,
+    Option<u64>,
+) {
     let socket_path = socket_path::default_socket_path();
     let stream = match UnixStream::connect(&socket_path) {
         Ok(stream) => stream,
@@ -144,7 +161,7 @@ fn main() {
         eprintln!("tag-picker: failed to send get-state request");
         std::process::exit(1);
     }
-    let (mut tags, views, focused_view) = match read_response(&mut reader) {
+    let (tags, views, focused_view) = match read_response(&mut reader) {
         Some(wire::Response::State {
             tags,
             views,
@@ -160,6 +177,20 @@ fn main() {
         }
     };
 
+    (writer, reader, tags, views, focused_view)
+}
+
+/// Assign mode's existing toggle-and-reopen loop (Story 2.2/2.3), moved
+/// out of `main` verbatim (Task 6.1) — no behavioral change, verified by
+/// every existing `checklist`/`wire` unit test (untouched by this
+/// extraction) staying green.
+fn run_assign_mode(
+    mut writer: UnixStream,
+    mut reader: BufReader<UnixStream>,
+    mut tags: Vec<wire::TagDto>,
+    views: Vec<wire::ViewDto>,
+    focused_view: Option<u64>,
+) {
     if !checklist::should_open_picker(focused_view) {
         eprintln!("tag-picker: no window focused");
         std::process::exit(0);
@@ -312,6 +343,73 @@ fn main() {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Switch mode's single-shot flow (Story 2.4 Task 6.2): renders a plain,
+/// un-checkboxed list of every registry tag, opens one `fuzzel`
+/// invocation, and either sends `switch-tag` and returns, or returns with
+/// no request sent at all — there is no reopen loop, unlike
+/// [`run_assign_mode`]'s toggle-and-reopen shape (Technical notes "Switch
+/// mode's single-shot shape").
+fn run_switch_mode(
+    mut writer: UnixStream,
+    mut reader: BufReader<UnixStream>,
+    tags: Vec<wire::TagDto>,
+    output_id: u64,
+) {
+    let known_ids: Vec<u8> = tags.iter().map(|t| t.id).collect();
+    let input = checklist::render_switch_list(&tags);
+    // No `initial_search` — switch mode never has a rejection row to
+    // restore (that mechanism is assign mode's create-tag-cap concept
+    // only).
+    let (exit_success, stdout) = run_fuzzel(&input, None);
+
+    match checklist::parse_switch_selection(exit_success, &stdout, &known_ids) {
+        checklist::SwitchAction::Cancelled => {}
+        checklist::SwitchAction::Selected(tag_id) => {
+            if !send_request(&mut writer, &wire::Request::SwitchTag { output_id, tag_id }) {
+                eprintln!("tag-picker: failed to send switch-tag request");
+                std::process::exit(1);
+            }
+            match read_response(&mut reader) {
+                Some(wire::Response::Ok) => {}
+                Some(wire::Response::Error { message }) => {
+                    eprintln!("tag-picker: {message}");
+                    std::process::exit(1);
+                }
+                other => {
+                    eprintln!("tag-picker: unexpected response to switch-tag: {other:?}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = match mode::parse_args(&args) {
+        Ok(mode) => mode,
+        Err(message) => {
+            eprintln!("tag-picker: {message}");
+            std::process::exit(1);
+        }
+    };
+
+    match mode {
+        mode::Mode::Assign => {
+            let (writer, reader, tags, views, focused_view) = connect_and_get_state();
+            run_assign_mode(writer, reader, tags, views, focused_view);
+        }
+        // Switch mode has no focused-view precondition at all — pressing
+        // `Mod4+S` works with no window focused and none existing — so
+        // `checklist::should_open_picker`'s check is deliberately not
+        // applied on this branch.
+        mode::Mode::Switch { output_id } => {
+            let (writer, reader, tags, _views, _focused_view) = connect_and_get_state();
+            run_switch_mode(writer, reader, tags, output_id);
         }
     }
 }

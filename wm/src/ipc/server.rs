@@ -140,12 +140,27 @@ fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>) {
                 return; // malformed/unparseable input: reset the connection
             }
             Ok(request) => {
-                let response = {
+                let (response, pending_spawn) = {
                     let mut core = lock_recovering(wm_core);
                     handle_request(&mut core, request)
                 };
                 if !write_response(&mut writer, &response) {
                     return; // peer gone; nothing more to do
+                }
+                // Code-review follow-up (Story 2.4): the real
+                // `crate::spawn_pinned_terminal` process spawn happens
+                // here — after the response is already on the wire and the
+                // `wm-core` mutex released — rather than inside
+                // `handle_request` itself, so a slow or failing spawn can
+                // never block the client waiting on its response, and so
+                // `dispatch::handle_request`'s own unit tests stay free of
+                // real process spawns. `crate::spawn_pinned_terminal` is a
+                // private fn at the binary crate's root module; this module
+                // (a descendant of the crate root) may call it directly
+                // with no visibility changes, same as `dispatch.rs`
+                // previously did.
+                if let Some(session_name) = pending_spawn {
+                    crate::spawn_pinned_terminal(&session_name);
                 }
                 // well-formed request, wm-core-level Ok/Error: connection
                 // stays open for further requests.
