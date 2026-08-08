@@ -1,28 +1,29 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
 // SPDX-License-Identifier: 0BSD
 
-//! `tag-picker`'s own minimal mirror of the two request/three response
-//! wire shapes it needs from `wm/src/ipc/protocol.rs` (ADR-007). This is a
-//! deliberate, accepted duplication, not an oversight: this project's own
-//! three-strike DRY rule extracts shared code after ~3 independent
-//! occurrences, and right now there are exactly two (`wm`'s and this
-//! one) — one below the threshold. A shared crate is deferred to whichever
-//! story first gives `status-bar` (Story 2.5) the same need, a genuine
-//! third consumer. `tag-picker` only ever sends `get-state`/`toggle-tag`
-//! and only ever needs the `State`/`Ok`/`Error` response variants, so this
-//! mirror is intentionally narrower than `wm`'s full protocol (no
-//! `CreateTag`/`SwitchTag` requests, no `TagCreated` response, no
-//! `app_id`/`outputs` fields) — see the story's Technical notes gap #3.
+//! `tag-picker`'s own minimal mirror of the wire shapes it needs from
+//! `wm/src/ipc/protocol.rs` (ADR-007). This is a deliberate, accepted
+//! duplication, not an oversight: this project's own three-strike DRY rule
+//! extracts shared code after ~3 independent occurrences, and right now
+//! there are exactly two (`wm`'s and this one) — one below the threshold. A
+//! shared crate is deferred to whichever story first gives `status-bar`
+//! (Story 2.5) the same need, a genuine third consumer. As of Story 2.3,
+//! `tag-picker` sends `get-state`/`toggle-tag`/`create-tag` and understands
+//! the `state`/`ok`/`tag-created`/`error` responses those produce; `wm`'s
+//! own `switch-tag` request remains unmodeled here (Story 2.4's job), and
+//! `State`/`ViewDto` still omit `outputs`/`app_id` — fields this client has
+//! no use for, tolerated as unknown fields by serde's default leniency.
 
 use serde::{Deserialize, Serialize};
 
 /// A request this client can send. Narrower than `wm`'s own `Request`
-/// enum — `tag-picker` never sends `create-tag`/`switch-tag`.
+/// enum — `tag-picker` never sends `switch-tag` (Story 2.4's job).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Request {
     GetState,
     ToggleTag { view_id: u64, tag_id: u8 },
+    CreateTag { name: String },
 }
 
 /// A tag as it appears on the wire: `id` and `name`.
@@ -43,8 +44,8 @@ pub struct ViewDto {
 }
 
 /// A response this client can receive. Narrower than `wm`'s own `Response`
-/// enum — no `TagCreated` variant, no `outputs` field on `State` — since
-/// `tag-picker` never sends the requests that would produce them.
+/// enum — no `outputs` field on `State` — since `tag-picker` never sends
+/// the request (`switch-tag`) that field is for.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Response {
@@ -54,6 +55,9 @@ pub enum Response {
         focused_view: Option<u64>,
     },
     Ok,
+    TagCreated {
+        tag_id: u8,
+    },
     Error {
         message: String,
     },
@@ -107,6 +111,22 @@ mod tests {
     }
 
     #[test]
+    fn serializes_create_tag_request() {
+        assert_eq!(
+            serialize_request(&Request::CreateTag { name: "web".into() }),
+            r#"{"type":"create-tag","name":"web"}"#
+        );
+    }
+
+    #[test]
+    fn parses_tag_created_response() {
+        assert_eq!(
+            parse_response(br#"{"type":"tag-created","tag_id":5}"#),
+            Ok(Response::TagCreated { tag_id: 5 })
+        );
+    }
+
+    #[test]
     fn parses_state_response_ignoring_unmodeled_fields() {
         let line = br#"{"type":"state","tags":[{"id":0,"name":"web"}],"views":[{"id":3,"app_id":"foot","tags":[0,2]}],"outputs":[{"id":0,"current_tag":0}],"focused_view":3}"#;
         assert_eq!(
@@ -153,7 +173,14 @@ mod tests {
 
     #[test]
     fn parse_response_rejects_unknown_type() {
-        assert!(parse_response(br#"{"type":"tag-created","tag_id":5}"#).is_err());
+        // Story 2.3: `"tag-created"` used to be this test's "real `wm`
+        // response shape this client just doesn't model" fixture. Once
+        // `Response::TagCreated` is added below, that literal becomes a
+        // genuinely modeled type, so this test would silently stop testing
+        // what it claims to — swapped to a still-unmodeled, clearly bogus
+        // type instead (same fixture-swap precedent as `wm`'s own
+        // `protocol.rs` tests use for this exact kind of case).
+        assert!(parse_response(br#"{"type":"delete-everything"}"#).is_err());
     }
 
     #[test]

@@ -48,10 +48,13 @@ fn read_response(reader: &mut BufReader<UnixStream>) -> Option<wire::Response> {
 /// (Technical notes' "Spike finding"): `--with-nth=1` displays only the
 /// checkbox-glyph+name column, `--accept-nth=2` prints only the bare tag
 /// id column on selection, `--nth-delimiter` is the tab this module's
-/// stdin rows use. Returns `(exit_success, stdout_as_lossy_utf8)`; a
-/// failure to spawn or wait is treated as a failed/cancelled invocation
-/// rather than panicking (never exercised live in this sandbox — no
-/// `fuzzel` binary and no Wayland session, see the story's Task 8.3 note).
+/// stdin rows use. When `initial_search` is `Some(text)`, `--search=<text>`
+/// pre-fills fuzzel's input box (Story 2.3: restores the rejected name into
+/// view on a cap-rejection reopen — a real, documented flag). Returns
+/// `(exit_success, stdout_as_lossy_utf8)`; a failure to spawn or wait is
+/// treated as a failed/cancelled invocation rather than panicking (never
+/// exercised live in this sandbox — no `fuzzel` binary and no Wayland
+/// session, see the story's Task 8.3 note).
 ///
 /// Code review follow-up (finding #2): stdin is written from a dedicated
 /// thread, concurrently with the main thread's `wait_with_output()`, rather
@@ -62,16 +65,18 @@ fn read_response(reader: &mut BufReader<UnixStream>) -> Option<wire::Response> {
 /// 64-tag cap with realistic names, but not bounded/documented either; this
 /// is the standard `std::process::Command` pattern for avoiding that class
 /// of deadlock.
-fn run_fuzzel(input: &str) -> (bool, String) {
-    let mut child = match Command::new("fuzzel")
+fn run_fuzzel(input: &str, initial_search: Option<&str>) -> (bool, String) {
+    let mut command = Command::new("fuzzel");
+    command
         .arg("--dmenu")
         .arg("--with-nth=1")
         .arg("--accept-nth=2")
         .arg("--nth-delimiter=\t")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-    {
+        .arg("--placeholder=type to filter, or a new name to create");
+    if let Some(text) = initial_search {
+        command.arg(format!("--search={text}"));
+    }
+    let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
         Ok(child) => child,
         Err(e) => {
             eprintln!("tag-picker: failed to spawn fuzzel: {e}");
@@ -139,7 +144,7 @@ fn main() {
         eprintln!("tag-picker: failed to send get-state request");
         std::process::exit(1);
     }
-    let (tags, views, focused_view) = match read_response(&mut reader) {
+    let (mut tags, views, focused_view) = match read_response(&mut reader) {
         Some(wire::Response::State {
             tags,
             views,
@@ -168,14 +173,26 @@ fn main() {
         .map(|v| v.tags.clone())
         .unwrap_or_default();
 
-    loop {
-        let entries = checklist::build_checklist_entries(&tags, &current_tags);
-        let input = checklist::render_fuzzel_input(&entries);
-        let (exit_success, stdout) = run_fuzzel(&input);
+    // `Some(name)` when the most recent `create-tag` attempt was rejected
+    // for hitting the 64-tag cap: the next `fuzzel` reopen prepends the
+    // rejection row and restores `name` into the input box via `--search`
+    // (Story 2.3 Task 4.2).
+    let mut pending_rejected_name: Option<String> = None;
 
-        match checklist::parse_fuzzel_output(exit_success, &stdout) {
+    loop {
+        let known_ids: Vec<u8> = tags.iter().map(|t| t.id).collect();
+        let mut input = String::new();
+        if pending_rejected_name.is_some() {
+            input.push_str(&checklist::render_rejection_row());
+        }
+        let entries = checklist::build_checklist_entries(&tags, &current_tags);
+        input.push_str(&checklist::render_fuzzel_input(&entries));
+        let (exit_success, stdout) = run_fuzzel(&input, pending_rejected_name.as_deref());
+
+        match checklist::parse_fuzzel_output(exit_success, &stdout, &known_ids) {
             checklist::PickerAction::Cancelled => break,
             checklist::PickerAction::Toggled(tag_id) => {
+                pending_rejected_name = None;
                 if !send_request(&mut writer, &wire::Request::ToggleTag { view_id, tag_id }) {
                     eprintln!("tag-picker: failed to send toggle-tag request");
                     break;
@@ -190,6 +207,56 @@ fn main() {
                     }
                     other => {
                         eprintln!("tag-picker: unexpected response to toggle-tag: {other:?}");
+                        break;
+                    }
+                }
+            }
+            checklist::PickerAction::CreateTag(name) => {
+                if !send_request(
+                    &mut writer,
+                    &wire::Request::CreateTag { name: name.clone() },
+                ) {
+                    eprintln!("tag-picker: failed to send create-tag request");
+                    break;
+                }
+                match read_response(&mut reader) {
+                    Some(wire::Response::TagCreated { tag_id }) => {
+                        tags.push(wire::TagDto {
+                            id: tag_id,
+                            name: name.clone(),
+                        });
+                        if !send_request(&mut writer, &wire::Request::ToggleTag { view_id, tag_id })
+                        {
+                            eprintln!("tag-picker: failed to send toggle-tag request");
+                            break;
+                        }
+                        match read_response(&mut reader) {
+                            Some(wire::Response::Ok) => {
+                                checklist::toggle_local_membership(&mut current_tags, tag_id);
+                                pending_rejected_name = None;
+                            }
+                            Some(wire::Response::Error { message }) => {
+                                eprintln!("tag-picker: {message}");
+                                break;
+                            }
+                            other => {
+                                eprintln!(
+                                    "tag-picker: unexpected response to toggle-tag: {other:?}"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    Some(wire::Response::Error { message }) => {
+                        if message == checklist::REJECTION_MESSAGE {
+                            pending_rejected_name = Some(name);
+                        } else {
+                            eprintln!("tag-picker: {message}");
+                            break;
+                        }
+                    }
+                    other => {
+                        eprintln!("tag-picker: unexpected response to create-tag: {other:?}");
                         break;
                     }
                 }
