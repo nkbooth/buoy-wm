@@ -179,11 +179,21 @@ fn main() {
     // (Story 2.3 Task 4.2).
     let mut pending_rejected_name: Option<String> = None;
 
+    // `true` when the most recent `create-tag` succeeded but the
+    // immediately-chained `toggle-tag` failed (Code review follow-up,
+    // finding 2): the next `fuzzel` reopen prepends a message row telling
+    // the user the tag exists but wasn't applied, since stderr is invisible
+    // to a keybind-spawned process with no attached terminal.
+    let mut pending_create_apply_failed = false;
+
     loop {
         let known_ids: Vec<u8> = tags.iter().map(|t| t.id).collect();
         let mut input = String::new();
         if pending_rejected_name.is_some() {
             input.push_str(&checklist::render_rejection_row());
+        }
+        if pending_create_apply_failed {
+            input.push_str(&checklist::render_create_apply_failed_row());
         }
         let entries = checklist::build_checklist_entries(&tags, &current_tags);
         input.push_str(&checklist::render_fuzzel_input(&entries));
@@ -193,6 +203,7 @@ fn main() {
             checklist::PickerAction::Cancelled => break,
             checklist::PickerAction::Toggled(tag_id) => {
                 pending_rejected_name = None;
+                pending_create_apply_failed = false;
                 if !send_request(&mut writer, &wire::Request::ToggleTag { view_id, tag_id }) {
                     eprintln!("tag-picker: failed to send toggle-tag request");
                     break;
@@ -221,30 +232,70 @@ fn main() {
                 }
                 match read_response(&mut reader) {
                     Some(wire::Response::TagCreated { tag_id }) => {
-                        tags.push(wire::TagDto {
-                            id: tag_id,
-                            name: name.clone(),
-                        });
-                        if !send_request(&mut writer, &wire::Request::ToggleTag { view_id, tag_id })
-                        {
-                            eprintln!("tag-picker: failed to send toggle-tag request");
-                            break;
+                        // Code review follow-up (finding 3): only mirror a
+                        // genuinely new tag id — `create-tag` is idempotent
+                        // by name (finding 1), so a name-collision resolves
+                        // to an id already present in `tags`, and re-pushing
+                        // it would duplicate that tag's row on every
+                        // subsequent reopen this session.
+                        if checklist::should_add_to_tag_mirror(tag_id, &tags) {
+                            tags.push(wire::TagDto {
+                                id: tag_id,
+                                name: name.clone(),
+                            });
                         }
-                        match read_response(&mut reader) {
-                            Some(wire::Response::Ok) => {
-                                checklist::toggle_local_membership(&mut current_tags, tag_id);
-                                pending_rejected_name = None;
-                            }
-                            Some(wire::Response::Error { message }) => {
-                                eprintln!("tag-picker: {message}");
-                                break;
-                            }
-                            other => {
+                        pending_rejected_name = None;
+
+                        // Code review follow-up (finding 1): "ensure
+                        // applied," not "blindly toggle" — a name-collision
+                        // with an already-applied existing tag must not be
+                        // toggled, or `toggle_view_tag`'s add-if-absent/
+                        // remove-if-present semantics would remove it.
+                        if checklist::should_toggle_after_create(tag_id, &current_tags) {
+                            if !send_request(
+                                &mut writer,
+                                &wire::Request::ToggleTag { view_id, tag_id },
+                            ) {
+                                // Code review follow-up (finding 2): the tag
+                                // now permanently exists registry-side
+                                // (no delete-tag API, ADR-006/v1 scope) but
+                                // was never applied. Surface this via the
+                                // picker UI itself on the next reopen rather
+                                // than silently breaking — stderr is
+                                // invisible to a keybind-spawned process
+                                // with no attached terminal.
                                 eprintln!(
-                                    "tag-picker: unexpected response to toggle-tag: {other:?}"
+                                    "tag-picker: tag {tag_id} created but failed to send chained toggle-tag request"
                                 );
-                                break;
+                                pending_create_apply_failed = true;
+                            } else {
+                                match read_response(&mut reader) {
+                                    Some(wire::Response::Ok) => {
+                                        checklist::toggle_local_membership(
+                                            &mut current_tags,
+                                            tag_id,
+                                        );
+                                        pending_create_apply_failed = false;
+                                    }
+                                    Some(wire::Response::Error { message }) => {
+                                        eprintln!(
+                                            "tag-picker: tag {tag_id} created but chained toggle-tag failed: {message}"
+                                        );
+                                        pending_create_apply_failed = true;
+                                    }
+                                    other => {
+                                        eprintln!(
+                                            "tag-picker: tag {tag_id} created but chained toggle-tag got unexpected response: {other:?}"
+                                        );
+                                        pending_create_apply_failed = true;
+                                    }
+                                }
                             }
+                        } else {
+                            // Name-collision with an already-applied
+                            // existing tag: already applied, nothing left
+                            // to do or report.
+                            pending_create_apply_failed = false;
                         }
                     }
                     Some(wire::Response::Error { message }) => {

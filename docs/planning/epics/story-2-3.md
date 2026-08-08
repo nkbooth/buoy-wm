@@ -3,7 +3,7 @@ baseline_commit: b1af4ab
 ---
 
 # Story 2.3: Tag-Manager Picker — Create New Tag
-Epic: 2 | Priority: H | Status: review
+Epic: 2 | Priority: H | Status: done
 
 ## Description
 Extends `tag-picker`'s existing assign-mode loop (Story 2.2, `Mod4+A`) so
@@ -121,7 +121,7 @@ no rejection-row state is entered for errors other than the exact
 tag-limit-reached string
 
 - [x] Tests pass (unit + integration where applicable)
-- [ ] Code review: PASS
+- [x] Code review: PASS
 
 ## Tasks / Subtasks
 
@@ -432,6 +432,119 @@ unverified beyond structural review. This is the single largest residual
 risk carried into Story 2.4, which builds a third interaction mode (switch
 mode) on top of this same binary's assumptions.
 
+### Code Review Follow-up
+
+Addressed, in the code review's priority order:
+
+- **Finding #1 (high — idempotent name-collision silently removed an
+  already-applied tag instead of creating a new one).**
+  `wm_core::TagRegistry::create_tag` is idempotent by exact name: calling
+  `create_tag("web")` when `"web"` already exists just returns
+  `Ok(existing_id)`, not an error. `parse_fuzzel_output` classifies any
+  free-typed text that isn't a known-rendered numeral as `CreateTag`, with
+  no check against existing tag names — so typing an already-applied tag's
+  exact name sent `create-tag` (got back the *existing* id as a normal
+  success) then blindly chained `toggle-tag` on that id, which
+  `toggle_view_tag`'s add-if-absent/remove-if-present semantics turned into
+  a silent *removal*, with both IPC calls reporting success and nothing
+  signalling the mistake. Fixed by changing the chain's semantics from
+  "blind toggle" to "ensure applied": new pure function
+  `should_toggle_after_create(tag_id: u8, current_tags: &[u8]) -> bool`
+  (`tag-picker/src/checklist.rs`) returns `!current_tags.contains(&tag_id)`
+  — `tag-picker/src/main.rs`'s `PickerAction::CreateTag` arm only sends the
+  chained `toggle-tag` when this returns `true`. A genuinely new tag can
+  never already be a current-tags member, so the toggle-to-apply still
+  always fires (existing behavior preserved); a collision with an
+  already-applied tag skips the toggle entirely (no more false removal); a
+  collision with an existing-but-not-yet-applied tag still toggles, to
+  correctly apply it. TDD: RED confirmed first (tests referencing the
+  not-yet-defined function failed to compile), then implemented for GREEN.
+  New tests: `should_toggle_after_create_true_for_genuinely_new_tag`,
+  `should_toggle_after_create_false_when_resolved_tag_already_applied`,
+  `should_toggle_after_create_true_when_resolved_tag_exists_but_not_applied`.
+- **Finding #3 (medium, consequence of #1 — duplicate registry-mirror
+  entries on the same collision).** `tags.push(...)` ran unconditionally on
+  `TagCreated` with no check for whether `tag_id` was already present in
+  the local `tags` mirror, so a collision also duplicated the tag's row in
+  every subsequent picker reopen for the rest of the session. Fixed
+  alongside finding #1: new pure function
+  `should_add_to_tag_mirror(tag_id: u8, tags: &[TagDto]) -> bool` returns
+  `!tags.iter().any(|t| t.id == tag_id)` — `main.rs` only pushes the new
+  `TagDto` when this returns `true`. TDD RED/GREEN, same pass as finding
+  #1. New tests: `should_add_to_tag_mirror_true_when_tag_id_absent`,
+  `should_add_to_tag_mirror_false_when_tag_id_already_present`.
+- **Finding #2 (high — no rollback or user-visible signal when the chained
+  toggle-tag fails after a genuine create-tag success).** `wm_core` has no
+  delete-tag API (ADR-006/v1 scope, deliberate), so a tag once created is
+  permanent for the session; if `create-tag` succeeded but the chained
+  `toggle-tag` failed (send failure, IPC error, or unexpected response),
+  the prior code `eprintln!`'d and `break`'d the loop — but `tag-picker` is
+  spawned by a WM keybind with no attached terminal, so that stderr output
+  is never seen, and the user just sees `fuzzel` close with nothing
+  visibly having happened while a new tag now permanently occupies a
+  registry slot, never applied. Fixed by reusing the existing
+  `render_rejection_row`/`REJECTION_MESSAGE` synthetic-row pattern: new
+  `pub const CREATE_APPLY_FAILED_MESSAGE: &str = "tag created but not
+  applied — toggle it manually"` and `pub fn
+  render_create_apply_failed_row() -> String` in `checklist.rs` (wording
+  and format deliberately distinct from `REJECTION_MESSAGE`/
+  `render_rejection_row` so the two notices are never confused). `main.rs`
+  gains a `pending_create_apply_failed: bool` loop-state flag (alongside
+  the existing `pending_rejected_name`), prepended to the next `fuzzel`
+  reopen's input when set; on a chained-toggle send failure, error
+  response, or unexpected response, the code now sets this flag instead of
+  `break`ing, so the loop continues and the next reopen shows the notice
+  row — dismissing it (Escape or selecting the row, both empty-stdout)
+  ends the loop normally on the next iteration, same mechanism the
+  cap-rejection row already established. TDD: the pure row-construction
+  piece (`render_create_apply_failed_row`) got RED/GREEN coverage; the
+  `main.rs` loop-sequencing change (when to set/clear the flag, not
+  `break`ing) is I/O glue per this project's established carve-out,
+  verified via build+clippy+manual review against the description above.
+  New tests:
+  `render_create_apply_failed_row_is_the_literal_message_with_an_empty_accept_column`,
+  `create_apply_failed_message_is_textually_distinct_from_rejection_message`.
+- **Finding #4 (low-medium — a repurposed test's name overclaimed what it
+  tested).** `parse_fuzzel_output_returns_create_tag_for_numeral_not_among_known_ids`
+  asserted on input `"999\n"` with `known_tag_ids = [0,1,2]`, but `"999"`
+  exceeds `u8::MAX` (255), so `.parse::<u8>()` fails outright — the test
+  actually exercised the parse-*failure* path (already covered by the
+  sibling `..._non_numeric_freeform_stdout` test), not the "valid in-range
+  id that just isn't in `known_tag_ids`" branch its name claimed to test.
+  Fixed by renaming it to
+  `parse_fuzzel_output_returns_create_tag_for_out_of_range_numeral_via_parse_failure_path`
+  with an updated doc comment explaining the actual path it exercises, and
+  adding the genuinely missing case: new test
+  `parse_fuzzel_output_returns_create_tag_for_in_range_numeral_not_among_known_ids`
+  asserts `parse_fuzzel_output(true, "5\n", &[0, 1, 2])` equals
+  `PickerAction::CreateTag("5".into())`, exercising the `Ok(id) if
+  known_tag_ids.contains(&id)` guard's *false* branch specifically.
+
+Explicitly deferred, per this pass's scope (not fixed, left as-is):
+
+- The `--search=<rejected name>` possibly-fighting-fuzzel's-own-fuzzy-filter
+  concern — unverifiable without a live `fuzzel` session, already disclosed
+  in this story.
+- The cap-rejection string-match fragility (`dispatch.rs` error string vs.
+  `REJECTION_MESSAGE` constant staying in sync) — accepted existing pattern
+  in this codebase, same as `socket_path.rs`.
+- The DRY duplication between the `Toggled` arm and `CreateTag` arm's
+  response-handling blocks — only the 2nd occurrence per this project's
+  three-strike rule, not extracted yet.
+
+Full re-verification, all in-container via `podman exec -u vscode -w
+/workspaces/buoy-wm bold_vaughan <cmd>` (`devpod ssh buoy-wm` was again
+unreliable this session — `Error tunneling to container: wait: remote
+command exited without exit status or exit signal`): `cargo test
+--workspace` green (147 `wm` tests, unchanged, + 47 `tag-picker` tests — 8
+net new on top of the prior 39: 3 for `should_toggle_after_create`, 2 for
+`should_add_to_tag_mirror`, 2 for `render_create_apply_failed_row`/its
+distinctness from `REJECTION_MESSAGE`, 1 for the finding #4 coverage gap,
+plus the finding #4 rename of a pre-existing test), `cargo build
+--workspace` clean, `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets -- -D warnings` clean, `pre-commit run
+--all-files` clean (both hooks pass).
+
 ### File List
 
 - `tag-picker/src/wire.rs` (modified) — `Request::CreateTag`,
@@ -440,11 +553,17 @@ mode) on top of this same binary's assumptions.
 - `tag-picker/src/checklist.rs` (modified) — `PickerAction::CreateTag`,
   `parse_fuzzel_output`'s 3-argument signature and new disambiguation
   logic, `REJECTION_MESSAGE`, `render_rejection_row`, module/function doc
-  comments, updated pre-existing tests' call sites, new tests
+  comments, updated pre-existing tests' call sites, new tests; code review
+  follow-up adds `should_toggle_after_create`, `should_add_to_tag_mirror`,
+  `CREATE_APPLY_FAILED_MESSAGE`, `render_create_apply_failed_row`, renames
+  one mis-named test, adds new tests for all of the above
 - `tag-picker/src/main.rs` (modified) — `run_fuzzel`'s `initial_search`
   parameter and `--placeholder` arg, the loop's `pending_rejected_name`
   state and `PickerAction::CreateTag` branch (create-then-toggle chaining,
-  rejection-row reopen)
+  rejection-row reopen); code review follow-up adds
+  `pending_create_apply_failed` loop state and reworks the `TagCreated`
+  handling to use `should_toggle_after_create`/`should_add_to_tag_mirror`
+  instead of blindly toggling/pushing
 - `docs/planning/epics/story-2-3.md` (modified) — task checkboxes, Dev
   Agent Record, File List, Change Log, Status, `baseline_commit`
   frontmatter
@@ -464,3 +583,17 @@ mode) on top of this same binary's assumptions.
   verification (fmt/clippy/build/test/pre-commit) green, 186 total tests
   (147 `wm` + 39 `tag-picker`), zero regressions. Status moved to
   `review`.
+- 2026-08-08: Code review follow-up — fixed the idempotent name-collision
+  silently removing an already-applied tag (finding #1, new
+  `should_toggle_after_create`), the resulting duplicate registry-mirror
+  entries (finding #3, new `should_add_to_tag_mirror`), the silent
+  permanent-tag-with-no-signal on a chained-toggle failure after a genuine
+  create (finding #2, new `CREATE_APPLY_FAILED_MESSAGE`/
+  `render_create_apply_failed_row` and `pending_create_apply_failed` loop
+  state), and a mis-named test overclaiming its own coverage (finding #4,
+  renamed plus one new test for the actual missing case). Deferred:
+  `--search` fuzzy-filter interaction, cap-rejection string-match
+  fragility, the `Toggled`/`CreateTag` response-handling DRY nit. 8 net new
+  `tag-picker` tests (194 total: 147 `wm` + 47 `tag-picker`), zero
+  regressions. Full workspace verification (test/build/fmt/clippy/
+  pre-commit) green.

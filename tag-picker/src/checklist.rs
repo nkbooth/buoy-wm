@@ -133,6 +133,58 @@ pub fn render_rejection_row() -> String {
     format!("{REJECTION_MESSAGE}\t\n")
 }
 
+/// Decides whether a chained `toggle-tag` request should follow a
+/// successful `create-tag` response resolving to `tag_id` (Code review
+/// follow-up, finding 1). `wm_core::TagRegistry::create_tag` is idempotent
+/// by exact name: a `create-tag` call can resolve to an *existing* tag's
+/// id instead of a genuinely new one. Blindly toggling that resolved id
+/// would, if it's already applied to the focused view, *remove* it
+/// (`toggle_view_tag`'s add-if-absent/remove-if-present semantics) — the
+/// opposite of what typing its name was supposed to do, with both IPC
+/// calls still reporting success and nothing signalling the mistake.
+///
+/// The correct rule is "ensure applied," not "blindly toggle": skip the
+/// chained toggle only when `tag_id` is already a member of `current_tags`
+/// (the focused view's current tag membership, as already tracked locally
+/// from `get-state`); otherwise send it — this covers both a genuinely new
+/// tag (never already a member, so the toggle-to-apply always fires) and a
+/// name-collision with an existing-but-not-yet-applied tag (the toggle
+/// still needs to fire to apply it).
+pub fn should_toggle_after_create(tag_id: u8, current_tags: &[u8]) -> bool {
+    !current_tags.contains(&tag_id)
+}
+
+/// Decides whether `tag_id` should be appended to the picker's local
+/// `tags` mirror after a `create-tag` response (Code review follow-up,
+/// finding 3 — a direct consequence of finding 1's idempotent-collision
+/// case): only push when `tag_id` isn't already present in `tags`, so a
+/// name-collision with an already-registered tag doesn't duplicate that
+/// tag's row on every subsequent `fuzzel` reopen for the rest of the
+/// session.
+pub fn should_add_to_tag_mirror(tag_id: u8, tags: &[TagDto]) -> bool {
+    !tags.iter().any(|t| t.id == tag_id)
+}
+
+/// The literal message row shown when a `create-tag` request succeeds but
+/// the immediately-chained `toggle-tag` request fails (Code review
+/// follow-up, finding 2). `wm_core` has no delete-tag API (ADR-006/v1
+/// scope, deliberate) — a tag once created is permanent for the session,
+/// so a failed chained toggle leaves a brand-new tag registered but never
+/// applied. `tag-picker` is spawned by a WM keybind with no attached
+/// terminal, so a bare `eprintln!` is invisible to the user; this row
+/// surfaces the failure in the only UI surface the user can actually see.
+/// Deliberately distinct wording from [`REJECTION_MESSAGE`] so the two
+/// synthetic notices are never confused with each other.
+pub const CREATE_APPLY_FAILED_MESSAGE: &str = "tag created but not applied — toggle it manually";
+
+/// Renders [`CREATE_APPLY_FAILED_MESSAGE`] as a synthetic checklist row:
+/// same shape, and same empty-`--accept-nth`-column dismissal mechanism
+/// (reusing [`parse_fuzzel_output`]'s empty-stdout-is-cancelled rule), as
+/// [`render_rejection_row`].
+pub fn render_create_apply_failed_row() -> String {
+    format!("{CREATE_APPLY_FAILED_MESSAGE}\t\n")
+}
+
 /// Toggles `tag_id`'s membership in `tags` in place: removes it if
 /// present, appends it if absent. Same add-if-absent/remove-if-present
 /// semantics as `wm_core`'s own `toggle_view_tag`/`TagSet`, kept
@@ -306,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_fuzzel_output_returns_create_tag_for_numeral_not_among_known_ids() {
+    fn parse_fuzzel_output_returns_create_tag_for_out_of_range_numeral_via_parse_failure_path() {
         // Story 2.3 Task 1.4: repurposes the old
         // `..._returns_cancelled_for_tag_id_out_of_u8_range` test. `"999"`
         // not matching any id `tag-picker` actually rendered this
@@ -314,9 +366,31 @@ mod tests {
         // name, but ADR-006 doesn't forbid numeral-shaped tag names, and
         // there is no real row `--accept-nth` could have produced `"999"`
         // from when no id `999` is currently registered.
+        //
+        // Code review follow-up (finding 4): renamed from
+        // `..._returns_create_tag_for_numeral_not_among_known_ids`. `"999"`
+        // exceeds `u8::MAX` (255), so `.parse::<u8>()` fails outright and
+        // this test actually exercises the `_ =>` catch-all arm via a parse
+        // *failure*, not the `Ok(id) if !known_tag_ids.contains(&id)`
+        // guard-false branch its old name implied. That branch is exercised
+        // separately below by
+        // `..._returns_create_tag_for_in_range_numeral_not_among_known_ids`.
         assert_eq!(
             parse_fuzzel_output(true, "999\n", &[0, 1, 2]),
             PickerAction::CreateTag("999".into())
+        );
+    }
+
+    #[test]
+    fn parse_fuzzel_output_returns_create_tag_for_in_range_numeral_not_among_known_ids() {
+        // Code review follow-up (finding 4): the missing coverage case —
+        // a genuinely valid, in-range `u8` numeral ("5") that parses
+        // successfully but isn't a member of `known_tag_ids`, exercising
+        // the `Ok(id) if known_tag_ids.contains(&id)` guard's *false*
+        // branch specifically, distinct from the parse-failure path above.
+        assert_eq!(
+            parse_fuzzel_output(true, "5\n", &[0, 1, 2]),
+            PickerAction::CreateTag("5".into())
         );
     }
 
@@ -419,5 +493,69 @@ mod tests {
     #[test]
     fn should_open_picker_false_when_focused_view_is_none() {
         assert!(!should_open_picker(None));
+    }
+
+    #[test]
+    fn should_toggle_after_create_true_for_genuinely_new_tag() {
+        // Code review follow-up, finding 1(a): a genuinely new tag can
+        // never already be a member of `current_tags`, so the
+        // toggle-to-apply must still fire — existing behavior preserved.
+        assert!(should_toggle_after_create(5, &[0, 1]));
+    }
+
+    #[test]
+    fn should_toggle_after_create_false_when_resolved_tag_already_applied() {
+        // Code review follow-up, finding 1(b): `create-tag` resolved to an
+        // existing tag id (name-collision, idempotent by name) that is
+        // already applied to the focused view — skip the toggle, since
+        // sending it would remove the tag instead of leaving it applied.
+        assert!(!should_toggle_after_create(1, &[0, 1]));
+    }
+
+    #[test]
+    fn should_toggle_after_create_true_when_resolved_tag_exists_but_not_applied() {
+        // Code review follow-up, finding 1(c): `create-tag` resolved to an
+        // existing tag id (name-collision) that is *not* currently applied
+        // to the focused view — the toggle must still fire to apply it,
+        // this is "ensure applied," not "skip all toggles on collision."
+        assert!(should_toggle_after_create(2, &[0, 1]));
+    }
+
+    #[test]
+    fn should_add_to_tag_mirror_true_when_tag_id_absent() {
+        assert!(should_add_to_tag_mirror(
+            5,
+            &[tag(0, "web"), tag(1, "chat")]
+        ));
+    }
+
+    #[test]
+    fn should_add_to_tag_mirror_false_when_tag_id_already_present() {
+        // Code review follow-up, finding 3: a name-collision resolves to an
+        // already-known tag id — pushing it again would duplicate that
+        // tag's row in every subsequent picker reopen this session.
+        assert!(!should_add_to_tag_mirror(
+            1,
+            &[tag(0, "web"), tag(1, "chat")]
+        ));
+    }
+
+    #[test]
+    fn render_create_apply_failed_row_is_the_literal_message_with_an_empty_accept_column() {
+        // Code review follow-up, finding 2: column 1 is the literal
+        // CREATE_APPLY_FAILED_MESSAGE, column 2 (the `--accept-nth` column)
+        // is deliberately empty, same dismissal mechanism as
+        // render_rejection_row.
+        assert_eq!(
+            render_create_apply_failed_row(),
+            "tag created but not applied — toggle it manually\t\n"
+        );
+    }
+
+    #[test]
+    fn create_apply_failed_message_is_textually_distinct_from_rejection_message() {
+        // Code review follow-up, finding 2: the two synthetic notice rows
+        // must never be visually/textually confusable with each other.
+        assert_ne!(CREATE_APPLY_FAILED_MESSAGE, REJECTION_MESSAGE);
     }
 }
