@@ -210,10 +210,19 @@ pub fn toggle_local_membership(tags: &mut Vec<u8>, tag_id: u8) {
     }
 }
 
-/// Whether the picker should open a `fuzzel` invocation at all: only when
-/// a view is focused.
-pub fn should_open_picker(focused_view: Option<u64>) -> bool {
-    focused_view.is_some()
+/// Code review follow-up (Story 2.10): whether assign mode's picker has
+/// *any* useful destination for a pick — either a focused view to toggle
+/// membership on, or a known output to switch to (the no-focus fallback,
+/// Story 2.10 Task 5). Restores the guard `should_open_picker` used to
+/// provide (deleted when the old "must have a focused view" precondition
+/// was relaxed) with the same shape, generalized to the new either/or
+/// requirement. Called *before* any wire traffic in `run_assign_mode` —
+/// without it, a `CreateTag` request could succeed and permanently
+/// register a tag (no delete-tag API exists) in the rare case where
+/// neither a view nor an output is known, only to then have nowhere to
+/// apply or switch to it.
+pub fn should_open_picker(view_id: Option<u64>, output_id: Option<u64>) -> bool {
+    view_id.is_some() || output_id.is_some()
 }
 
 /// One outcome of a single switch-mode `fuzzel` invocation (Story 2.4):
@@ -511,6 +520,26 @@ mod tests {
     }
 
     #[test]
+    fn should_open_picker_true_when_view_focused() {
+        assert!(should_open_picker(Some(3), None));
+    }
+
+    #[test]
+    fn should_open_picker_true_when_output_known_even_without_view() {
+        assert!(should_open_picker(None, Some(0)));
+    }
+
+    #[test]
+    fn should_open_picker_true_when_both_view_and_output_known() {
+        assert!(should_open_picker(Some(3), Some(0)));
+    }
+
+    #[test]
+    fn should_open_picker_false_when_neither_view_nor_output_known() {
+        assert!(!should_open_picker(None, None));
+    }
+
+    #[test]
     fn toggle_local_membership_adds_tag_when_absent() {
         let mut tags = vec![0];
         toggle_local_membership(&mut tags, 1);
@@ -541,16 +570,6 @@ mod tests {
         toggle_local_membership(&mut tags, 1);
         toggle_local_membership(&mut tags, 1);
         assert_eq!(tags, original);
-    }
-
-    #[test]
-    fn should_open_picker_true_when_focused_view_is_some() {
-        assert!(should_open_picker(Some(3)));
-    }
-
-    #[test]
-    fn should_open_picker_false_when_focused_view_is_none() {
-        assert!(!should_open_picker(None));
     }
 
     #[test]

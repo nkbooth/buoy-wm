@@ -10,20 +10,27 @@
 //! extended to this client per Story 2.2/2.3 precedent).
 
 /// The picker's operating mode, decided purely from argv (Task 1.1;
-/// extended with an optional output connector name in Story 2.9 Task 4).
-/// `Assign` is the Story 2.2/2.3 toggle-and-reopen mode; its zero-args
-/// invocation is byte-for-byte unchanged, now with `output_name: None`.
-/// `Switch` carries the `output_id` `wm` resolved once at spawn time via
-/// its own `WindowManager::active_output_id` (Task 1.2) — `tag-picker`
-/// treats it as an opaque argument, never re-deriving "the active output"
-/// itself. Both variants' `output_name` is the real Wayland connector name
-/// (e.g. `"eDP-1"`) `wm`'s `WindowManager::output_name` resolved for that
-/// same active output (Story 2.9), threaded through to `run_fuzzel`'s
+/// extended with an optional output connector name in Story 2.9 Task 4;
+/// assign mode's positional grammar extended again in Story 2.10 Task 4).
+/// `Assign` is the Story 2.2/2.3 toggle-and-reopen mode, extended by Story
+/// 2.10 to also cover the no-focused-window switch-instead-of-toggle
+/// fallback (Task 5) — `output_id` is `wm`'s own `WindowManager::
+/// active_output_id` resolution (`None` only in the startup-race edge case
+/// where no output is registered yet), needed so that fallback can send a
+/// `SwitchTag` request. Its zero-args invocation is still byte-for-byte
+/// unchanged, now with `output_id: None, output_name: None`. `Switch`
+/// carries the `output_id` `wm` resolved once at spawn time via its own
+/// `WindowManager::active_output_id` (Task 1.2) — `tag-picker` treats it as
+/// an opaque argument, never re-deriving "the active output" itself. Both
+/// variants' `output_name` is the real Wayland connector name (e.g.
+/// `"eDP-1"`) `wm`'s `WindowManager::output_name` resolved for that same
+/// active output (Story 2.9), threaded through to `run_fuzzel`'s
 /// `--output=` flag (Task 5) — `None` whenever `wm` didn't yet know it
 /// (Story 2.9 AC 2), in which case no `--output` flag is passed at all.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
     Assign {
+        output_id: Option<u64>,
         output_name: Option<String>,
     },
     Switch {
@@ -33,43 +40,79 @@ pub enum Mode {
 }
 
 /// Decides [`Mode`] from the process's own argv (excluding `argv[0]`, the
-/// executable path). Zero arguments is `Assign { output_name: None }` —
-/// the existing, backward-compatible default. One argument is *always*
-/// `Assign` with that argument as `output_name`, regardless of its value —
-/// including the literal string `"switch"`. Two arguments, the literal
-/// `"switch"` followed by a valid `u64`, is `Switch` with `output_name:
-/// None`. Three arguments, `"switch"`, a valid `u64`, then a name, is
-/// `Switch` with that name as `output_name`. Any other shape (wrong count,
-/// wrong first argument, non-numeric second argument for switch mode) is a
+/// executable path).
+///
+/// Zero arguments is `Assign { output_id: None, output_name: None }` — the
+/// existing, backward-compatible default.
+///
+/// One argument is `Assign` with that argument parsed as a `u64`
+/// `output_id` (`output_name: None`) — a controlled, self-consistent break
+/// of Story 2.9's grammar (Story 2.10 Task 4): assign mode's single
+/// positional argument used to mean an output *name* (a `String`, for
+/// `fuzzel --output=`); it now means an output *id* (a `u64`, for the
+/// `SwitchTag` IPC request Task 5's no-focused-window fallback needs to
+/// send), with the name becoming a second, optional argument below. This is
+/// safe because `tag-picker` has exactly one real caller — `wm`'s own spawn
+/// command — updated in the same story (see this story's Technical notes);
+/// contrast with `Request`/`Response` shapes in `wire.rs`, a stable-ish
+/// contract between two independently-evolving binaries that only ever
+/// gets additive changes. A non-numeric single argument is now a startup
+/// error, not an output name.
+///
+/// Two arguments, a valid `u64` followed by any string and *not* literally
+/// `"switch"` as the first argument, is `Assign` with both `output_id` and
+/// `output_name` set.
+///
+/// Two arguments, the literal `"switch"` followed by a valid `u64`, is
+/// `Switch` with `output_name: None` — unchanged from Story 2.9, and tried
+/// before the generic two-argument `Assign` shape above so a real `switch
+/// <id>` invocation is never misparsed as an assign-mode output id of
+/// `"switch"` (which would fail to parse as a `u64` anyway, but the guard
+/// keeps the intent explicit).
+///
+/// Three arguments, `"switch"`, a valid `u64`, then a name, is `Switch`
+/// with that name as `output_name` — also unchanged from Story 2.9. Any
+/// other shape (wrong count, wrong first argument, non-numeric id) is a
 /// startup error, returned as `Err` rather than panicking or silently
 /// falling back to a mode — malformed invocation is a pure argument-shape
-/// problem the caller should surface immediately (Task 1.1, extended
-/// Story 2.9 Task 4).
+/// problem the caller should surface immediately (Task 1.1, extended Story
+/// 2.9 Task 4, extended again Story 2.10 Task 4).
 ///
 /// Code review follow-up (Story 2.9): a one-argument invocation used to be
 /// rejected when that argument was exactly `"switch"` (to give a clearer
 /// error for a mistyped `tag-picker switch` missing its output id) — but
-/// `wm` now always spawns assign mode with the active output's *real*
-/// connector name as this single argument, and nothing stops a real
-/// Wayland output from being named `"switch"`. That guard turned an
-/// unlikely but real connector name into total assign-mode failure
-/// (`std::process::exit(1)`, no picker at all) — a correctness bug, not
-/// just a missed nicety. A one-argument invocation is unconditionally
-/// `Assign` now; a bare `tag-picker switch` typed by hand is simply
-/// assign mode targeting an output literally named "switch" (which,
-/// finding none, `fuzzel` falls back to its own default placement for,
-/// same as any other unknown/not-yet-connected output name).
+/// `wm` used to always spawn assign mode with the active output's *real*
+/// connector name as this single argument, and nothing stopped a real
+/// Wayland output from being named `"switch"`. Story 2.10's grammar change
+/// makes this moot either way: a single argument is now always parsed as a
+/// `u64` output id, so a bare `tag-picker switch` typed by hand simply
+/// fails to parse `"switch"` as a number and is rejected — no longer a
+/// special case, just the general non-numeric-id rejection path.
 pub fn parse_args(args: &[String]) -> Result<Mode, String> {
     match args {
-        [] => Ok(Mode::Assign { output_name: None }),
-        [name] => Ok(Mode::Assign {
-            output_name: Some(name.clone()),
+        [] => Ok(Mode::Assign {
+            output_id: None,
+            output_name: None,
         }),
+        [id] => id
+            .parse::<u64>()
+            .map(|output_id| Mode::Assign {
+                output_id: Some(output_id),
+                output_name: None,
+            })
+            .map_err(|_| format!("invalid output id: {id}")),
         [mode, id] if mode == "switch" => id
             .parse::<u64>()
             .map(|output_id| Mode::Switch {
                 output_id,
                 output_name: None,
+            })
+            .map_err(|_| format!("invalid output id: {id}")),
+        [id, name] => id
+            .parse::<u64>()
+            .map(|output_id| Mode::Assign {
+                output_id: Some(output_id),
+                output_name: Some(name.clone()),
             })
             .map_err(|_| format!("invalid output id: {id}")),
         [mode, id, name] if mode == "switch" => id
@@ -80,7 +123,7 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
             })
             .map_err(|_| format!("invalid output id: {id}")),
         _ => Err(format!(
-            "usage: tag-picker [<output_name>] | [switch <output_id> [<output_name>]], got: {args:?}"
+            "usage: tag-picker [<output_id> [<output_name>]] | [switch <output_id> [<output_name>]], got: {args:?}"
         )),
     }
 }
@@ -90,18 +133,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_args_with_no_arguments_is_assign_mode_with_no_output_name() {
-        assert_eq!(parse_args(&[]), Ok(Mode::Assign { output_name: None }));
+    fn parse_args_with_no_arguments_is_assign_mode_with_no_output_id_or_name() {
+        assert_eq!(
+            parse_args(&[]),
+            Ok(Mode::Assign {
+                output_id: None,
+                output_name: None
+            })
+        );
     }
 
     #[test]
-    fn parse_args_with_one_argument_is_assign_mode_with_output_name() {
+    fn parse_args_with_one_argument_is_assign_mode_with_output_id_only() {
         assert_eq!(
-            parse_args(&["eDP-1".into()]),
+            parse_args(&["3".into()]),
             Ok(Mode::Assign {
+                output_id: Some(3),
+                output_name: None
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_with_two_arguments_is_assign_mode_with_output_id_and_name() {
+        assert_eq!(
+            parse_args(&["3".into(), "eDP-1".into()]),
+            Ok(Mode::Assign {
+                output_id: Some(3),
                 output_name: Some("eDP-1".into())
             })
         );
+    }
+
+    /// Story 2.10 Task 4: a single non-numeric argument used to be a valid
+    /// assign-mode output *name* (Story 2.9's grammar). It is now always
+    /// parsed as an output *id*, so this — including the literal `"switch"`
+    /// that Story 2.9's own code-review follow-up specifically carved out —
+    /// is rejected as an invalid output id, not accepted as a name.
+    #[test]
+    fn parse_args_rejects_single_non_numeric_argument_as_invalid_output_id() {
+        assert!(parse_args(&["switch".into()]).is_err());
+        assert!(parse_args(&["eDP-1".into()]).is_err());
     }
 
     #[test]
@@ -131,28 +203,23 @@ mod tests {
         assert!(parse_args(&["switch".into(), "not-a-number".into()]).is_err());
     }
 
-    /// Code review follow-up (Story 2.9): a bare `["switch"]` used to be a
-    /// rejected "missing output id" error, but that guard is exactly what
-    /// made a real output literally named "switch" fail to open assign
-    /// mode at all. A single argument is unconditionally an assign-mode
-    /// output name now, including this one.
+    /// Two arguments where the first isn't literally `"switch"` and isn't a
+    /// valid `u64` output id either (Story 2.10's new assign-mode
+    /// two-argument shape) is rejected as an invalid output id — not a
+    /// mystery third mode.
     #[test]
-    fn parse_args_with_single_argument_literally_switch_is_assign_mode_with_that_name() {
-        assert_eq!(
-            parse_args(&["switch".into()]),
-            Ok(Mode::Assign {
-                output_name: Some("switch".into())
-            })
-        );
+    fn parse_args_rejects_two_argument_assign_with_non_numeric_output_id() {
+        assert!(parse_args(&["frobnicate".into(), "extra".into()]).is_err());
     }
 
+    /// Story 2.10 Task 4: assign mode's own accepted argument-count range
+    /// widened by one (0-1 args to 0-2 args), but three arguments is still
+    /// only valid when the first is literally `"switch"` (Switch mode's own
+    /// unchanged three-argument shape) — three assign-shaped arguments is
+    /// rejected, not silently truncated or accepted.
     #[test]
-    fn parse_args_rejects_unknown_first_argument() {
-        // "frobnicate" is a single argument, which the new grammar accepts
-        // as an assign-mode output name (Task 4) - use two unrecognized
-        // arguments instead, still rejected as too many for assign mode and
-        // not "switch" for switch mode.
-        assert!(parse_args(&["frobnicate".into(), "extra".into()]).is_err());
+    fn parse_args_rejects_three_arguments_when_first_is_not_switch() {
+        assert!(parse_args(&["1".into(), "2".into(), "3".into()]).is_err());
     }
 
     #[test]

@@ -691,6 +691,15 @@ impl WmCore {
     pub fn output_current_tag(&self, output_id: OutputId) -> Option<TagId> {
         self.outputs.get(&output_id).and_then(|o| o.current_tag)
     }
+
+    /// The number of tags currently registered. Thin delegation to
+    /// [`TagRegistry::count`](super::tag::TagRegistry::count); exists so
+    /// `main.rs` can detect "completely fresh, no tags at all yet" (Story
+    /// 2.10's login-bootstrap check) without the heavier allocation of a
+    /// full [`WmCore::snapshot`]. A pure query; never mutates `self`.
+    pub fn tag_count(&self) -> usize {
+        self.tags.count()
+    }
 }
 
 #[cfg(test)]
@@ -1284,6 +1293,20 @@ mod tests {
             Err(WmCoreError::TagLimitReached)
         );
         assert_eq!(core.tags.count(), 64);
+    }
+
+    #[test]
+    fn tag_count_is_zero_on_a_fresh_registry() {
+        let core = WmCore::new();
+        assert_eq!(core.tag_count(), 0);
+    }
+
+    #[test]
+    fn tag_count_reflects_created_tags() {
+        let mut core = WmCore::new();
+        core.create_tag("web").unwrap();
+        core.create_tag("term").unwrap();
+        assert_eq!(core.tag_count(), 2);
     }
 
     #[test]

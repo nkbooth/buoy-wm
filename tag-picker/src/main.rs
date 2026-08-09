@@ -48,6 +48,38 @@ fn read_response(reader: &mut BufReader<UnixStream>) -> Option<wire::Response> {
     }
 }
 
+/// Sends `switch-tag` for `output_id`/`tag_id` and exits the process on
+/// any failure to send or on any non-`Ok` response — `switch-tag` is
+/// always the last thing any of its three call sites do (Code review
+/// follow-up, Story 2.10: this exact send/read/report block was
+/// duplicated three times over — [`run_switch_mode`]'s `Selected` arm,
+/// and both of `run_assign_mode`'s no-focused-view fallback arms — past
+/// this project's own three-strike DRY threshold). Never returns on
+/// failure; callers only need to call this and then `break`/return on the
+/// implicit success path.
+fn send_switch_tag_or_exit(
+    writer: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
+    output_id: u64,
+    tag_id: u8,
+) {
+    if !send_request(writer, &wire::Request::SwitchTag { output_id, tag_id }) {
+        eprintln!("tag-picker: failed to send switch-tag request");
+        std::process::exit(1);
+    }
+    match read_response(reader) {
+        Some(wire::Response::Ok) => {}
+        Some(wire::Response::Error { message }) => {
+            eprintln!("tag-picker: {message}");
+            std::process::exit(1);
+        }
+        other => {
+            eprintln!("tag-picker: unexpected response to switch-tag: {other:?}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Spawns one `fuzzel --dmenu` invocation, writes `input` to its stdin,
 /// and waits for it to exit. Real flags cross-checked against `fuzzel(1)`
 /// (Technical notes' "Spike finding"): `--with-nth=1` displays only the
@@ -215,24 +247,41 @@ fn connect_and_get_state() -> (
 /// out of `main` verbatim (Task 6.1) — no behavioral change, verified by
 /// every existing `checklist`/`wire` unit test (untouched by this
 /// extraction) staying green.
+///
+/// Story 2.10 Task 5: the picker now opens with no view focused
+/// (`view_id: None`) too, not just the original always-a-view case. With a
+/// view focused, every outcome below is byte-for-byte identical to
+/// pre-Story-2.10 behavior (toggle membership, reopen). With no view
+/// focused, "toggle this tag's membership" has no target, so both outcome
+/// arms fall back to switching the active output (`output_id`, `wm`'s own
+/// spawn-time resolution — see `mode::Mode::Assign`) to the picked/created
+/// tag instead, then stop — a switch is a one-shot terminal action, not a
+/// toggle-and-reopen, exactly like [`run_switch_mode`].
+///
+/// Code review follow-up (Story 2.10): `checklist::should_open_picker` is
+/// checked once, up front, before any wire traffic at all — reinstated
+/// (generalized to accept *either* a view or an output) after its removal
+/// let a `CreateTag` request succeed and permanently register a tag (no
+/// delete-tag API exists) in the rare case where neither is known, only to
+/// then have nowhere to apply or switch it. This single check also makes
+/// every `output_id.expect(...)` below safe: once past this guard, a
+/// `None` view guarantees a `Some` output for the rest of this call.
 fn run_assign_mode(
     mut writer: UnixStream,
     mut reader: BufReader<UnixStream>,
     mut tags: Vec<wire::TagDto>,
     views: Vec<wire::ViewDto>,
-    focused_view: Option<u64>,
+    view_id: Option<u64>,
+    output_id: Option<u64>,
     output_name: Option<&str>,
 ) {
-    if !checklist::should_open_picker(focused_view) {
-        eprintln!("tag-picker: no window focused");
+    if !checklist::should_open_picker(view_id, output_id) {
+        eprintln!("tag-picker: no window focused and no output known");
         std::process::exit(0);
     }
-    // should_open_picker just confirmed focused_view.is_some().
-    let view_id = focused_view.expect("should_open_picker confirmed focused_view is Some");
 
-    let mut current_tags: Vec<u8> = views
-        .iter()
-        .find(|v| v.id == view_id)
+    let mut current_tags: Vec<u8> = view_id
+        .and_then(|view_id| views.iter().find(|v| v.id == view_id))
         .map(|v| v.tags.clone())
         .unwrap_or_default();
 
@@ -268,20 +317,43 @@ fn run_assign_mode(
             checklist::PickerAction::Toggled(tag_id) => {
                 pending_rejected_name = None;
                 pending_create_apply_failed = false;
-                if !send_request(&mut writer, &wire::Request::ToggleTag { view_id, tag_id }) {
-                    eprintln!("tag-picker: failed to send toggle-tag request");
-                    break;
-                }
-                match read_response(&mut reader) {
-                    Some(wire::Response::Ok) => {
-                        checklist::toggle_local_membership(&mut current_tags, tag_id);
+                match view_id {
+                    Some(view_id) => {
+                        if !send_request(&mut writer, &wire::Request::ToggleTag { view_id, tag_id })
+                        {
+                            eprintln!("tag-picker: failed to send toggle-tag request");
+                            break;
+                        }
+                        match read_response(&mut reader) {
+                            Some(wire::Response::Ok) => {
+                                checklist::toggle_local_membership(&mut current_tags, tag_id);
+                            }
+                            Some(wire::Response::Error { message }) => {
+                                eprintln!("tag-picker: {message}");
+                                break;
+                            }
+                            other => {
+                                eprintln!(
+                                    "tag-picker: unexpected response to toggle-tag: {other:?}"
+                                );
+                                break;
+                            }
+                        }
                     }
-                    Some(wire::Response::Error { message }) => {
-                        eprintln!("tag-picker: {message}");
-                        break;
-                    }
-                    other => {
-                        eprintln!("tag-picker: unexpected response to toggle-tag: {other:?}");
+                    // Story 2.10 Task 5: no view is focused, so there is
+                    // nothing to toggle membership on — switch the active
+                    // output to `tag_id` instead, handled the same shape
+                    // as `run_switch_mode`'s own `Selected` arm, then stop.
+                    // `output_id` is guaranteed `Some` here: the
+                    // `should_open_picker` guard before this loop already
+                    // refused to run at all unless a view or an output was
+                    // known, and this arm only runs when the view is
+                    // `None`.
+                    None => {
+                        let output_id = output_id.expect(
+                            "should_open_picker guarantees an output when no view is focused",
+                        );
+                        send_switch_tag_or_exit(&mut writer, &mut reader, output_id, tag_id);
                         break;
                     }
                 }
@@ -310,56 +382,82 @@ fn run_assign_mode(
                         }
                         pending_rejected_name = None;
 
-                        // Code review follow-up (finding 1): "ensure
-                        // applied," not "blindly toggle" — a name-collision
-                        // with an already-applied existing tag must not be
-                        // toggled, or `toggle_view_tag`'s add-if-absent/
-                        // remove-if-present semantics would remove it.
-                        if checklist::should_toggle_after_create(tag_id, &current_tags) {
-                            if !send_request(
-                                &mut writer,
-                                &wire::Request::ToggleTag { view_id, tag_id },
-                            ) {
-                                // Code review follow-up (finding 2): the tag
-                                // now permanently exists registry-side
-                                // (no delete-tag API, ADR-006/v1 scope) but
-                                // was never applied. Surface this via the
-                                // picker UI itself on the next reopen rather
-                                // than silently breaking — stderr is
-                                // invisible to a keybind-spawned process
-                                // with no attached terminal.
-                                eprintln!(
-                                    "tag-picker: tag {tag_id} created but failed to send chained toggle-tag request"
-                                );
-                                pending_create_apply_failed = true;
-                            } else {
-                                match read_response(&mut reader) {
-                                    Some(wire::Response::Ok) => {
-                                        checklist::toggle_local_membership(
-                                            &mut current_tags,
-                                            tag_id,
-                                        );
-                                        pending_create_apply_failed = false;
-                                    }
-                                    Some(wire::Response::Error { message }) => {
+                        match view_id {
+                            Some(view_id) => {
+                                // Code review follow-up (finding 1): "ensure
+                                // applied," not "blindly toggle" — a name-collision
+                                // with an already-applied existing tag must not be
+                                // toggled, or `toggle_view_tag`'s add-if-absent/
+                                // remove-if-present semantics would remove it.
+                                if checklist::should_toggle_after_create(tag_id, &current_tags) {
+                                    if !send_request(
+                                        &mut writer,
+                                        &wire::Request::ToggleTag { view_id, tag_id },
+                                    ) {
+                                        // Code review follow-up (finding 2): the tag
+                                        // now permanently exists registry-side
+                                        // (no delete-tag API, ADR-006/v1 scope) but
+                                        // was never applied. Surface this via the
+                                        // picker UI itself on the next reopen rather
+                                        // than silently breaking — stderr is
+                                        // invisible to a keybind-spawned process
+                                        // with no attached terminal.
                                         eprintln!(
-                                            "tag-picker: tag {tag_id} created but chained toggle-tag failed: {message}"
+                                            "tag-picker: tag {tag_id} created but failed to send chained toggle-tag request"
                                         );
                                         pending_create_apply_failed = true;
+                                    } else {
+                                        match read_response(&mut reader) {
+                                            Some(wire::Response::Ok) => {
+                                                checklist::toggle_local_membership(
+                                                    &mut current_tags,
+                                                    tag_id,
+                                                );
+                                                pending_create_apply_failed = false;
+                                            }
+                                            Some(wire::Response::Error { message }) => {
+                                                eprintln!(
+                                                    "tag-picker: tag {tag_id} created but chained toggle-tag failed: {message}"
+                                                );
+                                                pending_create_apply_failed = true;
+                                            }
+                                            other => {
+                                                eprintln!(
+                                                    "tag-picker: tag {tag_id} created but chained toggle-tag got unexpected response: {other:?}"
+                                                );
+                                                pending_create_apply_failed = true;
+                                            }
+                                        }
                                     }
-                                    other => {
-                                        eprintln!(
-                                            "tag-picker: tag {tag_id} created but chained toggle-tag got unexpected response: {other:?}"
-                                        );
-                                        pending_create_apply_failed = true;
-                                    }
+                                } else {
+                                    // Name-collision with an already-applied
+                                    // existing tag: already applied, nothing left
+                                    // to do or report.
+                                    pending_create_apply_failed = false;
                                 }
                             }
-                        } else {
-                            // Name-collision with an already-applied
-                            // existing tag: already applied, nothing left
-                            // to do or report.
-                            pending_create_apply_failed = false;
+                            // Story 2.10 Task 5: no view is focused, so
+                            // there is no membership to toggle at all —
+                            // chain a switch of the active output onto the
+                            // freshly created tag instead, handled the
+                            // same shape as the forked `Toggled` arm above,
+                            // then stop. `output_id` is guaranteed `Some`
+                            // here for the same reason as that arm's own
+                            // `None` case (`should_open_picker`'s
+                            // precondition, checked once before this loop
+                            // began).
+                            None => {
+                                let output_id = output_id.expect(
+                                    "should_open_picker guarantees an output when no view is focused",
+                                );
+                                send_switch_tag_or_exit(
+                                    &mut writer,
+                                    &mut reader,
+                                    output_id,
+                                    tag_id,
+                                );
+                                break;
+                            }
                         }
                     }
                     Some(wire::Response::Error { message }) => {
@@ -403,21 +501,7 @@ fn run_switch_mode(
     match checklist::parse_switch_selection(exit_success, &stdout, &known_ids) {
         checklist::SwitchAction::Cancelled => {}
         checklist::SwitchAction::Selected(tag_id) => {
-            if !send_request(&mut writer, &wire::Request::SwitchTag { output_id, tag_id }) {
-                eprintln!("tag-picker: failed to send switch-tag request");
-                std::process::exit(1);
-            }
-            match read_response(&mut reader) {
-                Some(wire::Response::Ok) => {}
-                Some(wire::Response::Error { message }) => {
-                    eprintln!("tag-picker: {message}");
-                    std::process::exit(1);
-                }
-                other => {
-                    eprintln!("tag-picker: unexpected response to switch-tag: {other:?}");
-                    std::process::exit(1);
-                }
-            }
+            send_switch_tag_or_exit(&mut writer, &mut reader, output_id, tag_id);
         }
     }
 }
@@ -433,7 +517,15 @@ fn main() {
     };
 
     match mode {
-        mode::Mode::Assign { output_name } => {
+        // Story 2.10 Task 5: `run_assign_mode` opens with or without a
+        // focused view now (`wm`'s `Action::OpenTagPicker` no longer
+        // requires one either) — `should_open_picker`'s guard, checked
+        // inside `run_assign_mode` itself, only refuses when *neither* a
+        // view nor an output is known.
+        mode::Mode::Assign {
+            output_id,
+            output_name,
+        } => {
             let (writer, reader, tags, views, focused_view) = connect_and_get_state();
             run_assign_mode(
                 writer,
@@ -441,13 +533,12 @@ fn main() {
                 tags,
                 views,
                 focused_view,
+                output_id,
                 output_name.as_deref(),
             );
         }
         // Switch mode has no focused-view precondition at all — pressing
-        // `Mod4+S` works with no window focused and none existing — so
-        // `checklist::should_open_picker`'s check is deliberately not
-        // applied on this branch.
+        // `Mod4+S` works with no window focused and none existing.
         mode::Mode::Switch {
             output_id,
             output_name,

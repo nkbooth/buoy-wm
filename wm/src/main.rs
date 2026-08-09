@@ -1370,14 +1370,27 @@ impl Seat {
                 match std::env::current_exe() {
                     Ok(wm_exe) => {
                         let mut command = std::process::Command::new(tag_picker_path(&wm_exe));
-                        // Story 2.9 Task 3.3: the active output's real
-                        // connector name, so `tag-picker` can in turn tell
-                        // `fuzzel --output=<name>` which monitor to render
-                        // on (Task 5) — never appended when unknown,
-                        // preserving today's zero-args default exactly (AC
-                        // 2).
-                        if let Some(name) = active_output_name {
-                            command.arg(name);
+                        // Story 2.10 Task 3: the active output's id,
+                        // threaded across the process boundary so
+                        // assign-mode can switch the active output to a
+                        // picked/created tag when no window is focused
+                        // (Tasks 4/5) — mirrors `Action::TagSwitch`'s own
+                        // `<output_id> [<output_name>]` argument order
+                        // below. Only appended when an output is actually
+                        // registered; `None` (a startup-race edge case
+                        // Task 2 makes rare but doesn't eliminate) spawns
+                        // with zero args, same as today's behavior.
+                        if let Some(output_id) = active_output_id {
+                            command.arg(output_id.0.to_string());
+                            // Story 2.9 Task 3.3: the active output's real
+                            // connector name, so `tag-picker` can in turn
+                            // tell `fuzzel --output=<name>` which monitor
+                            // to render on (Task 5) — never appended when
+                            // unknown, preserving today's argument shape
+                            // exactly (AC 2).
+                            if let Some(name) = active_output_name {
+                                command.arg(name);
+                            }
                         }
                         match command.env_remove("WAYLAND_DEBUG").spawn() {
                             Ok(_) => {}
@@ -1683,8 +1696,52 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
             Event::SessionUnlocked => {}
             Event::Window { id } => state.wm.windows.push_back(Window::new(id, qh)),
             Event::Output { id } => {
-                let output_id = ipc::lock_recovering(&state.wm.wm_core).register_output();
+                let mut wm_core_guard = ipc::lock_recovering(&state.wm.wm_core);
+                let output_id = wm_core_guard.register_output();
+                // Story 2.10: bootstrap a "default" tag + switch this
+                // output to it + spawn its pinned terminal, the first
+                // time *any* output registers on a completely empty tag
+                // registry (AC 1) — the same three effects
+                // `Action::TagCycle`'s keybind path already produces for
+                // an existing tag, just triggered once automatically at
+                // startup. Gated on the registry being empty rather than
+                // "is this the very first output ever" so a multi-output
+                // login can't race on which output counts as first (see
+                // this story's Technical notes); never re-triggers once
+                // any tag exists (AC 2), since `tag_count()` can never
+                // return to zero again once non-zero (ADR-006: no
+                // tag-deletion operation exists). Both `create_tag` and
+                // `switch_tag` are structurally near-impossible to fail
+                // here (a fresh registry, a just-registered output), but
+                // log-and-continue rather than panic either way (NFR2).
+                let bootstrapped_tag_id = if wm_core_guard.tag_count() == 0 {
+                    match wm_core_guard.create_tag("default") {
+                        Ok(tag_id) => {
+                            if let Err(e) = wm_core_guard.switch_tag(output_id, tag_id) {
+                                eprintln!(
+                                    "Failed to switch bootstrap output {output_id:?} to default tag: {e:?}"
+                                );
+                            }
+                            Some(tag_id)
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to create bootstrap default tag: {e:?}");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                // Story 2.1: drop the lock before
+                // `ensure_pinned_terminal_spawned` re-locks the same
+                // mutex below — same "lock, mutate, drop, fresh borrow"
+                // sequencing `manage_seats` already establishes, since
+                // `std::sync::Mutex` is not reentrant.
+                drop(wm_core_guard);
                 state.wm.outputs.insert(id.id(), Output::new(id, output_id));
+                if let Some(tag_id) = bootstrapped_tag_id {
+                    state.wm.ensure_pinned_terminal_spawned(tag_id);
+                }
             }
             Event::Seat { id } => {
                 state.wm.seats.insert(id.id(), Seat::new(id));
