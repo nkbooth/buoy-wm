@@ -299,6 +299,33 @@ impl WmCore {
         id
     }
 
+    /// Removes a registered output entirely, returning the tag it was
+    /// displaying (if any). Fails with [`WmCoreError::UnknownOutput`] if
+    /// `output_id` is not registered, leaving state unchanged; never
+    /// panics.
+    ///
+    /// Deliberately does **not** decide where an orphaned tag goes next —
+    /// `wm_core` stays protocol-agnostic (see this module's own
+    /// [`WmCore::is_view_visible`]-style boundary): it has no way to know
+    /// which *other* output should inherit the tag, since that requires
+    /// Wayland-derived, pointer-position-aware state (`main.rs`'s
+    /// `active_output_id`) that `wm_core` has no access to. It only forgets
+    /// the removed output and reports what it was showing, mirroring
+    /// [`WmCore::unregister_view`]'s "report enough for the caller to act,
+    /// don't decide for them" shape.
+    // Closes the gap Story 1.7's own Dev Agent Record flagged at the time:
+    // "`wm_core` has no `unregister_output` method ... A removed real
+    // output leaves a stale, permanently-registered `wm_core` output
+    // behind, eligible forever after to be selected by `active_output_id`."
+    // Wired into `main.rs`'s `remove_outputs` since Story 2.8.
+    pub fn unregister_output(&mut self, output_id: OutputId) -> Result<Option<TagId>, WmCoreError> {
+        let output = self
+            .outputs
+            .remove(&output_id)
+            .ok_or(WmCoreError::UnknownOutput)?;
+        Ok(output.current_tag)
+    }
+
     /// Sets an output's current tag. `Some(tag_id)` fails with
     /// [`WmCoreError::UnknownTag`] if `tag_id` is not registered; `None`
     /// always succeeds and clears the field. Fails with
@@ -937,6 +964,41 @@ mod tests {
         let second = core.register_output();
         assert_ne!(first, second);
         assert_eq!(core.outputs.get(&first).unwrap().current_tag, None);
+    }
+
+    // Story 2.8 Task 4 RED: `unregister_output` doesn't exist yet - closes
+    // the gap Story 1.7's Dev Agent Record flagged (removed real outputs
+    // left a permanent ghost `wm_core` output behind).
+
+    #[test]
+    fn unregister_output_removes_the_output_and_returns_none_when_it_had_no_current_tag() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        assert_eq!(core.unregister_output(output_id), Ok(None));
+        assert!(!core.outputs.contains_key(&output_id));
+    }
+
+    #[test]
+    fn unregister_output_removes_the_output_and_returns_its_current_tag() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        core.switch_tag(output_id, tag_id).unwrap();
+        assert_eq!(core.unregister_output(output_id), Ok(Some(tag_id)));
+        assert!(!core.outputs.contains_key(&output_id));
+    }
+
+    #[test]
+    fn unregister_output_unknown_id_returns_error_and_leaves_state_unchanged() {
+        let mut core = WmCore::new();
+        core.register_output();
+        let bogus_output = crate::wm_core::ids::OutputId(9999);
+        let snapshot = core.clone();
+        assert_eq!(
+            core.unregister_output(bogus_output),
+            Err(WmCoreError::UnknownOutput)
+        );
+        assert_eq!(core, snapshot);
     }
 
     #[test]
@@ -1679,6 +1741,13 @@ mod tests {
         assert_eq!(core, snapshot);
 
         assert_eq!(core.lower_view(bogus_view), Err(WmCoreError::UnknownView));
+        assert_eq!(core, snapshot);
+
+        // Story 2.8 Task 4.1: extend the guard for the new mutator.
+        assert_eq!(
+            core.unregister_output(bogus_output),
+            Err(WmCoreError::UnknownOutput)
+        );
         assert_eq!(core, snapshot);
     }
 

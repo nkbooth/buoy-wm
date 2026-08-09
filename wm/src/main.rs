@@ -143,6 +143,16 @@ struct Output {
     proxy: RiverOutputV1,
     removed: bool,
     output_id: OutputId,
+    /// The output's top-left corner in the compositor's global coordinate
+    /// space, from `river_output_v1`'s `position` event. Defaults to
+    /// `(0, 0)` until the first such event arrives (Story 2.8 Task 1) —
+    /// same "plain data field, no decision logic of its own" carve-out as
+    /// every other all-zero-initialized field on this struct.
+    position: (i32, i32),
+    /// The output's width/height extent from `position`, from
+    /// `river_output_v1`'s `dimensions` event. Defaults to `(0, 0)` until
+    /// the first such event arrives (Story 2.8 Task 1).
+    dimensions: (i32, i32),
 }
 
 #[derive(Debug)]
@@ -160,6 +170,12 @@ struct Seat {
     op_dx: i32,
     op_dy: i32,
     op_release: bool,
+    /// The pointer's last-known position in the compositor's global
+    /// coordinate space, from `river_seat_v1`'s `pointer_position` event
+    /// (protocol `since="2"`). `None` until the first such event arrives
+    /// for this seat (Story 2.8 Task 2) — the AC 2 fallback case
+    /// `WindowManager::active_output_id` handles explicitly.
+    pointer_position: Option<(i32, i32)>,
 }
 
 #[derive(Debug)]
@@ -249,14 +265,82 @@ impl WindowManager {
         proxy.render_finish();
     }
 
+    /// Story 2.8 Task 5: closes the gap Story 1.7's Dev Agent Record
+    /// flagged - removing a real output previously never reached
+    /// `wm_core`, leaving a permanent ghost entry eligible forever after to
+    /// be selected by `active_output_id`. Sequencing matters here: the
+    /// `wm_core` removal pass (this method's first block) must finish, and
+    /// its lock must be released, *before* `active_output_id()` is called
+    /// below - `active_output_id` reads `self.outputs`, which must already
+    /// reflect only the post-removal survivor set (Task 3), and
+    /// `std::sync::Mutex` is not reentrant (same "lock, mutate, drop, fresh
+    /// borrow" pattern `manage_seats` already establishes for this reason).
     fn remove_outputs(&mut self) {
-        self.outputs.retain(|_, output| {
-            if output.removed {
-                output.proxy.destroy();
-                return false;
+        let mut orphaned_tags: Vec<TagId> = Vec::new();
+        {
+            let mut wm_core = ipc::lock_recovering(&self.wm_core);
+            self.outputs.retain(|_, output| {
+                if output.removed {
+                    output.proxy.destroy();
+                    // This output_id was registered in wm_core the moment
+                    // the real output appeared (Event::Output) and only
+                    // this call site ever removes it, so `Err(UnknownOutput)`
+                    // is believed structurally unreachable; log rather than
+                    // silently swallow, so a future regression stays
+                    // visible (NFR2), same pattern as remove_windows'
+                    // unregister_view call.
+                    match wm_core.unregister_output(output.output_id) {
+                        Ok(Some(tag_id)) => orphaned_tags.push(tag_id),
+                        Ok(None) => {}
+                        Err(e) => eprintln!(
+                            "Failed to unregister output {:?} from wm_core: {e:?}",
+                            output.output_id
+                        ),
+                    }
+                    return false;
+                }
+                true
+            });
+        }
+
+        // Reroute any tag that was displayed on a just-removed output onto
+        // the (post-removal) active output, reusing `switch_tag` - the same
+        // ADR-005-enforcing mutator every other tag-assignment path already
+        // goes through, not a second, parallel implementation. If no output
+        // survives, `active_output_id()` returns `None` and the orphaned
+        // tag(s) are simply displayed nowhere, which `is_view_visible`
+        // already handles correctly (hidden, not a crash) - AC 5.
+        //
+        // Code review follow-up (Story 2.8): `switch_tag` unconditionally
+        // overwrites its target output's `current_tag` - calling it
+        // whenever *any* output survives, without checking whether that
+        // output already had its own tag displayed, would silently destroy
+        // whatever the user was actually looking at (e.g. closing the
+        // laptop lid while docked would blow away the external monitor's
+        // current tag and replace it with the laptop's orphaned one). Only
+        // reroute onto the active output if it isn't already displaying
+        // something; otherwise leave the orphaned tag displayed nowhere,
+        // same safe "hidden, not a crash" outcome as the no-survivor case.
+        if let Some(active_output_id) = self.active_output_id() {
+            let mut wm_core = ipc::lock_recovering(&self.wm_core);
+            // Accepted, narrow edge case (documented rather than silently
+            // mishandled, mirroring Story 2.7's documented-FIFO-race
+            // precedent): if more than one output was removed in the same
+            // pass and each had a different displayed tag, only the first
+            // one processed finds the active output still empty and gets
+            // placed there - every subsequent one then sees it occupied
+            // (by the one just placed) and is left displayed nowhere,
+            // rather than blindly overwriting it.
+            for tag_id in orphaned_tags {
+                if wm_core.output_current_tag(active_output_id).is_some() {
+                    continue;
+                }
+                log_wm_core_err(
+                    wm_core.switch_tag(active_output_id, tag_id),
+                    "Failed to reroute orphaned tag onto active output",
+                );
             }
-            true
-        });
+        }
     }
 
     fn remove_windows(&mut self) {
@@ -584,15 +668,51 @@ impl WindowManager {
         }
     }
 
-    /// The deterministic "active output" for keybind-driven tag actions:
-    /// the lowest-`OutputId` (first-registered) output. Real focused-output
-    /// tracking has no live protocol signal to compute from yet (see Story
-    /// 1.7's Description/Technical notes) — this is a conscious,
-    /// documented scope boundary, correct-by-construction for the dominant
-    /// single-output case (ADR-005) and at least deterministic under
-    /// multi-output, not a hidden guess.
+    /// The "active output" for keybind-driven tag actions and new-window
+    /// auto-tagging: the registered output whose rectangle
+    /// (`position`/`dimensions`) contains a seat's last-known pointer
+    /// position (Story 2.8) — the same "focused monitor follows mouse"
+    /// convention dwm/i3/sway-style WMs use, and the protocol's only
+    /// first-class always-current signal for this
+    /// (`river_seat_v1.pointer_position`). If multiple seats disagree (an
+    /// edge case this single-user WM practically never hits), the lowest
+    /// matching `OutputId` wins — deterministic regardless of `self.seats`'
+    /// `HashMap` iteration order (code review follow-up: a first-match-
+    /// while-iterating approach here would silently depend on hash-bucket
+    /// order despite claiming determinism), same standard ADR-005 already
+    /// set for the fallback below.
+    ///
+    /// Falls back to the old Story 1.7 placeholder — the lowest-`OutputId`
+    /// (first-registered) output — when no seat has yet reported a pointer
+    /// position (startup, before the first `pointer_position` event), or
+    /// when every known pointer position falls outside every currently-
+    /// registered output's rectangle (e.g. geometry events haven't arrived
+    /// yet for some output, or the pointer's last-known position referenced
+    /// an output that's since been removed — see `remove_outputs`). This is
+    /// no longer a documented permanent placeholder (Story 1.7's "no live
+    /// protocol signal to compute from yet" no longer applies) — it's now
+    /// the deterministic fallback for the genuinely-ambiguous/not-yet-known
+    /// cases only.
     fn active_output_id(&self) -> Option<OutputId> {
-        self.outputs.values().map(|o| o.output_id).min()
+        let pointed_output_id = self
+            .seats
+            .values()
+            .filter_map(|seat| {
+                let (px, py) = seat.pointer_position?;
+                self.outputs.values().find(|output| {
+                    let (ox, oy) = output.position;
+                    let (ow, oh) = output.dimensions;
+                    // Half-open bounds: `dimensions` is a width/height
+                    // extent from `position`, so the rectangle's far edge
+                    // (`position + dimensions`) is exclusive, matching how
+                    // `river_output_v1`'s `position`/`dimensions` events
+                    // are documented.
+                    (ox..ox + ow).contains(&px) && (oy..oy + oh).contains(&py)
+                })
+            })
+            .map(|output| output.output_id)
+            .min();
+        pointed_output_id.or_else(|| self.outputs.values().map(|o| o.output_id).min())
     }
 
     fn manage_seats(&mut self, wm_proxy: &RiverWindowManagerV1) {
@@ -729,6 +849,8 @@ impl Output {
             proxy,
             removed: false,
             output_id,
+            position: (0, 0),
+            dimensions: (0, 0),
         }
     }
 }
@@ -810,6 +932,7 @@ impl Seat {
             op_dx: 0,
             op_dy: 0,
             op_release: false,
+            pointer_position: None,
         }
     }
 
@@ -1367,11 +1490,12 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
         match event {
             Event::Removed => output.removed = true,
             Event::WlOutput { name: _ } => {}
-            Event::Position { x: _, y: _ } => {}
-            Event::Dimensions {
-                width: _,
-                height: _,
-            } => {}
+            // Story 2.8 Task 1: track the output's real global-coordinate
+            // rectangle, previously discarded — `active_output_id`
+            // (Task 3) now reads these to find which output the pointer is
+            // actually over.
+            Event::Position { x, y } => output.position = (x, y),
+            Event::Dimensions { width, height } => output.dimensions = (width, height),
         }
     }
 }
@@ -1398,7 +1522,12 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
             } => {}
             Event::OpDelta { dx, dy } => (seat.op_dx, seat.op_dy) = (dx, dy),
             Event::OpRelease => seat.op_release = true,
-            Event::PointerPosition { x: _, y: _ } => {}
+            // Story 2.8 Task 2: track the pointer's last-known global
+            // position, previously discarded — `active_output_id`
+            // (Task 3) uses this to find which output the pointer is
+            // actually over, instead of the old lowest-`OutputId`
+            // placeholder.
+            Event::PointerPosition { x, y } => seat.pointer_position = Some((x, y)),
         }
     }
 }
