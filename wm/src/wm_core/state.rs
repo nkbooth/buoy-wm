@@ -565,6 +565,34 @@ impl WmCore {
         Some(target)
     }
 
+    /// Returns the topmost currently-visible view — the view keyboard focus
+    /// should fall to when whatever held it stops being visible, which is
+    /// what a tag switch does to every window on the outgoing tag. Scans
+    /// `stacking_order` back-to-front (top-to-bottom) and returns the first
+    /// view [`WmCore::is_view_visible`] accepts, so a floating window on the
+    /// newly-shown tag always outranks that tag's pinned terminal, which
+    /// [`WmCore::lower_view`] keeps at the front (bottom) of the order.
+    ///
+    /// Unlike [`WmCore::cycle_focus`], the pinned terminal is a legitimate
+    /// result: `cycle_focus` skips it so repeated `FocusNext` presses can
+    /// round-robin the real windows, whereas this query is the fallback that
+    /// deliberately lands on the tag's terminal backdrop when nothing else
+    /// on that tag is visible. Returns `None` only when no registered view
+    /// is visible at all, which callers treat as "clear focus".
+    ///
+    /// A pure query; never mutates `self`. An id in `stacking_order` always
+    /// has a matching entry in `views`, so `is_view_visible`'s
+    /// `UnknownView` arm is unreachable here — `unwrap_or(false)` is a
+    /// safe-by-construction guard (NFR2), not a silently-wrong fallback,
+    /// matching `cycle_focus`'s precedent for the same call.
+    pub fn topmost_visible_view(&self) -> Option<ViewId> {
+        self.stacking_order
+            .iter()
+            .rev()
+            .copied()
+            .find(|&id| self.is_view_visible(id).unwrap_or(false))
+    }
+
     /// A full, read-only snapshot of this `WmCore`'s current state — the
     /// one new query this story adds to `wm-core`'s public API (every other
     /// IPC-mutation handler reuses an existing mutator, no `wm-core`
@@ -1589,6 +1617,88 @@ mod tests {
         core.toggle_view_tag(hidden, hidden_tag).unwrap();
 
         assert_eq!(core.cycle_focus(), None);
+    }
+
+    #[test]
+    fn topmost_visible_view_returns_none_for_an_empty_core() {
+        assert_eq!(WmCore::new().topmost_visible_view(), None);
+    }
+
+    #[test]
+    fn topmost_visible_view_returns_the_back_of_stacking_order_when_visible() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("web").unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, tag_id).unwrap();
+
+        let lower = core.register_view("app-one");
+        core.toggle_view_tag(lower, tag_id).unwrap();
+        let upper = core.register_view("app-two");
+        core.toggle_view_tag(upper, tag_id).unwrap();
+
+        assert_eq!(core.topmost_visible_view(), Some(upper));
+    }
+
+    /// The tag-switch case this query exists for: the topmost view belongs
+    /// to a tag no output shows any more, so focus must fall through to the
+    /// highest view that *is* visible rather than stopping at the top.
+    #[test]
+    fn topmost_visible_view_skips_views_hidden_on_another_tag() {
+        let mut core = WmCore::new();
+        let visible_tag = core.create_tag("web").unwrap();
+        let hidden_tag = core.create_tag("term").unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, visible_tag).unwrap();
+
+        let visible = core.register_view("app-one");
+        core.toggle_view_tag(visible, visible_tag).unwrap();
+        let hidden = core.register_view("app-two");
+        core.toggle_view_tag(hidden, hidden_tag).unwrap();
+
+        assert_eq!(core.topmost_visible_view(), Some(visible));
+    }
+
+    /// Unlike [`WmCore::cycle_focus`], the pinned terminal is a legitimate
+    /// target here — it is the intended last resort when a tag switch leaves
+    /// no floating window visible, and `lower_view` keeping it at the front
+    /// (bottom) of the stacking order is exactly what makes a back-to-front
+    /// scan reach it last.
+    #[test]
+    fn topmost_visible_view_falls_back_to_the_visible_pinned_terminal() {
+        let mut core = WmCore::new();
+        let visible_tag = core.create_tag("web").unwrap();
+        let hidden_tag = core.create_tag("term").unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, visible_tag).unwrap();
+
+        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        core.toggle_view_tag(pinned, visible_tag).unwrap();
+        core.lower_view(pinned).unwrap();
+        let hidden = core.register_view("app-one");
+        core.toggle_view_tag(hidden, hidden_tag).unwrap();
+
+        assert_eq!(core.topmost_visible_view(), Some(pinned));
+    }
+
+    /// A pinned terminal belonging to some *other* tag must not be picked
+    /// either — every candidate goes through the same `is_view_visible`
+    /// gate, so "no view is visible" stays `None` rather than resolving to
+    /// an off-tag terminal.
+    #[test]
+    fn topmost_visible_view_returns_none_when_every_view_is_hidden() {
+        let mut core = WmCore::new();
+        let shown_tag = core.create_tag("web").unwrap();
+        let hidden_tag = core.create_tag("term").unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, shown_tag).unwrap();
+
+        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        core.toggle_view_tag(pinned, hidden_tag).unwrap();
+        core.lower_view(pinned).unwrap();
+        let hidden = core.register_view("app-one");
+        core.toggle_view_tag(hidden, hidden_tag).unwrap();
+
+        assert_eq!(core.topmost_visible_view(), None);
     }
 
     #[test]

@@ -241,6 +241,13 @@ struct Seat {
     /// remembered the terminal was deliberately focused a moment earlier
     /// (confirmed live: focus visibly jumped away from the terminal on the
     /// next keystroke-driven manage sequence, not just eventually).
+    ///
+    /// Scoped to the terminal's *visibility*: `manage_seats` expires this
+    /// the moment the focused window stops being visible, because a latch
+    /// that outlives its window suppresses the very `focus_top()` call that
+    /// would repair focus. Switching tags away from a deliberately-clicked
+    /// terminal is exactly that case, and left focus stranded on the
+    /// outgoing tag's now-hidden terminal.
     terminal_intentionally_focused: bool,
 }
 
@@ -944,10 +951,36 @@ impl WindowManager {
             // right back. `any_new_windows` still forces `focus_top()` to
             // run even while the terminal holds intentional focus — a
             // freshly-mapped window should always be able to claim focus.
+            // The latch only earns its keep while the terminal it was set
+            // for is actually on screen. A tag switch hides that terminal
+            // without touching focus, so leaving the latch set would
+            // suppress `focus_top` indefinitely and strand keyboard focus on
+            // a window the user can no longer see — the reported tag-switch
+            // symptom, and the half `focus_top`'s own visibility scan cannot
+            // fix on its own, since it never gets called.
+            if seat.terminal_intentionally_focused
+                && !seat.focused_view_is_visible(&self.windows, wm_core)
+            {
+                seat.terminal_intentionally_focused = false;
+            }
             if any_new_windows || !seat.terminal_intentionally_focused {
                 seat.terminal_intentionally_focused = false;
                 seat.focus_top(&self.windows, wm_core);
             }
+            // `do_action` runs *after* the focus block above, so a binding
+            // that switches tags (`Action::TagCycle`) hides the focused
+            // window a step too late for this pass's `focus_top` to have
+            // noticed. Nothing schedules another pass on its own — the main
+            // loop is a `blocking_dispatch`, so focus would stay on the
+            // outgoing tag's window until some unrelated compositor event
+            // arrived, and the user's next keypress would land on a window
+            // they can't see. Reordering the two isn't an option: `do_action`
+            // reads the focus this pass's `focus_top` just resolved (that's
+            // what makes click-then-`Mod4+Q` close the right window), so the
+            // switch is detected after the fact instead, by the active
+            // output's current tag changing, and focus repaired in the same
+            // pass.
+            let tag_before = active_output_id.and_then(|id| wm_core.output_current_tag(id));
             if let Some(tag_id) = seat.do_action(
                 &mut self.windows,
                 wm_proxy,
@@ -956,6 +989,13 @@ impl WindowManager {
                 active_output_name.as_deref(),
             ) {
                 pending_terminal_spawns.push(tag_id);
+            }
+            let tag_after = active_output_id.and_then(|id| wm_core.output_current_tag(id));
+            if tag_after != tag_before {
+                // A deliberate terminal focus does not survive the tag it was
+                // made on, same expiry rule as the latch check above.
+                seat.terminal_intentionally_focused = false;
+                seat.focus_top(&self.windows, wm_core);
             }
             if seat.op_release {
                 seat.op_end();
@@ -1275,9 +1315,10 @@ impl Seat {
                 // than independently rotating `windows` and letting the
                 // two mechanisms diverge (Story 1.4 code-review
                 // follow-up). `focus_top` then issues the real
-                // focus_window/place_top proxy calls against
-                // `windows.back()`, which is now guaranteed to be the same
-                // window cycle_focus just chose.
+                // focus_window/place_top proxy calls against the top of
+                // `wm_core`'s stacking order — which `cycle_focus`' own
+                // `raise_view` just set to this same window — and this
+                // reorder keeps `windows` agreeing with it.
                 if let Some(next_view_id) = wm_core.cycle_focus()
                     && let Some(i) = windows
                         .iter()
@@ -1490,45 +1531,56 @@ impl Seat {
     // Code review follow-up (Story 2.7): `windows.back()` is the most-
     // recently-interacted-with window WM-wide, with no tag/visibility
     // filtering of its own — nothing about tag switching (`cycle_tag`/
-    // `switch_tag`) reorders `self.windows` or reassigns focus. Before this
+    // `switch_tag`) reorders `self.windows` or reassigns focus. Before that
     // fix, a tag switch could leave Wayland keyboard focus and
     // `wm_core::focused_view` pointed at a window `recompute_window_visibility`
-    // hides on the very next render sequence, with nothing else ever
-    // refocusing a window actually visible on the new tag — the user's
-    // keypresses would go nowhere until they clicked something. Filtering
-    // `windows.back()` through `is_view_visible` here means a hidden
-    // back-of-stack window is treated the same as no window at all (focus
-    // cleared) rather than wrongly re-affirmed as focused.
+    // hides on the very next render sequence.
+    //
+    // Filtering `windows.back()` alone only got as far as *dropping* focus in
+    // that case, though: one candidate was tested, and a hidden one cleared
+    // focus outright instead of handing it to something the user can actually
+    // see, so a tag switch away from the focused window left keypresses going
+    // nowhere until the user clicked. `wm_core::topmost_visible_view` replaces
+    // that single-candidate test with a back-to-front scan for the highest
+    // *visible* view, which lands on the new tag's pinned terminal as the last
+    // resort (`lower_view` keeps it at the front/bottom of the stacking
+    // order). `self.windows` is deliberately not the order scanned: it is only
+    // ever appended to and reordered on interaction, so a pinned terminal
+    // mapped after a floating window sits *behind* it there, while
+    // `wm_core`'s `stacking_order` is the order both `lower_view` and
+    // `raise_view` actively maintain.
     fn focus_top(&mut self, windows: &VecDeque<Window>, wm_core: &mut WmCore) {
-        let target = windows.back().filter(|window| {
-            let view_id = window.view_id.expect(
-                "every window reaches focus_top only after init_new_windows registered it earlier in the same handle_manage_start call",
-            );
-            match wm_core.is_view_visible(view_id) {
-                Ok(visible) => visible,
-                Err(e) => {
-                    eprintln!(
-                        "Failed to check visibility for view {view_id:?} in wm_core: {e:?}"
-                    );
-                    true
-                }
-            }
+        // A visible view always has a matching `Window`: `remove_windows`
+        // drops a window from `self.windows` and unregisters its view from
+        // `wm_core` inside the same pass, so the two can't diverge across
+        // this call. `and_then` therefore degrades to the same "nothing to
+        // focus" clear as an empty stacking order rather than panicking
+        // (NFR2), which also retires this function's two `expect`s.
+        let target = wm_core.topmost_visible_view().and_then(|view_id| {
+            windows
+                .iter()
+                .find(|window| window.view_id == Some(view_id))
+                .map(|window| (view_id, window))
         });
         match target {
-            Some(window) => {
+            Some((view_id, window)) => {
                 self.proxy.focus_window(&window.proxy);
-                window.node.place_top();
+                // FR4: the pinned terminal must always render at the bottom,
+                // so — unlike every other window — it takes focus without
+                // being raised. Same split `manage_seats`' click-to-focus
+                // path already makes, and the case this scan newly reaches:
+                // before, focus_top could only ever land on `windows.back()`,
+                // which the pinned terminal is never pushed to.
+                if window.app_id != PINNED_TERM_APP_ID {
+                    window.node.place_top();
+                }
                 self.focused = Some(window.proxy.clone());
-                let view_id = window.view_id.expect(
-                    "every window reaches focus_top only after init_new_windows registered it earlier in the same handle_manage_start call",
-                );
-                // set_focus is expected to succeed here: view_id was
-                // registered in wm_core by init_new_windows earlier in the
-                // same handle_manage_start call, so it should not be
-                // unknown to wm_core; log rather than silently swallow an
-                // Err, so a future regression that does hit it stays
-                // visible (NFR2, error propagation), same pattern as
-                // remove_windows' unregister_view logging.
+                // set_focus is expected to succeed here: view_id came from
+                // this same `wm_core`'s stacking order, so it should not be
+                // unknown to it; log rather than silently swallow an Err, so
+                // a future regression that does hit it stays visible (NFR2,
+                // error propagation), same pattern as remove_windows'
+                // unregister_view logging.
                 if let Err(e) = wm_core.set_focus(view_id) {
                     eprintln!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
                 }
@@ -1539,6 +1591,23 @@ impl Seat {
                 wm_core.clear_focus();
             }
         }
+    }
+
+    /// Whether this seat's current focus target is still visible. Drives
+    /// `terminal_intentionally_focused`'s expiry in `manage_seats` — a seat
+    /// focused on nothing, on a window that has since been removed, or on a
+    /// window hidden by a tag switch all answer `false`, which releases the
+    /// latch so `focus_top` runs and repairs focus.
+    fn focused_view_is_visible(&self, windows: &VecDeque<Window>, wm_core: &WmCore) -> bool {
+        let Some(focused) = &self.focused else {
+            return false;
+        };
+        windows
+            .iter()
+            .find(|window| &window.proxy == focused)
+            .and_then(|window| window.view_id)
+            .and_then(|view_id| wm_core.is_view_visible(view_id).ok())
+            .unwrap_or(false)
     }
 
     fn pointer_move(&mut self, window: &Window) {
