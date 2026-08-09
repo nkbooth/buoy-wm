@@ -42,9 +42,9 @@ pub fn build_checklist_entries(tags: &[TagDto], focused_view_tags: &[u8]) -> Vec
 /// one line per entry, `"[✓] <name>\t<tag_id>\n"` (checked) or
 /// `"[ ] <name>\t<tag_id>\n"` (unchecked). Column 1 (before the tab) is
 /// what `--with-nth=1` displays; column 2 is the bare tag id
-/// `--accept-nth=2` returns on selection — real, existing `fuzzel` flags
-/// (Technical notes' "Spike finding"), so `tag-picker` never has to parse
-/// a display name back into an id.
+/// [`parse_fuzzel_output`] extracts from the full accepted line on
+/// selection (Technical notes' "Spike finding"), so `tag-picker` never has
+/// to parse a display name back into an id.
 ///
 /// Code review follow-up (finding #3): `wm_core::create_tag` accepts any
 /// string with no charset validation (ADR-006/YAGNI), so a tag name could
@@ -65,9 +65,10 @@ pub fn render_fuzzel_input(entries: &[ChecklistEntry]) -> String {
 }
 
 /// Replaces embedded tabs/newlines in a tag name with a plain space, so a
-/// name containing either can never corrupt the tab-delimited
-/// `--with-nth`/`--accept-nth` row format both [`render_fuzzel_input`] and
-/// [`render_switch_list`] emit (`wm_core::create_tag` accepts any string
+/// name containing either can never corrupt the tab-delimited row format
+/// both [`render_fuzzel_input`] and [`render_switch_list`] emit — which
+/// `parse_fuzzel_output`/`parse_switch_selection` now split on themselves
+/// (`wm_core::create_tag` accepts any string
 /// with no charset validation — ADR-006/YAGNI). Shared here since this is
 /// the second real occurrence of the identical one-line operation, not
 /// speculative abstraction (Technical notes "Consistency with the existing
@@ -105,40 +106,52 @@ pub const REJECTION_MESSAGE: &str = "tag limit reached (64)";
 /// verifiable live in this sandbox) — *any* non-success exit, or empty
 /// (trimmed) stdout on a success exit, is unconditionally `Cancelled`,
 /// checked before the create/toggle split. This is also the rejection
-/// row's dismissal mechanism for free (Story 2.3): its `--accept-nth`
-/// column is deliberately empty, so selecting it or pressing Escape both
-/// land on this same path.
+/// row's dismissal mechanism for free (Story 2.3): its second column is
+/// deliberately empty, so selecting it or pressing Escape both land on
+/// this same path.
 ///
-/// Beyond that, per Story 2.3's disambiguation rule (`fuzzel(1)`'s
-/// documented verbatim-echo-on-no-match behavior — Technical notes "Free-
-/// text disambiguation evidence"): stdout that parses as a `u8` **and** is
-/// a member of `known_tag_ids` (i.e. it came from a real, matched,
-/// `--accept-nth`-transformed row) is `Toggled`; anything else non-empty —
-/// including a `u8`-shaped string that just isn't a currently-known id, and
-/// ordinary non-numeric free text — is `CreateTag` with the trimmed stdout
-/// as the literal new tag name. A free-typed name that happens to be a
-/// bare numeral equal to a *currently rendered* id is an accepted, v1
-/// residual ambiguity (Task 1.3) and resolves to `Toggled`, not
-/// `CreateTag`.
+/// Code review follow-up: `stdout` is now the **full raw line** `fuzzel`
+/// returns (no `--accept-nth`, see `main.rs`'s `run_fuzzel` doc comment
+/// for why that flag is gone — it corrupted every created tag's name).
+/// Splitting the trimmed line on the *last* tab distinguishes the two real
+/// cases: a real, rendered row (`"[ ] name\tid\n"`, always exactly one
+/// tab) comes back as the full line including that tab, so a `Some` split
+/// with an `id` part that parses as `u8` *and* is a member of
+/// `known_tag_ids` is `Toggled`; a typed, non-matching custom entry has no
+/// tab at all (`fuzzel(1)`'s documented "input string does not match any
+/// entry, printed as-is" behavior), so a `None` split is `CreateTag` with
+/// the raw trimmed text as the literal new tag name. A split that finds a
+/// tab but whose id part is empty (the rejection/apply-failed rows) or
+/// doesn't match a known id (should not occur — every real row's id is
+/// always current) safely falls back to `Cancelled` rather than creating
+/// a tag out of row furniture.
 pub fn parse_fuzzel_output(exit_success: bool, stdout: &str, known_tag_ids: &[u8]) -> PickerAction {
     if !exit_success {
         return PickerAction::Cancelled;
     }
-    let trimmed = stdout.trim();
+    // Only the trailing newline is stripped, *not* a blanket `.trim()` -
+    // tab is ASCII whitespace, and a blanket trim would eat the
+    // rejection/apply-failed rows' significant trailing tab (their whole
+    // dismissal mechanism depends on a tab being present with nothing
+    // after it).
+    let trimmed = stdout.trim_end_matches('\n');
     if trimmed.is_empty() {
         return PickerAction::Cancelled;
     }
-    match trimmed.parse::<u8>() {
-        Ok(id) if known_tag_ids.contains(&id) => PickerAction::Toggled(id),
-        _ => PickerAction::CreateTag(trimmed.to_string()),
+    match trimmed.rsplit_once('\t') {
+        Some((_, id)) => match id.parse::<u8>() {
+            Ok(id) if known_tag_ids.contains(&id) => PickerAction::Toggled(id),
+            _ => PickerAction::Cancelled,
+        },
+        None => PickerAction::CreateTag(trimmed.to_string()),
     }
 }
 
 /// Renders the 64-tag-cap rejection's synthetic checklist row: the literal
-/// [`REJECTION_MESSAGE`] text in column 1, an empty column 2 (the
-/// `--accept-nth` column `fuzzel` returns on selection) — an empty second
-/// column is what makes selecting this row equivalent to Escape, reusing
-/// [`parse_fuzzel_output`]'s empty-stdout-is-cancelled rule at zero extra
+/// [`REJECTION_MESSAGE`] text in column 1, an empty column 2 — selecting
+/// it returns the full line "`REJECTION_MESSAGE`\t", whose id part (after
+/// [`parse_fuzzel_output`]'s tab split) is empty and fails to parse,
+/// landing on the same `Cancelled` path as pressing Escape at zero extra
 /// dismissal code.
 pub fn render_rejection_row() -> String {
     format!("{REJECTION_MESSAGE}\t\n")
@@ -189,8 +202,7 @@ pub fn should_add_to_tag_mirror(tag_id: u8, tags: &[TagDto]) -> bool {
 pub const CREATE_APPLY_FAILED_MESSAGE: &str = "tag created but not applied — toggle it manually";
 
 /// Renders [`CREATE_APPLY_FAILED_MESSAGE`] as a synthetic checklist row:
-/// same shape, and same empty-`--accept-nth`-column dismissal mechanism
-/// (reusing [`parse_fuzzel_output`]'s empty-stdout-is-cancelled rule), as
+/// same shape, and same empty-second-column dismissal mechanism, as
 /// [`render_rejection_row`].
 pub fn render_create_apply_failed_row() -> String {
     format!("{CREATE_APPLY_FAILED_MESSAGE}\t\n")
@@ -250,10 +262,13 @@ pub fn render_switch_list(tags: &[TagDto]) -> String {
 /// Decides the outcome of one switch-mode `fuzzel` invocation from its
 /// exit status, captured stdout, and the tag ids actually rendered this
 /// invocation (`known_tag_ids`). Structurally the same shape as
-/// [`parse_fuzzel_output`] minus the `CreateTag` catch-all arm: anything
-/// that isn't a real matched row (non-success exit, empty stdout,
-/// non-numeric text, or an in-range-but-unregistered numeral) is simply
-/// `Cancelled`, never treated as a create attempt.
+/// [`parse_fuzzel_output`] (see its doc comment for why `stdout` is now
+/// the full raw line, not an `--accept-nth`-extracted id) minus the
+/// `CreateTag` catch-all arm: anything that isn't a real matched row
+/// (non-success exit, empty stdout, no tab at all, or a tab with an
+/// in-range-but-unregistered numeral) is simply `Cancelled`, never treated
+/// as a create attempt — switching only ever operates on existing tags
+/// (`EXPERIENCE.md`).
 pub fn parse_switch_selection(
     exit_success: bool,
     stdout: &str,
@@ -262,13 +277,18 @@ pub fn parse_switch_selection(
     if !exit_success {
         return SwitchAction::Cancelled;
     }
-    let trimmed = stdout.trim();
+    // See `parse_fuzzel_output`'s doc comment: only the trailing newline
+    // is stripped, not a blanket `.trim()`, since tab is ASCII whitespace.
+    let trimmed = stdout.trim_end_matches('\n');
     if trimmed.is_empty() {
         return SwitchAction::Cancelled;
     }
-    match trimmed.parse::<u8>() {
-        Ok(id) if known_tag_ids.contains(&id) => SwitchAction::Selected(id),
-        _ => SwitchAction::Cancelled,
+    match trimmed.rsplit_once('\t') {
+        Some((_, id)) => match id.parse::<u8>() {
+            Ok(id) if known_tag_ids.contains(&id) => SwitchAction::Selected(id),
+            _ => SwitchAction::Cancelled,
+        },
+        None => SwitchAction::Cancelled,
     }
 }
 
@@ -371,10 +391,10 @@ mod tests {
         // Code review follow-up (finding #3): a tag name with an embedded
         // tab or newline (creatable today via a raw `create-tag` IPC call,
         // no UI does this yet) would otherwise corrupt the tab-delimited
-        // row format fuzzel's `--dmenu`/`--with-nth`/`--accept-nth` parses —
-        // e.g. an unescaped embedded tab here would shift column 2 (the
-        // bare tag id `--accept-nth=2` returns) to the wrong text entirely.
-        // Both characters are replaced with a plain space.
+        // row format `--with-nth`'s display and `parse_fuzzel_output`'s own
+        // `rsplit_once('\t')` both rely on — e.g. an unescaped embedded tab
+        // here would shift where the id column is found entirely. Both
+        // characters are replaced with a plain space.
         assert_eq!(
             render_fuzzel_input(&[ChecklistEntry {
                 tag_id: 2,
@@ -386,9 +406,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_fuzzel_output_returns_toggled_for_successful_exit_and_valid_tag_id() {
+    fn parse_fuzzel_output_returns_toggled_for_a_full_row_with_a_known_tag_id() {
+        // Code review follow-up: `stdout` is now the *full raw line*
+        // fuzzel returns with no `--accept-nth` (see the function's own
+        // doc comment for why) — a real selected row always has exactly
+        // one tab, and its id part must be a known, currently-rendered id.
         assert_eq!(
-            parse_fuzzel_output(true, "3\n", &[3]),
+            parse_fuzzel_output(true, "[ ] web\t3\n", &[3]),
             PickerAction::Toggled(3)
         );
     }
@@ -396,7 +420,7 @@ mod tests {
     #[test]
     fn parse_fuzzel_output_returns_cancelled_for_nonzero_exit() {
         assert_eq!(
-            parse_fuzzel_output(false, "3\n", &[3]),
+            parse_fuzzel_output(false, "[ ] web\t3\n", &[3]),
             PickerAction::Cancelled
         );
     }
@@ -407,77 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_fuzzel_output_returns_create_tag_for_non_numeric_freeform_stdout() {
-        // Story 2.3 (Task 1.4-class repurposing, applied here too): under
-        // the old two-variant `PickerAction`, any stdout that didn't parse
-        // as an in-range `u8` — numeric-but-out-of-range *or* plain
-        // garbage/free text — was defensively `Cancelled`, since no
-        // legitimate reason for either shape to come back from `fuzzel`
-        // was known before `CreateTag` existed. Now that free text is a
-        // real, first-class outcome (AC1), non-numeric stdout that matches
-        // no known tag id is exactly the `CreateTag` case — this is in
-        // fact the *primary* new behavior, not an edge case; "not-a-number"
-        // is just as valid a typed tag name as "deploy-watch".
-        assert_eq!(
-            parse_fuzzel_output(true, "not-a-number", &[3]),
-            PickerAction::CreateTag("not-a-number".into())
-        );
-    }
-
-    #[test]
-    fn parse_fuzzel_output_returns_create_tag_for_out_of_range_numeral_via_parse_failure_path() {
-        // Story 2.3 Task 1.4: repurposes the old
-        // `..._returns_cancelled_for_tag_id_out_of_u8_range` test. `"999"`
-        // not matching any id `tag-picker` actually rendered this
-        // invocation is exactly the `CreateTag("999")` case — an odd tag
-        // name, but ADR-006 doesn't forbid numeral-shaped tag names, and
-        // there is no real row `--accept-nth` could have produced `"999"`
-        // from when no id `999` is currently registered.
-        //
-        // Code review follow-up (finding 4): renamed from
-        // `..._returns_create_tag_for_numeral_not_among_known_ids`. `"999"`
-        // exceeds `u8::MAX` (255), so `.parse::<u8>()` fails outright and
-        // this test actually exercises the `_ =>` catch-all arm via a parse
-        // *failure*, not the `Ok(id) if !known_tag_ids.contains(&id)`
-        // guard-false branch its old name implied. That branch is exercised
-        // separately below by
-        // `..._returns_create_tag_for_in_range_numeral_not_among_known_ids`.
-        assert_eq!(
-            parse_fuzzel_output(true, "999\n", &[0, 1, 2]),
-            PickerAction::CreateTag("999".into())
-        );
-    }
-
-    #[test]
-    fn parse_fuzzel_output_returns_create_tag_for_in_range_numeral_not_among_known_ids() {
-        // Code review follow-up (finding 4): the missing coverage case —
-        // a genuinely valid, in-range `u8` numeral ("5") that parses
-        // successfully but isn't a member of `known_tag_ids`, exercising
-        // the `Ok(id) if known_tag_ids.contains(&id)` guard's *false*
-        // branch specifically, distinct from the parse-failure path above.
-        assert_eq!(
-            parse_fuzzel_output(true, "5\n", &[0, 1, 2]),
-            PickerAction::CreateTag("5".into())
-        );
-    }
-
-    #[test]
-    fn parse_fuzzel_output_returns_toggled_when_stdout_matches_a_known_tag_id() {
-        assert_eq!(
-            parse_fuzzel_output(true, "1\n", &[0, 1, 2]),
-            PickerAction::Toggled(1)
-        );
-    }
-
-    #[test]
-    fn parse_fuzzel_output_returns_create_tag_when_stdout_does_not_match_any_known_tag_id() {
-        assert_eq!(
-            parse_fuzzel_output(true, "deploy-watch\n", &[0, 1, 2]),
-            PickerAction::CreateTag("deploy-watch".into())
-        );
-    }
-
-    #[test]
     fn parse_fuzzel_output_returns_cancelled_for_empty_stdout_regardless_of_known_ids() {
         // The rejection row's actual dismissal mechanism (Task 1.2): empty
         // (trimmed) stdout is unconditionally `Cancelled`, checked before
@@ -485,6 +438,56 @@ mod tests {
         // invocation.
         assert_eq!(
             parse_fuzzel_output(true, "", &[0, 1, 2]),
+            PickerAction::Cancelled
+        );
+    }
+
+    #[test]
+    fn parse_fuzzel_output_returns_cancelled_for_a_row_with_an_unknown_tag_id() {
+        // Should not occur in practice — every real, rendered row's id is
+        // always current — but a tab is present here, so this exercises
+        // the "found a tab, id doesn't match" branch specifically, distinct
+        // from the no-tab `CreateTag` path below. Cancelling rather than
+        // creating a tag out of row furniture is the safer fallback.
+        assert_eq!(
+            parse_fuzzel_output(true, "[ ] web\t99\n", &[0, 1, 2]),
+            PickerAction::Cancelled
+        );
+    }
+
+    #[test]
+    fn parse_fuzzel_output_returns_create_tag_for_freeform_text_with_no_tab() {
+        // A typed, non-matching custom entry has no tab at all —
+        // `fuzzel(1)`'s documented "input string does not match any of the
+        // entries, printed as is" behavior — so this is exactly the
+        // `CreateTag` case, the *primary* real-world path for creating a
+        // new tag, not an edge case.
+        assert_eq!(
+            parse_fuzzel_output(true, "deploy-watch\n", &[0, 1, 2]),
+            PickerAction::CreateTag("deploy-watch".into())
+        );
+    }
+
+    #[test]
+    fn parse_fuzzel_output_returns_create_tag_for_a_bare_numeral_with_no_tab() {
+        // A typed tag name that happens to look like a number is still a
+        // create, not a toggle attempt, as long as it has no tab — there is
+        // no real row this could be confused with. ADR-006 doesn't forbid
+        // numeral-shaped tag names.
+        assert_eq!(
+            parse_fuzzel_output(true, "5\n", &[0, 1, 2]),
+            PickerAction::CreateTag("5".into())
+        );
+    }
+
+    #[test]
+    fn parse_fuzzel_output_returns_cancelled_for_the_rejection_row_selection() {
+        // Direct round-trip test of `render_rejection_row`'s own dismissal
+        // mechanism: selecting it returns the full line with an empty id
+        // part after the tab, which fails to parse and falls to
+        // `Cancelled` — not `CreateTag` with the message text as a name.
+        assert_eq!(
+            parse_fuzzel_output(true, &render_rejection_row(), &[0, 1, 2]),
             PickerAction::Cancelled
         );
     }
@@ -501,11 +504,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_fuzzel_output_treats_known_id_with_leading_zero_or_whitespace_consistently_with_toggle()
-     {
+    fn parse_fuzzel_output_strips_only_the_trailing_newline_not_a_full_row() {
+        // Code review follow-up: a blanket `.trim()` would eat the
+        // rejection row's significant trailing tab (tab is ASCII
+        // whitespace) — only the trailing newline is stripped, so a real
+        // row's tab-delimited structure survives intact.
         assert_eq!(
-            parse_fuzzel_output(true, " 1 \n", &[0, 1, 2]),
-            PickerAction::Toggled(1)
+            parse_fuzzel_output(true, "[ ] web\t3\n", &[3]),
+            PickerAction::Toggled(3)
         );
     }
 
@@ -513,9 +519,10 @@ mod tests {
     fn render_rejection_row_is_the_literal_cap_message_with_an_empty_accept_column() {
         // Column 1 is the exact literal `wm/src/ipc/dispatch.rs`'s
         // `describe_wm_core_error` returns for `TagLimitReached`; column 2
-        // (the `--accept-nth` column) is deliberately empty, which is what
-        // makes selecting this row land on the same empty-stdout-is-
-        // cancelled path as pressing Escape (Task 1.2).
+        // is deliberately empty, which is what makes selecting this row
+        // land on the same cancelled path as pressing Escape (Task 1.2;
+        // see `parse_fuzzel_output_returns_cancelled_for_the_rejection_row_selection`
+        // for the actual round-trip through `parse_fuzzel_output`).
         assert_eq!(render_rejection_row(), "tag limit reached (64)\t\n");
     }
 
@@ -620,9 +627,8 @@ mod tests {
     #[test]
     fn render_create_apply_failed_row_is_the_literal_message_with_an_empty_accept_column() {
         // Code review follow-up, finding 2: column 1 is the literal
-        // CREATE_APPLY_FAILED_MESSAGE, column 2 (the `--accept-nth` column)
-        // is deliberately empty, same dismissal mechanism as
-        // render_rejection_row.
+        // CREATE_APPLY_FAILED_MESSAGE, column 2 is deliberately empty,
+        // same dismissal mechanism as render_rejection_row.
         assert_eq!(
             render_create_apply_failed_row(),
             "tag created but not applied — toggle it manually\t\n"
@@ -663,9 +669,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_switch_selection_returns_selected_for_a_known_tag_id() {
+    fn parse_switch_selection_returns_selected_for_a_full_row_with_a_known_tag_id() {
+        // Code review follow-up: `stdout` is now the full raw line (no
+        // `--accept-nth`, see `parse_fuzzel_output`'s doc comment) — a real
+        // selected row always has exactly one tab, and a known id after it.
         assert_eq!(
-            parse_switch_selection(true, "1\n", &[0, 1, 2]),
+            parse_switch_selection(true, "web\t1\n", &[0, 1, 2]),
             SwitchAction::Selected(1)
         );
     }
@@ -673,7 +682,7 @@ mod tests {
     #[test]
     fn parse_switch_selection_returns_cancelled_for_nonzero_exit() {
         assert_eq!(
-            parse_switch_selection(false, "1\n", &[0, 1, 2]),
+            parse_switch_selection(false, "web\t1\n", &[0, 1, 2]),
             SwitchAction::Cancelled
         );
     }
@@ -687,10 +696,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_switch_selection_returns_cancelled_for_freeform_text_not_a_known_id() {
+    fn parse_switch_selection_returns_cancelled_for_freeform_text_with_no_tab() {
         // The deliberate, load-bearing difference from assign mode's
         // `parse_fuzzel_output`: switch mode has no create-tag branch at
-        // all, so anything that isn't a real matched row is simply
+        // all, so a typed, non-matching entry (no tab at all) is simply
         // cancelled, never treated as a create attempt.
         assert_eq!(
             parse_switch_selection(true, "deploy-watch\n", &[0, 1, 2]),
@@ -699,10 +708,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_switch_selection_returns_cancelled_for_a_numeral_not_among_known_ids() {
-        // An in-range but unregistered numeral is not a valid selection in
-        // switch mode, unlike assign mode where it would become a
-        // `CreateTag` attempt.
+    fn parse_switch_selection_returns_cancelled_for_a_bare_numeral_with_no_tab() {
+        // Unlike assign mode, a numeral-shaped typed entry with no tab
+        // never becomes a selection, since switch mode has no create path
+        // to fall back to at all.
         assert_eq!(
             parse_switch_selection(true, "99\n", &[0, 1, 2]),
             SwitchAction::Cancelled
@@ -710,9 +719,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_switch_selection_trims_whitespace_consistently_with_toggle_parsing() {
+    fn parse_switch_selection_returns_cancelled_for_a_row_with_an_unknown_tag_id() {
+        // A tab is present, but the id doesn't match any currently-known
+        // tag — should not occur in practice (every real row's id is
+        // always current), but exercises the "found a tab, id doesn't
+        // match" branch distinctly from the no-tab case above.
         assert_eq!(
-            parse_switch_selection(true, " 1 \n", &[0, 1, 2]),
+            parse_switch_selection(true, "web\t99\n", &[0, 1, 2]),
+            SwitchAction::Cancelled
+        );
+    }
+
+    #[test]
+    fn parse_switch_selection_strips_only_the_trailing_newline() {
+        // Same reasoning as `parse_fuzzel_output`'s equivalent test — a
+        // blanket `.trim()` would eat a significant trailing tab.
+        assert_eq!(
+            parse_switch_selection(true, "web\t1\n", &[0, 1, 2]),
             SwitchAction::Selected(1)
         );
     }

@@ -83,9 +83,26 @@ fn send_switch_tag_or_exit(
 /// Spawns one `fuzzel --dmenu` invocation, writes `input` to its stdin,
 /// and waits for it to exit. Real flags cross-checked against `fuzzel(1)`
 /// (Technical notes' "Spike finding"): `--with-nth=1` displays only the
-/// checkbox-glyph+name column, `--accept-nth=2` prints only the bare tag
-/// id column on selection, `--nth-delimiter` is the tab this module's
-/// stdin rows use. When `initial_search` is `Some(text)`, `--search=<text>`
+/// checkbox-glyph+name column (`--nth-delimiter` is the tab this module's
+/// stdin rows use as the field separator).
+///
+/// Code review follow-up: deliberately does **not** pass `--accept-nth`
+/// (this project used `--accept-nth=2` from Story 2.2 through Story 2.10,
+/// intending it to print just the bare tag id column on selection).
+/// Confirmed live and cross-checked against upstream (Codeberg
+/// `dnkl/fuzzel` issues #670/#671): `--accept-nth=N` prints the *literal
+/// string* `"{N}"` instead of the real value whenever there is no actual
+/// N:th column to extract from the accepted line — exactly what happens
+/// for a typed, non-matching custom entry (the create-tag path), which by
+/// definition has no tab-delimited columns at all. Every tag ever created
+/// by typing a new name was silently misnamed to the literal text `"{2}"`
+/// as a result. `checklist::parse_fuzzel_output`/`parse_switch_selection`
+/// now parse the *full* raw returned line themselves (splitting on the
+/// tab delimiter when one is present) instead of trusting `fuzzel` to
+/// have already extracted just the id — this is what the `--with-nth=1`
+/// example in `fuzzel(1)` itself documents as the actual behavior with no
+/// `--accept-nth` present: "the full input line is printed on stdout."
+/// When `initial_search` is `Some(text)`, `--search=<text>`
 /// pre-fills fuzzel's input box (Story 2.3: restores the rejected name into
 /// view on a cap-rejection reopen — a real, documented flag). When
 /// `output_name` is `Some(name)`, `--output=<name>` targets the real
@@ -121,7 +138,6 @@ fn run_fuzzel(
         // fullscreen (see `wm`'s `recompute_pinned_terminal_geometry`).
         .arg("--layer=overlay")
         .arg("--with-nth=1")
-        .arg("--accept-nth=2")
         .arg("--nth-delimiter=\t")
         .arg("--placeholder=type to filter, or a new name to create");
     if let Some(text) = initial_search {
