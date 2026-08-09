@@ -83,6 +83,12 @@ fn run_fuzzel(
     let mut command = Command::new("fuzzel");
     command
         .arg("--dmenu")
+        // The pinned terminal is fullscreened on whatever tag is active
+        // (Story 2.7). fuzzel's own default layer, "top", explicitly
+        // renders below fullscreen windows (fuzzel.ini(5)) - only
+        // "overlay" renders above them too, so without this the picker
+        // opens invisibly behind the fullscreen terminal every time.
+        .arg("--layer=overlay")
         .arg("--with-nth=1")
         .arg("--accept-nth=2")
         .arg("--nth-delimiter=\t")

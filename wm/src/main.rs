@@ -1127,7 +1127,14 @@ impl Seat {
             // above. Bare `fuzzel` (no `--dmenu`) runs its own built-in
             // desktop-entry launcher, so no argument wiring is needed.
             Action::SpawnLauncher => {
+                // The pinned terminal is fullscreened on whatever tag is
+                // active (Story 2.7). fuzzel's own default layer, "top",
+                // explicitly renders below fullscreen windows
+                // (fuzzel.ini(5)) - only "overlay" renders above them too,
+                // so without this the launcher opens invisibly behind the
+                // fullscreen terminal every time.
                 match std::process::Command::new("fuzzel")
+                    .arg("--layer=overlay")
                     .env_remove("WAYLAND_DEBUG")
                     .spawn()
                 {
@@ -1143,8 +1150,12 @@ impl Seat {
                 // unlike `tag-picker`'s own `run_fuzzel`, whose checklist
                 // input can grow arbitrarily large and needs a writer
                 // thread for that reason.
+                // See `Action::SpawnLauncher`'s comment above: without
+                // `--layer=overlay`, fuzzel's default "top" layer renders
+                // below the always-fullscreen pinned terminal.
                 match std::process::Command::new("fuzzel")
                     .arg("--dmenu")
+                    .arg("--layer=overlay")
                     .arg("--prompt")
                     .arg("Hotkeys: ")
                     .stdin(std::process::Stdio::piped())
