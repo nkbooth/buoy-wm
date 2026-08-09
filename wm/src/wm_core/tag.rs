@@ -5,15 +5,13 @@
 //! bitset (ADR-006). Tag creation is idempotent by name; there is no
 //! delete-tag API in v1 — that omission is deliberate, not an oversight.
 
-// This module's public API is wired into `main.rs` as of Story 1.7:
-// `create_tag` (via `WmCore::create_tag`/`create_tag_with_generated_name`,
-// the tag-create keybind), `mark_terminal_spawned` (via
+// This module's public API is wired in: `create_tag` (via
+// `WmCore::create_tag`, `tag-picker`'s IPC-driven tag-creation flow),
+// `mark_terminal_spawned` (via
 // `WmCore::claim_pinned_terminal_spawn`/`ensure_pinned_terminal_spawned`,
 // the pinned-terminal lazy-spawn), and this registry's ordering (via
 // `ids()`, which `WmCore::cycle_tag` composes with `switch_tag` for the
-// tag-cycle keybind). `WmCore::toggle_view_tag` remains unwired —
-// deferred to Epic 2's assign-mode picker — but nothing in this module is
-// unreachable on its account alone.
+// tag-cycle keybind).
 use std::collections::HashMap;
 
 use super::ids::TagId;
@@ -61,6 +59,11 @@ impl TagRegistry {
     }
 
     /// Returns the number of registered tags.
+    // Not called from production code since the `Mod4+T` generated-name
+    // keybind that used it was removed (superseded by `tag-picker`'s
+    // named tag-creation flow) - kept as public API/for test ergonomics,
+    // same precedent as `new()` above.
+    #[allow(dead_code)]
     pub fn count(&self) -> usize {
         self.tags.len()
     }

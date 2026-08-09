@@ -74,16 +74,35 @@ fn log_wm_core_err(result: Result<(), WmCoreError>, context: &str) {
 enum Action {
     None,
     SpawnFoot,
+    SpawnLauncher,
+    ShowHotkeys,
     Close,
     FocusNext,
     Move,
     Resize,
     Exit,
     TagCycle,
-    TagCreate,
     OpenTagPicker,
     TagSwitch,
 }
+
+/// Human-readable cheat-sheet shown by `Action::ShowHotkeys` (`Mod4+?`).
+/// Hand-maintained alongside `init_new_seats`'s bindings below — there are
+/// few enough of these that a shared declarative table isn't worth the
+/// indirection (YAGNI); keep this list in sync when adding a binding.
+const HOTKEY_HELP: &[&str] = &[
+    "Mod4+Space       Spawn terminal (foot)",
+    "Mod4+R           App launcher (fuzzel)",
+    "Mod4+Q           Close focused window",
+    "Mod4+N           Cycle focus",
+    "Mod4+Tab         Cycle tag",
+    "Mod4+A           Tag manager (assign tags to focused window)",
+    "Mod4+S           Switch tag",
+    "Mod4+?           Show this hotkey list",
+    "Mod4+Esc         Exit session",
+    "Mod4+LeftClick   Move window",
+    "Mod4+RightClick  Resize window",
+];
 
 #[derive(Debug, Clone)]
 enum SeatOp {
@@ -464,6 +483,15 @@ impl WindowManager {
                     wm_core.lower_view(view_id),
                     "Failed to lower pinned terminal in stacking order",
                 );
+                // `lower_view` above only updates `wm_core`'s own abstract
+                // bookkeeping (Story 1.5) - it never touches the real
+                // scene-graph node. Without this call the pinned terminal's
+                // freshly-mapped node lands wherever the compositor's
+                // default insertion order puts it (often near the top),
+                // which is why floating windows mapped before it could end
+                // up rendered *below* it despite their own `place_top()`
+                // call further down in this function (FR4/FR5).
+                window.node.place_bottom();
                 // Story 2.7 Task 2.3: recover which tag this pinned
                 // terminal was spawned for (the protocol gives no way to
                 // know from the mapped window alone - it only carries
@@ -661,7 +689,6 @@ impl WindowManager {
         const Q: u32 = 0x71;
         const ESC: u32 = 0xff1b;
         const TAB: u32 = 0xff09;
-        const T: u32 = 0x74;
         // Story 2.2 gap #4: `Mod4+A` ("Assign") opens the tag-manager
         // picker, following this file's existing single-letter-mnemonic
         // convention.
@@ -669,6 +696,16 @@ impl WindowManager {
         // Story 2.4: `Mod4+S` ("Switch") opens the same picker in
         // switch mode, same single-letter-mnemonic convention as `A`.
         const S: u32 = 0x73;
+        // `Mod4+R` ("Run") launches fuzzel's own desktop-entry launcher
+        // mode, same single-letter-mnemonic convention as `A`/`S`.
+        const R: u32 = 0x72;
+        // `Mod4+Shift+?` shows the hotkey cheat-sheet. Unlike the other
+        // bindings above, the keysym here is the *shifted* symbol the
+        // layout actually produces when Shift is held (xkbcommon has no
+        // separate unshifted `?` keysym) — `Modifiers` must include
+        // `shift` too, or this binding would never match the real
+        // Shift-held keysym the compositor reports.
+        const QUESTION: u32 = 0x3f;
         // See linux/input-event-codes.h
         const BTN_LEFT: u32 = 0x110;
         const BTN_RIGHT: u32 = 0x111;
@@ -681,9 +718,16 @@ impl WindowManager {
                 seat.create_xkb_binding(river_xkb, qh, mods, N, Action::FocusNext);
                 seat.create_xkb_binding(river_xkb, qh, mods, ESC, Action::Exit);
                 seat.create_xkb_binding(river_xkb, qh, mods, TAB, Action::TagCycle);
-                seat.create_xkb_binding(river_xkb, qh, mods, T, Action::TagCreate);
                 seat.create_xkb_binding(river_xkb, qh, mods, A, Action::OpenTagPicker);
                 seat.create_xkb_binding(river_xkb, qh, mods, S, Action::TagSwitch);
+                seat.create_xkb_binding(river_xkb, qh, mods, R, Action::SpawnLauncher);
+                seat.create_xkb_binding(
+                    river_xkb,
+                    qh,
+                    mods.union(Modifiers::Shift),
+                    QUESTION,
+                    Action::ShowHotkeys,
+                );
                 seat.create_pointer_binding(qh, mods, BTN_LEFT, Action::Move);
                 seat.create_pointer_binding(qh, mods, BTN_RIGHT, Action::Resize);
                 seat.new = false;
@@ -1047,9 +1091,7 @@ impl Seat {
     /// pinned terminal is spawned (`WindowManager::ensure_pinned_terminal_spawned`).
     /// Every other arm returns `None`. `active_output_id` is the
     /// deterministic "active output" `Action::TagCycle` acts on (see
-    /// `WindowManager::active_output_id`); `Action::TagCreate` never
-    /// switches any output (AC: "creating a tag does not switch any output
-    /// to it"), so it never returns `Some`.
+    /// `WindowManager::active_output_id`).
     fn do_action(
         &mut self,
         windows: &mut VecDeque<Window>,
@@ -1078,6 +1120,46 @@ impl Seat {
                 {
                     Ok(_) => {}
                     Err(e) => eprintln!("Failed to spawn foot: {e}"),
+                }
+                None
+            }
+            // `Mod4+R`: same fire-and-forget spawn shape as `SpawnFoot`
+            // above. Bare `fuzzel` (no `--dmenu`) runs its own built-in
+            // desktop-entry launcher, so no argument wiring is needed.
+            Action::SpawnLauncher => {
+                match std::process::Command::new("fuzzel")
+                    .env_remove("WAYLAND_DEBUG")
+                    .spawn()
+                {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Failed to spawn fuzzel launcher: {e}"),
+                }
+                None
+            }
+            Action::ShowHotkeys => {
+                // `HOTKEY_HELP` is small and fixed (well under the ~64KiB
+                // default pipe buffer), so writing it synchronously here
+                // can't block waiting for fuzzel to drain its stdin —
+                // unlike `tag-picker`'s own `run_fuzzel`, whose checklist
+                // input can grow arbitrarily large and needs a writer
+                // thread for that reason.
+                match std::process::Command::new("fuzzel")
+                    .arg("--dmenu")
+                    .arg("--prompt")
+                    .arg("Hotkeys: ")
+                    .stdin(std::process::Stdio::piped())
+                    .env_remove("WAYLAND_DEBUG")
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        if let Some(mut stdin) = child.stdin.take() {
+                            use std::io::Write;
+                            if let Err(e) = writeln!(stdin, "{}", HOTKEY_HELP.join("\n")) {
+                                eprintln!("Failed to write hotkey list to fuzzel's stdin: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to spawn fuzzel for hotkey list: {e}"),
                 }
                 None
             }
@@ -1188,18 +1270,11 @@ impl Seat {
                     None
                 }
             },
-            Action::TagCreate => {
-                if let Err(e) = wm_core.create_tag_with_generated_name() {
-                    eprintln!("Failed to create tag: {e:?}");
-                }
-                None
-            }
             // Story 2.2: fire-and-forget process spawn, no `wm_core` access.
             // `tag-picker` resolves the focused view itself via its own
             // `get-state` IPC call, so this arm never switches an output's
-            // active tag (same reasoning `Action::TagCreate`'s own `None`
-            // return already documents) and thus never triggers
-            // `manage_seats`' pinned-terminal-spawn signal.
+            // active tag and thus never triggers `manage_seats`'
+            // pinned-terminal-spawn signal.
             //
             // Code review follow-up (finding #1): spawning `"tag-picker"` by
             // bare name relied on `$PATH`, but nothing in this repo installs

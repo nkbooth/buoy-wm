@@ -32,20 +32,14 @@ pub enum WmCoreError {
     /// No view with the given `ViewId` is registered.
     UnknownView,
     /// No tag with the given `TagId` is registered.
-    // Constructible via a live path since Story 1.7 wired `switch_tag`
-    // (through `cycle_tag`), `set_output_current_tag`, and `create_tag`
-    // into `main.rs`'s tag-cycle/tag-create keybinds. `toggle_view_tag`
-    // remains unwired (deferred to Epic 2's assign-mode picker), but this
-    // variant has other live producers.
     UnknownTag,
     /// No output with the given `OutputId` is registered.
     // Constructible via a live path since Story 1.7 wired `switch_tag`
     // (through `cycle_tag`) into `main.rs`'s tag-cycle keybind.
     UnknownOutput,
     /// The tag registry already holds the maximum of 64 tags (ADR-006).
-    // Constructible via a live path since Story 1.7 wired `create_tag`
-    // (through `create_tag_with_generated_name`) into `main.rs`'s
-    // tag-create keybind.
+    // Constructible via a live path via `create_tag`, wired into
+    // `tag-picker`'s IPC-driven tag-creation flow.
     TagLimitReached,
 }
 
@@ -141,36 +135,13 @@ impl WmCore {
     /// [`TagRegistry::create_tag`](super::tag::TagRegistry::create_tag)).
     /// Fails with [`WmCoreError::TagLimitReached`] if the registry already
     /// holds 64 tags.
-    // Wired into `main.rs`'s tag-create keybind since Story 1.7, via
-    // `create_tag_with_generated_name`.
+    // Wired into `tag-picker`'s IPC-driven tag-creation flow (Epic 2).
     pub fn create_tag(&mut self, name: impl Into<String>) -> Result<TagId, WmCoreError> {
         let name = name.into();
         self.tags.create_tag(&name).map_err(|err| match err {
             TagRegistryError::Full => WmCoreError::TagLimitReached,
             TagRegistryError::UnknownTag => WmCoreError::UnknownTag,
         })
-    }
-
-    /// Creates a tag with a generated placeholder name (`tag<N>`, where
-    /// `N` is the registry's current tag count at the moment of creation),
-    /// delegating entirely to [`WmCore::create_tag`] — no separately
-    /// invented id-assignment or dedup logic. This is the pure decision
-    /// `main.rs`'s tag-create keybind calls in place of a text-input UI
-    /// that doesn't exist yet (Epic 2). Fails with
-    /// [`WmCoreError::TagLimitReached`] if the registry already holds 64
-    /// tags.
-    ///
-    /// Known, accepted collision risk: since `create_tag` is idempotent by
-    /// name, a tag literally named `tag<N>` created through some other path
-    /// (e.g. Epic 2's future free-text picker) before this generator's own
-    /// counter reaches `N` would cause this method to silently return that
-    /// existing tag's id rather than creating a new one. Harmless (no data
-    /// corruption, no panic) but flagged, not hidden — see this story's
-    /// Technical notes ("Generated-name collision risk"). Not a concern
-    /// today: this keybind is the only tag-creation path that exists.
-    pub fn create_tag_with_generated_name(&mut self) -> Result<TagId, WmCoreError> {
-        let name = format!("tag{}", self.tags.count());
-        self.create_tag(name)
     }
 
     /// Registers a new view for `app_id`, returning a fresh, unique
@@ -1284,47 +1255,6 @@ mod tests {
             None,
             "cycle_tag must reuse switch_tag's own reroute enforcement, not a separate write path"
         );
-    }
-
-    #[test]
-    fn create_tag_with_generated_name_uses_tag_n_naming_convention() {
-        let mut core = WmCore::new();
-        let first = core.create_tag_with_generated_name().unwrap();
-        assert_eq!(core.tags.get(first).unwrap().name, "tag0");
-        let second = core.create_tag_with_generated_name().unwrap();
-        assert_eq!(core.tags.get(second).unwrap().name, "tag1");
-    }
-
-    #[test]
-    fn create_tag_with_generated_name_returns_fresh_ids_on_repeated_calls() {
-        let mut core = WmCore::new();
-        let first = core.create_tag_with_generated_name().unwrap();
-        let second = core.create_tag_with_generated_name().unwrap();
-        let third = core.create_tag_with_generated_name().unwrap();
-        assert_ne!(first, second);
-        assert_ne!(second, third);
-        assert_ne!(first, third);
-    }
-
-    #[test]
-    fn create_tag_with_generated_name_fails_when_registry_full() {
-        let mut core = WmCore::new();
-        for i in 0..64 {
-            core.create_tag(format!("tag{i}")).unwrap();
-        }
-        assert_eq!(
-            core.create_tag_with_generated_name(),
-            Err(WmCoreError::TagLimitReached)
-        );
-        assert_eq!(core.tags.count(), 64);
-    }
-
-    #[test]
-    fn create_tag_with_generated_name_delegates_to_create_tag_no_new_ids_by_construction() {
-        let mut core = WmCore::new();
-        let id = core.create_tag_with_generated_name().unwrap();
-        let tag = core.tags.get(id).expect("id must be a real, present tag");
-        assert_eq!(tag.name, "tag0");
     }
 
     #[test]
