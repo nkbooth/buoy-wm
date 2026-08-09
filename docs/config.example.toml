@@ -6,10 +6,18 @@
 [defaults]
 # Spawned by the `terminal` action, and used for each tag's pinned terminal.
 terminal = "foot"
-# Spawned by the `launcher` action, and used for the tag pickers.
+# Spawned by the `launcher` action, and only that. `fuzzel` stays hardcoded
+# where it is driven as a menu rather than a launcher — the tag pickers and
+# the `hotkeys` cheat-sheet — since those pass fuzzel-specific flags.
 launcher = "fuzzel"
 # The tag created and shown at login when no tag exists yet.
 default_tag = "default"
+# Argv passed to `terminal` to spawn a tag's pinned terminal. `{app_id}` is
+# required — it is how the WM recognizes that window — and `{session}` is
+# replaced with the tag's zellij session name. The default is foot's
+# spelling; most other terminals use `--class` instead of `-a`, e.g.
+#   pinned_terminal_args = ["--class", "{app_id}", "-e", "zellij", "attach", "--create", "{session}"]
+pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]
 
 # --- Keybinds ---------------------------------------------------------------
 #
@@ -17,17 +25,23 @@ default_tag = "default"
 # binding you want. Mousebinds are a separate list with the same rule.
 #
 #   mod    = any of "Super" ("Mod4"), "Ctrl" ("Control"), "Alt" ("Mod1"),
-#            "Shift"
+#            "Shift". Optional — omit it for an unmodified key.
 #   key    = a keysym name: a single character ("a", "1", "?"), a named key
 #            ("Return", "Space", "Tab", "Escape", "Left", "Page_Up"), or a
 #            function key ("F1".."F35"). Named keys are case-insensitive;
-#            single characters are not, so "a" and "A" differ.
+#            single characters are NOT — "a" and "A" are different keysyms,
+#            and an uppercase letter is the *shifted* symbol, so it must be
+#            bound with "Shift" or it can never fire. Write "q", not "Q",
+#            for Super+q. (This is validated at load.)
 #   action = a bare string, or a single-key table for the two that take an
 #            argument.
 #
 # Actions: terminal, launcher, close, focus_next, exit, cycle_tag,
-#          tag_picker, tag_switch, hotkeys, move, resize,
+#          tag_picker, tag_switch, hotkeys,
 #          { switch_tag = "<name>" }, { exec = "<command line>" }
+# `move` and `resize` drive a pointer drag, so they are mousebind-only.
+#
+# Binding the same mod+key twice is an error rather than a silent race.
 
 [[keybind]]
 mod = ["Super"]
@@ -36,17 +50,17 @@ action = "terminal"
 
 [[keybind]]
 mod = ["Super"]
-key = "R"
+key = "r"
 action = "launcher"
 
 [[keybind]]
 mod = ["Super"]
-key = "Q"
+key = "q"
 action = "close"
 
 [[keybind]]
 mod = ["Super"]
-key = "N"
+key = "n"
 action = "focus_next"
 
 [[keybind]]
@@ -56,12 +70,12 @@ action = "cycle_tag"
 
 [[keybind]]
 mod = ["Super"]
-key = "A"
+key = "a"
 action = "tag_picker"
 
 [[keybind]]
 mod = ["Super"]
-key = "S"
+key = "s"
 action = "tag_switch"
 
 [[keybind]]
@@ -92,7 +106,7 @@ action = { switch_tag = "misc" }
 
 [[keybind]]
 mod = ["Super"]
-key = "P"
+key = "p"
 action = { exec = "grim -g \"$(slurp)\" ~/screenshot.png" }
 
 [[keybind]]

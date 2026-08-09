@@ -16,7 +16,7 @@ commented example.
 ```toml
 [defaults]
 terminal = "foot"      # also used for each tag's pinned terminal
-launcher = "fuzzel"    # also used for the tag pickers
+launcher = "fuzzel"    # the `launcher` action only — see note below
 default_tag = "default"
 
 [[keybind]]
@@ -38,12 +38,30 @@ to start a session you would then have no way to fix the file from.
 
 Key names are keysyms: a single character (`a`, `1`, `?`), a named key
 (`Return`, `Space`, `Tab`, `Escape`, `Left`, `Page_Up`), or `F1`–`F35`.
-Named keys are case-insensitive; single characters are not.
+Named keys are case-insensitive; single characters are **not**. An
+uppercase letter is the *shifted* symbol, so `Super`+`Q` can never fire —
+write `key = "q"` for Super+q, or add `"Shift"`. The config is rejected at
+load if you get this wrong, rather than the binding silently doing nothing.
+`mod` is optional; omit it to bind an unmodified key.
 
 Actions: `terminal`, `launcher`, `close`, `focus_next`, `exit`,
-`cycle_tag`, `tag_picker`, `tag_switch`, `hotkeys`, `move`, `resize`,
+`cycle_tag`, `tag_picker`, `tag_switch`, `hotkeys`,
 `{ switch_tag = "<name>" }`, `{ exec = "<command>" }`. `exec` runs through
-`sh -c`, so pipes and arguments work.
+`sh -c`, so pipes and arguments work. `move` and `resize` drive a pointer
+drag and are mousebind-only. Binding the same trigger twice is an error.
+
+`launcher` sets the program the `launcher` action spawns, and nothing else.
+`fuzzel` remains hardcoded where it is driven as a menu rather than as a
+launcher — the tag pickers (which spawn it from the separate `tag-picker`
+binary) and the `hotkeys` cheat-sheet — because those pass fuzzel-specific
+flags (`--dmenu`, `--layer`, `--prompt`).
+
+A tag's pinned terminal is spawned as `terminal` plus
+`pinned_terminal_args`, which defaults to foot's
+`["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]`. Set it
+alongside `terminal` if your terminal spells the app-id flag differently
+(most use `--class`). `{app_id}` is required — it is how the WM recognises
+that window — and its absence is rejected at load.
 
 ## Keybindings
 

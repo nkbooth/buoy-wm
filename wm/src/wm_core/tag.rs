@@ -96,6 +96,15 @@ impl TagRegistry {
         Ok(id)
     }
 
+    /// Returns the id of the tag named `name`, if one is registered.
+    /// Exact match, via the same `ids_by_name` index [`TagRegistry::
+    /// create_tag`] uses for its own idempotency check — so a caller that
+    /// only needs to *read* a name's id never has to reach for a `&mut
+    /// self` mutator to get it.
+    pub fn id_by_name(&self, name: &str) -> Option<TagId> {
+        self.ids_by_name.get(name).copied()
+    }
+
     /// Returns `true` if `id` is a registered [`TagId`].
     pub fn contains(&self, id: TagId) -> bool {
         (id.0 as usize) < self.tags.len()

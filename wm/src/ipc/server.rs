@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use crate::config::Defaults;
 use crate::ipc::dispatch::handle_request;
 use crate::ipc::lock_recovering;
 use crate::ipc::protocol::{Response, parse_request, serialize_response};
@@ -33,13 +34,13 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 /// module does not distinguish a stale file from a second, still-running
 /// WM instance).
 ///
-/// `terminal` is the program the pinned terminal is spawned with — the
-/// config value, passed in rather than read here so this module keeps its
-/// only dependency on the WM being the shared `wm_core` handle.
+/// `defaults` carries the pinned terminal's program and argv — the config
+/// values, passed in rather than read here so this module keeps its only
+/// dependency on the WM being the shared `wm_core` handle.
 pub fn spawn(
     wm_core: Arc<Mutex<WmCore>>,
     socket_path: &Path,
-    terminal: String,
+    defaults: Defaults,
 ) -> std::io::Result<JoinHandle<()>> {
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
@@ -50,8 +51,8 @@ pub fn spawn(
             match stream {
                 Ok(stream) => {
                     let wm_core = Arc::clone(&wm_core);
-                    let terminal = terminal.clone();
-                    std::thread::spawn(move || handle_connection(stream, wm_core, &terminal));
+                    let defaults = defaults.clone();
+                    std::thread::spawn(move || handle_connection(stream, wm_core, &defaults));
                 }
                 Err(e) => eprintln!("ipc: accept error: {e}"),
             }
@@ -69,9 +70,9 @@ pub fn spawn(
 /// default `panic = "unwind"` already confine an unhandled panic to its
 /// own thread, and [`lock_recovering`](crate::ipc::lock_recovering) is
 /// what actually keeps a poisoned mutex from crashing the *next* locker.
-fn handle_connection(stream: UnixStream, wm_core: Arc<Mutex<WmCore>>, terminal: &str) {
+fn handle_connection(stream: UnixStream, wm_core: Arc<Mutex<WmCore>>, defaults: &Defaults) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        handle_connection_inner(stream, &wm_core, terminal);
+        handle_connection_inner(stream, &wm_core, defaults);
     }));
     if let Err(e) = result {
         eprintln!("ipc: connection handler panicked (contained): {e:?}");
@@ -89,7 +90,7 @@ fn write_response(stream: &mut UnixStream, response: &Response) -> bool {
         && stream.flush().is_ok()
 }
 
-fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, terminal: &str) {
+fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, defaults: &Defaults) {
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
@@ -169,7 +170,13 @@ fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, ter
                 // with no visibility changes, same as `dispatch.rs`
                 // previously did.
                 if let Some(session_name) = pending_spawn {
-                    crate::spawn_pinned_terminal(&session_name, terminal);
+                    crate::spawn_pinned_terminal(
+                        &defaults.terminal,
+                        &defaults.pinned_terminal_argv(
+                            crate::wm_core::state::PINNED_TERM_APP_ID,
+                            &session_name,
+                        ),
+                    );
                 }
                 // well-formed request, wm-core-level Ok/Error: connection
                 // stays open for further requests.
@@ -289,8 +296,15 @@ mod tests {
         // pinned-terminal spawn reaches a real `Command::spawn` from these
         // tests, and an inert no-op keeps that from opening windows on the
         // machine running the suite.
-        spawn(Arc::clone(&wm_core), &socket_path, "/bin/true".to_string())
-            .expect("server must spawn successfully");
+        spawn(
+            Arc::clone(&wm_core),
+            &socket_path,
+            Defaults {
+                terminal: "/bin/true".to_string(),
+                ..Defaults::default()
+            },
+        )
+        .expect("server must spawn successfully");
         (socket_path, wm_core)
     }
 
@@ -418,7 +432,14 @@ mod tests {
         let socket_path = unique_socket_path();
         std::fs::write(&socket_path, b"stale, not a socket").unwrap();
         let wm_core = Arc::new(Mutex::new(WmCore::new()));
-        let result = spawn(wm_core, &socket_path, "/bin/true".to_string());
+        let result = spawn(
+            wm_core,
+            &socket_path,
+            Defaults {
+                terminal: "/bin/true".to_string(),
+                ..Defaults::default()
+            },
+        );
         assert!(
             result.is_ok(),
             "a stale non-socket file must not block startup: {result:?}"

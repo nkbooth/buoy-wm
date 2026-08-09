@@ -72,6 +72,36 @@ fn log_wm_core_err(result: Result<(), WmCoreError>, context: &str) {
     }
 }
 
+/// Every child this WM spawns is fire-and-forget — nothing ever reads an
+/// exit status. Without a `wait` each finished child lingers as a zombie
+/// for the lifetime of the session, and this process is a long-lived
+/// session daemon, so they accumulate (code-review follow-up). Rather than
+/// tracking children per call site, keep one list and opportunistically
+/// reap whatever has finished each time a new child is spawned.
+static SPAWNED_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
+
+/// Records `child` for reaping and clears out any that have already
+/// exited. Recovers from a poisoned lock the same way [`ipc::
+/// lock_recovering`] does — losing track of a child leaks a zombie, which
+/// is never worth taking down the session for (NFR2).
+fn track_child(child: std::process::Child) {
+    let mut children = SPAWNED_CHILDREN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    children.retain_mut(|tracked| !matches!(tracked.try_wait(), Ok(Some(_))));
+    children.push(child);
+}
+
+/// Spawns `command` fire-and-forget, logging a failure as `"Failed to spawn
+/// {what}: {e}"`. `WAYLAND_DEBUG` is removed from every child's environment
+/// — the added noise makes debugging the window manager itself impractical.
+fn spawn_tracked(command: &mut std::process::Command, what: &str) {
+    match command.env_remove("WAYLAND_DEBUG").spawn() {
+        Ok(child) => track_child(child),
+        Err(e) => eprintln!("Failed to spawn {what}: {e}"),
+    }
+}
+
 /// Translates a config modifier set into the protocol's bitfield.
 fn river_modifiers(mods: &[config::Modifier]) -> Modifiers {
     mods.iter().fold(Modifiers::empty(), |acc, modifier| {
@@ -724,9 +754,13 @@ impl WindowManager {
     /// `wm_core`'s mutable borrow.
     fn ensure_pinned_terminal_spawned(&mut self, tag_id: TagId) {
         match ipc::lock_recovering(&self.wm_core).claim_pinned_terminal_spawn(tag_id) {
-            Ok(Some(session_name)) => {
-                spawn_pinned_terminal(&session_name, &self.config.defaults.terminal)
-            }
+            Ok(Some(session_name)) => spawn_pinned_terminal(
+                &self.config.defaults.terminal,
+                &self
+                    .config
+                    .defaults
+                    .pinned_terminal_argv(PINNED_TERM_APP_ID, &session_name),
+            ),
             Ok(None) => {}
             Err(e) => {
                 eprintln!("Failed to check pinned-terminal spawn state for tag {tag_id:?}: {e:?}")
@@ -949,7 +983,7 @@ impl WindowManager {
             }
             if any_new_windows || !seat.terminal_intentionally_focused {
                 seat.terminal_intentionally_focused = false;
-                seat.focus_top(&self.windows, wm_core);
+                seat.focus_top(&self.windows, wm_core, None);
             }
             // `do_action` runs *after* the focus block above, so a binding
             // that switches tags (`Action::TagCycle`) hides the focused
@@ -980,7 +1014,7 @@ impl WindowManager {
                 // A deliberate terminal focus does not survive the tag it was
                 // made on, same expiry rule as the latch check above.
                 seat.terminal_intentionally_focused = false;
-                seat.focus_top(&self.windows, wm_core);
+                seat.focus_top(&self.windows, wm_core, active_output_id);
             }
             if seat.op_release {
                 seat.op_end();
@@ -1089,33 +1123,27 @@ fn tag_picker_path(wm_exe: &Path) -> PathBuf {
     }
 }
 
-/// Spawns the pinned terminal: `<terminal> -a pinned-term zellij attach
-/// --create <session_name>`. Same `WAYLAND_DEBUG` removal and `Ok`/`Err`
-/// handling as `Seat::do_action`'s `Action::Terminal` arm (consistency, not
-/// reinvention). Arguments are passed individually to `Command`, not
-/// through a shell, so arbitrary tag names in `session_name` carry no
-/// shell-injection risk regardless of their contents.
+/// Spawns a tag's pinned terminal as `<terminal> <argv...>`, where `argv`
+/// is [`Config::pinned_terminal_argv`]'s already-substituted result — by
+/// default foot's `-a pinned-term zellij attach --create <session>`.
 ///
-/// `terminal` is configurable, but the `-a <app_id>` flag it is passed is
-/// not: `PINNED_TERM_APP_ID` is how every other part of this WM recognizes
-/// the pinned terminal, so a terminal that doesn't take `-a` can't fill the
-/// role at all.
+/// Both the program and its argv are configurable because the flag that
+/// sets a window's app-id is terminal-specific (code-review follow-up:
+/// hardcoding foot's `-a` meant configuring `terminal` broke every pinned
+/// terminal silently, and permanently — the spawn succeeds, the tag is
+/// marked spawned, and the claim is idempotent so it never retries).
+/// `Config::parse` requires the argv to carry `{app_id}`, since
+/// `PINNED_TERM_APP_ID` is how the rest of this WM recognizes the window.
+///
+/// Arguments are passed individually to `Command`, never through a shell,
+/// so an arbitrary tag name in the session carries no injection risk.
 // Called from `ensure_pinned_terminal_spawned`, which gained its own
 // production call site in `manage_seats` in Story 1.7.
-fn spawn_pinned_terminal(session_name: &str, terminal: &str) {
-    match std::process::Command::new(terminal)
-        .arg("-a")
-        .arg(PINNED_TERM_APP_ID)
-        .arg("zellij")
-        .arg("attach")
-        .arg("--create")
-        .arg(session_name)
-        .env_remove("WAYLAND_DEBUG")
-        .spawn()
-    {
-        Ok(_) => {}
-        Err(e) => eprintln!("Failed to spawn pinned terminal `{terminal}`: {e}"),
-    }
+fn spawn_pinned_terminal(terminal: &str, argv: &[String]) {
+    spawn_tracked(
+        std::process::Command::new(terminal).args(argv),
+        &format!("pinned terminal `{terminal}`"),
+    );
 }
 
 impl Seat {
@@ -1196,16 +1224,10 @@ impl Seat {
             // Don't pass WAYLAND_DEBUG on to children, the added noise makes
             // debugging the window manager itself impractical.
             Action::Terminal => {
-                match std::process::Command::new(&config.defaults.terminal)
-                    .env_remove("WAYLAND_DEBUG")
-                    .spawn()
-                {
-                    Ok(_) => {}
-                    Err(e) => eprintln!(
-                        "Failed to spawn terminal `{}`: {e}",
-                        config.defaults.terminal
-                    ),
-                }
+                spawn_tracked(
+                    &mut std::process::Command::new(&config.defaults.terminal),
+                    &format!("terminal `{}`", config.defaults.terminal),
+                );
                 None
             }
             // Runs through `sh -c` so a bind can carry a whole command line —
@@ -1215,24 +1237,28 @@ impl Seat {
             // injection vector: anyone who can edit it can already run
             // anything as this user.
             Action::Exec(command_line) => {
-                match std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&command_line)
-                    .env_remove("WAYLAND_DEBUG")
-                    .spawn()
-                {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("Failed to exec `{command_line}`: {e}"),
-                }
+                spawn_tracked(
+                    std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&command_line),
+                    &format!("`{command_line}`"),
+                );
                 None
             }
             // Create-on-demand: a named-tag bind is meant to be pressed
             // before the tag exists (`Super+1` = "email" on a fresh
             // session), so a missing tag is created rather than treated as
-            // an error. An existing name is looked up first so repeated
-            // presses reuse that tag instead of piling up duplicates —
-            // ADR-006 has no tag-deletion operation, so a duplicate would
-            // be permanent.
+            // an error.
+            //
+            // The name is resolved before `create_tag` is reached, but not
+            // to prevent duplicates — `TagRegistry::create_tag` is already
+            // idempotent by name and returns the existing id (code-review
+            // follow-up corrected an earlier comment claiming otherwise).
+            // It is so that the overwhelmingly common case, pressing a bind
+            // for a tag that already exists, never calls a `&mut WmCore`
+            // mutator at all: this project's retrospective identifies new
+            // call sites onto shared-state mutators as its highest-risk
+            // change shape, so a read stays a read.
             Action::SwitchTag(name) => {
                 let Some(output_id) = active_output_id else {
                     eprintln!("Tag keybind for `{name}` pressed but no output is registered yet");
@@ -1285,21 +1311,29 @@ impl Seat {
                 if let Some(name) = active_output_name {
                     command.arg(format!("--output={name}"));
                 }
-                match command.env_remove("WAYLAND_DEBUG").spawn() {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("Failed to spawn fuzzel launcher: {e}"),
-                }
+                spawn_tracked(
+                    &mut command,
+                    &format!("launcher `{}`", config.defaults.launcher),
+                );
                 None
             }
             Action::Hotkeys => {
-                // `HOTKEY_HELP` is small and fixed (well under the ~64KiB
-                // default pipe buffer), so writing it synchronously here
-                // can't block waiting for fuzzel to drain its stdin —
-                // unlike `tag-picker`'s own `run_fuzzel`, whose checklist
-                // input can grow arbitrarily large and needs a writer
-                // thread for that reason.
-                // See `Action::SpawnLauncher`'s comments above: `--layer=
-                // overlay` and `--output=<name>` for the same reasons.
+                // The cheat-sheet used to be a fixed 11-entry constant,
+                // comfortably under the ~64KiB default pipe buffer, which
+                // is what made a synchronous write safe here. It is now
+                // generated from the user's own bindings and has no bound
+                // at all, so a large enough config could fill the pipe and
+                // block this — the WM's only thread — until fuzzel drained
+                // it, freezing all window management. Hand the write to a
+                // thread, exactly as `tag-picker`'s `run_fuzzel` already
+                // does for its arbitrarily-long checklist (code-review
+                // follow-up).
+                //
+                // `fuzzel` is deliberately not `config.defaults.launcher`:
+                // it is driven as a dmenu-style pager here, with
+                // fuzzel-specific flags, not as the user's chosen launcher.
+                // See `Action::Launcher`'s comments above for `--layer=
+                // overlay` and `--output=<name>`.
                 let mut command = std::process::Command::new("fuzzel");
                 command
                     .arg("--dmenu")
@@ -1316,11 +1350,15 @@ impl Seat {
                 {
                     Ok(mut child) => {
                         if let Some(mut stdin) = child.stdin.take() {
-                            use std::io::Write;
-                            if let Err(e) = writeln!(stdin, "{}", config.hotkey_help().join("\n")) {
-                                eprintln!("Failed to write hotkey list to fuzzel's stdin: {e}");
-                            }
+                            let help = config.hotkey_help().join("\n");
+                            std::thread::spawn(move || {
+                                use std::io::Write;
+                                if let Err(e) = writeln!(stdin, "{help}") {
+                                    eprintln!("Failed to write hotkey list to fuzzel: {e}");
+                                }
+                            });
                         }
+                        track_child(child);
                     }
                     Err(e) => eprintln!("Failed to spawn fuzzel for hotkey list: {e}"),
                 }
@@ -1391,7 +1429,10 @@ impl Seat {
                     } else {
                         let window = windows.remove(i).unwrap();
                         windows.push_back(window);
-                        self.focus_top(windows, wm_core);
+                        // Unscoped: `cycle_focus` has already chosen the
+                        // target and only considers visible views, so this
+                        // call is re-affirming that choice, not searching.
+                        self.focus_top(windows, wm_core, None);
                     }
                 }
                 None
@@ -1476,10 +1517,7 @@ impl Seat {
                                 command.arg(name);
                             }
                         }
-                        match command.env_remove("WAYLAND_DEBUG").spawn() {
-                            Ok(_) => {}
-                            Err(e) => eprintln!("Failed to spawn tag-picker: {e}"),
-                        }
+                        spawn_tracked(&mut command, "tag-picker");
                     }
                     Err(e) => {
                         eprintln!("Failed to resolve wm's own executable path: {e}")
@@ -1515,12 +1553,7 @@ impl Seat {
                             if let Some(name) = active_output_name {
                                 command.arg(name);
                             }
-                            match command.env_remove("WAYLAND_DEBUG").spawn() {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    eprintln!("Failed to spawn tag-picker in switch mode: {e}")
-                                }
-                            }
+                            spawn_tracked(&mut command, "tag-picker in switch mode");
                         }
                         Err(e) => {
                             eprintln!("Failed to resolve wm's own executable path: {e}")
@@ -1592,14 +1625,28 @@ impl Seat {
     // mapped after a floating window sits *behind* it there, while
     // `wm_core`'s `stacking_order` is the order both `lower_view` and
     // `raise_view` actively maintain.
-    fn focus_top(&mut self, windows: &VecDeque<Window>, wm_core: &mut WmCore) {
+    /// `scope` restricts the search to one output's currently-displayed
+    /// tag. The tag-switch repair passes the output it just switched, so
+    /// focus can't land on a window the user isn't looking at (code-review
+    /// follow-up); the routine every-pass call passes `None`, where any
+    /// visible window is a legitimate target.
+    fn focus_top(
+        &mut self,
+        windows: &VecDeque<Window>,
+        wm_core: &mut WmCore,
+        scope: Option<OutputId>,
+    ) {
         // A visible view always has a matching `Window`: `remove_windows`
         // drops a window from `self.windows` and unregisters its view from
         // `wm_core` inside the same pass, so the two can't diverge across
         // this call. `and_then` therefore degrades to the same "nothing to
         // focus" clear as an empty stacking order rather than panicking
         // (NFR2), which also retires this function's two `expect`s.
-        let target = wm_core.topmost_visible_view().and_then(|view_id| {
+        let topmost = match scope {
+            Some(output_id) => wm_core.topmost_visible_view_on(output_id),
+            None => wm_core.topmost_visible_view(),
+        };
+        let target = topmost.and_then(|view_id| {
             windows
                 .iter()
                 .find(|window| window.view_id == Some(view_id))
@@ -2097,10 +2144,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app_data.wm.config = match Config::load() {
         Ok(config) => config,
         Err(e) => {
-            eprintln!(
-                "Failed to load {}: {e}\nFalling back to built-in defaults.",
-                config::config_path().display()
-            );
+            // `load` only returns `Err` for a file it actually found, so
+            // the path is always resolvable here; the fallback label is
+            // belt-and-braces rather than a reachable case.
+            let path = config::config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "the config file".to_string());
+            eprintln!("Failed to load {path}: {e}\nFalling back to built-in defaults.");
             Config::default()
         }
     };
@@ -2128,7 +2178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = ipc::server::spawn(
         Arc::clone(&app_data.wm.wm_core),
         &socket_path,
-        app_data.wm.config.defaults.terminal.clone(),
+        app_data.wm.config.defaults.clone(),
     ) {
         eprintln!("Failed to start IPC server on {socket_path:?}: {e}");
     }
