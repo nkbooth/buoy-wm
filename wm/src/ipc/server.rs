@@ -32,7 +32,15 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 /// "Stale socket handling" for why blind removal is acceptable here (this
 /// module does not distinguish a stale file from a second, still-running
 /// WM instance).
-pub fn spawn(wm_core: Arc<Mutex<WmCore>>, socket_path: &Path) -> std::io::Result<JoinHandle<()>> {
+///
+/// `terminal` is the program the pinned terminal is spawned with — the
+/// config value, passed in rather than read here so this module keeps its
+/// only dependency on the WM being the shared `wm_core` handle.
+pub fn spawn(
+    wm_core: Arc<Mutex<WmCore>>,
+    socket_path: &Path,
+    terminal: String,
+) -> std::io::Result<JoinHandle<()>> {
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
@@ -42,7 +50,8 @@ pub fn spawn(wm_core: Arc<Mutex<WmCore>>, socket_path: &Path) -> std::io::Result
             match stream {
                 Ok(stream) => {
                     let wm_core = Arc::clone(&wm_core);
-                    std::thread::spawn(move || handle_connection(stream, wm_core));
+                    let terminal = terminal.clone();
+                    std::thread::spawn(move || handle_connection(stream, wm_core, &terminal));
                 }
                 Err(e) => eprintln!("ipc: accept error: {e}"),
             }
@@ -60,9 +69,9 @@ pub fn spawn(wm_core: Arc<Mutex<WmCore>>, socket_path: &Path) -> std::io::Result
 /// default `panic = "unwind"` already confine an unhandled panic to its
 /// own thread, and [`lock_recovering`](crate::ipc::lock_recovering) is
 /// what actually keeps a poisoned mutex from crashing the *next* locker.
-fn handle_connection(stream: UnixStream, wm_core: Arc<Mutex<WmCore>>) {
+fn handle_connection(stream: UnixStream, wm_core: Arc<Mutex<WmCore>>, terminal: &str) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        handle_connection_inner(stream, &wm_core);
+        handle_connection_inner(stream, &wm_core, terminal);
     }));
     if let Err(e) = result {
         eprintln!("ipc: connection handler panicked (contained): {e:?}");
@@ -80,7 +89,7 @@ fn write_response(stream: &mut UnixStream, response: &Response) -> bool {
         && stream.flush().is_ok()
 }
 
-fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>) {
+fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, terminal: &str) {
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
@@ -160,7 +169,7 @@ fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>) {
                 // with no visibility changes, same as `dispatch.rs`
                 // previously did.
                 if let Some(session_name) = pending_spawn {
-                    crate::spawn_pinned_terminal(&session_name);
+                    crate::spawn_pinned_terminal(&session_name, terminal);
                 }
                 // well-formed request, wm-core-level Ok/Error: connection
                 // stays open for further requests.
@@ -276,7 +285,12 @@ mod tests {
     fn spawn_test_server_with_core(core: WmCore) -> (std::path::PathBuf, Arc<Mutex<WmCore>>) {
         let socket_path = unique_socket_path();
         let wm_core = Arc::new(Mutex::new(core));
-        spawn(Arc::clone(&wm_core), &socket_path).expect("server must spawn successfully");
+        // `/bin/true` rather than a real terminal: a request that claims a
+        // pinned-terminal spawn reaches a real `Command::spawn` from these
+        // tests, and an inert no-op keeps that from opening windows on the
+        // machine running the suite.
+        spawn(Arc::clone(&wm_core), &socket_path, "/bin/true".to_string())
+            .expect("server must spawn successfully");
         (socket_path, wm_core)
     }
 
@@ -404,7 +418,7 @@ mod tests {
         let socket_path = unique_socket_path();
         std::fs::write(&socket_path, b"stale, not a socket").unwrap();
         let wm_core = Arc::new(Mutex::new(WmCore::new()));
-        let result = spawn(wm_core, &socket_path);
+        let result = spawn(wm_core, &socket_path, "/bin/true".to_string());
         assert!(
             result.is_ok(),
             "a stale non-socket file must not block startup: {result:?}"

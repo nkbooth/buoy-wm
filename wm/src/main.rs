@@ -53,9 +53,11 @@ mod river {
     wayland_scanner::generate_client_code!("./protocol/river-layer-shell-v1.xml");
 }
 
+mod config;
 mod ipc;
 mod wm_core;
 
+use config::{Action, Config};
 use wm_core::ids::{OutputId, TagId, ViewId};
 use wm_core::state::{PINNED_TERM_APP_ID, WmCore, WmCoreError};
 use wm_core::view::DEFAULT_FLOATING_GEOMETRY;
@@ -70,39 +72,27 @@ fn log_wm_core_err(result: Result<(), WmCoreError>, context: &str) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Action {
-    None,
-    SpawnFoot,
-    SpawnLauncher,
-    ShowHotkeys,
-    Close,
-    FocusNext,
-    Move,
-    Resize,
-    Exit,
-    TagCycle,
-    OpenTagPicker,
-    TagSwitch,
+/// Translates a config modifier set into the protocol's bitfield.
+fn river_modifiers(mods: &[config::Modifier]) -> Modifiers {
+    mods.iter().fold(Modifiers::empty(), |acc, modifier| {
+        acc | match modifier {
+            config::Modifier::Super => Modifiers::Mod4,
+            config::Modifier::Ctrl => Modifiers::Ctrl,
+            config::Modifier::Alt => Modifiers::Mod1,
+            config::Modifier::Shift => Modifiers::Shift,
+        }
+    })
 }
 
-/// Human-readable cheat-sheet shown by `Action::ShowHotkeys` (`Mod4+?`).
-/// Hand-maintained alongside `init_new_seats`'s bindings below — there are
-/// few enough of these that a shared declarative table isn't worth the
-/// indirection (YAGNI); keep this list in sync when adding a binding.
-const HOTKEY_HELP: &[&str] = &[
-    "Mod4+Space       Spawn terminal (foot)",
-    "Mod4+R           App launcher (fuzzel)",
-    "Mod4+Q           Close focused window",
-    "Mod4+N           Cycle focus",
-    "Mod4+Tab         Cycle tag",
-    "Mod4+A           Tag manager (assign tags to focused window)",
-    "Mod4+S           Switch tag",
-    "Mod4+?           Show this hotkey list",
-    "Mod4+Esc         Exit session",
-    "Mod4+LeftClick   Move window",
-    "Mod4+RightClick  Resize window",
-];
+/// Translates a config pointer button into its Linux input event code.
+/// See `linux/input-event-codes.h`.
+fn input_event_code(button: config::Button) -> u32 {
+    match button {
+        config::Button::Left => 0x110,
+        config::Button::Right => 0x111,
+        config::Button::Middle => 0x112,
+    }
+}
 
 #[derive(Debug, Clone)]
 enum SeatOp {
@@ -158,6 +148,11 @@ struct WindowManager {
     /// a permanent negative — the event's arrival time relative to
     /// `river_output_v1::WlOutput` is not guaranteed (Technical notes).
     wl_output_names: HashMap<ObjectId, String>,
+    /// The user's `~/.config/buoy/config.toml`, or [`Config::default`]'s
+    /// built-in equivalent when there is no such file. Loaded once at
+    /// startup — re-reading it on change would mean tearing down and
+    /// recreating every live binding object, which no story needs yet.
+    config: Config,
 }
 
 #[derive(Debug)]
@@ -216,7 +211,10 @@ struct Seat {
     interacted: Option<RiverWindowV1>,
     xkb_bindings: HashMap<ObjectId, XkbBinding>,
     pointer_bindings: HashMap<ObjectId, PointerBinding>,
-    pending_action: Action,
+    /// The action a binding fired since the last `do_action`, if any.
+    /// `Option` rather than a `None` enum variant so a parameterized action
+    /// can be taken by value without cloning its payload.
+    pending_action: Option<Action>,
     op: SeatOp,
     op_dx: i32,
     op_dy: i32,
@@ -726,7 +724,9 @@ impl WindowManager {
     /// `wm_core`'s mutable borrow.
     fn ensure_pinned_terminal_spawned(&mut self, tag_id: TagId) {
         match ipc::lock_recovering(&self.wm_core).claim_pinned_terminal_spawn(tag_id) {
-            Ok(Some(session_name)) => spawn_pinned_terminal(&session_name),
+            Ok(Some(session_name)) => {
+                spawn_pinned_terminal(&session_name, &self.config.defaults.terminal)
+            }
             Ok(None) => {}
             Err(e) => {
                 eprintln!("Failed to check pinned-terminal spawn state for tag {tag_id:?}: {e:?}")
@@ -734,56 +734,40 @@ impl WindowManager {
         }
     }
 
+    /// Registers every binding the loaded config declares on each new seat.
+    ///
+    /// `Config::parse` has already rejected any key name that doesn't
+    /// resolve, so `keysym()` returning `None` here means the config was
+    /// bypassed entirely (only `Config::default` can do that, and its own
+    /// names are covered by a test). Skip-and-log rather than panic keeps
+    /// one bad binding from taking down the session (NFR2).
     fn init_new_seats(&mut self, river_xkb: &RiverXkbBindingsV1, qh: &QueueHandle<AppData>) {
-        // See xkbcommon/xkbcommon-keysyms.h
-        const SPACE: u32 = 0x20;
-        const N: u32 = 0x6e;
-        const Q: u32 = 0x71;
-        const ESC: u32 = 0xff1b;
-        const TAB: u32 = 0xff09;
-        // Story 2.2 gap #4: `Mod4+A` ("Assign") opens the tag-manager
-        // picker, following this file's existing single-letter-mnemonic
-        // convention.
-        const A: u32 = 0x61;
-        // Story 2.4: `Mod4+S` ("Switch") opens the same picker in
-        // switch mode, same single-letter-mnemonic convention as `A`.
-        const S: u32 = 0x73;
-        // `Mod4+R` ("Run") launches fuzzel's own desktop-entry launcher
-        // mode, same single-letter-mnemonic convention as `A`/`S`.
-        const R: u32 = 0x72;
-        // `Mod4+Shift+?` shows the hotkey cheat-sheet. Unlike the other
-        // bindings above, the keysym here is the *shifted* symbol the
-        // layout actually produces when Shift is held (xkbcommon has no
-        // separate unshifted `?` keysym) — `Modifiers` must include
-        // `shift` too, or this binding would never match the real
-        // Shift-held keysym the compositor reports.
-        const QUESTION: u32 = 0x3f;
-        // See linux/input-event-codes.h
-        const BTN_LEFT: u32 = 0x110;
-        const BTN_RIGHT: u32 = 0x111;
-        let mods = Modifiers::Mod4;
-
         for seat in self.seats.values_mut() {
-            if seat.new {
-                seat.create_xkb_binding(river_xkb, qh, mods, SPACE, Action::SpawnFoot);
-                seat.create_xkb_binding(river_xkb, qh, mods, Q, Action::Close);
-                seat.create_xkb_binding(river_xkb, qh, mods, N, Action::FocusNext);
-                seat.create_xkb_binding(river_xkb, qh, mods, ESC, Action::Exit);
-                seat.create_xkb_binding(river_xkb, qh, mods, TAB, Action::TagCycle);
-                seat.create_xkb_binding(river_xkb, qh, mods, A, Action::OpenTagPicker);
-                seat.create_xkb_binding(river_xkb, qh, mods, S, Action::TagSwitch);
-                seat.create_xkb_binding(river_xkb, qh, mods, R, Action::SpawnLauncher);
+            if !seat.new {
+                continue;
+            }
+            for keybind in &self.config.keybinds {
+                let Some(keysym) = keybind.keysym() else {
+                    eprintln!("Skipping keybind with unresolvable key `{}`", keybind.key);
+                    continue;
+                };
                 seat.create_xkb_binding(
                     river_xkb,
                     qh,
-                    mods.union(Modifiers::Shift),
-                    QUESTION,
-                    Action::ShowHotkeys,
+                    river_modifiers(&keybind.mods),
+                    keysym,
+                    keybind.action.clone(),
                 );
-                seat.create_pointer_binding(qh, mods, BTN_LEFT, Action::Move);
-                seat.create_pointer_binding(qh, mods, BTN_RIGHT, Action::Resize);
-                seat.new = false;
             }
+            for mousebind in &self.config.mousebinds {
+                seat.create_pointer_binding(
+                    qh,
+                    river_modifiers(&mousebind.mods),
+                    input_event_code(mousebind.button),
+                    mousebind.action.clone(),
+                );
+            }
+            seat.new = false;
         }
     }
 
@@ -987,6 +971,7 @@ impl WindowManager {
                 wm_core,
                 active_output_id,
                 active_output_name.as_deref(),
+                &self.config,
             ) {
                 pending_terminal_spawns.push(tag_id);
             }
@@ -1104,16 +1089,21 @@ fn tag_picker_path(wm_exe: &Path) -> PathBuf {
     }
 }
 
-/// Spawns the pinned terminal: `foot -a pinned-term zellij attach --create
-/// <session_name>`. Same `WAYLAND_DEBUG` removal and `Ok`/`Err` handling as
-/// `Seat::do_action`'s `Action::SpawnFoot` arm (consistency, not
+/// Spawns the pinned terminal: `<terminal> -a pinned-term zellij attach
+/// --create <session_name>`. Same `WAYLAND_DEBUG` removal and `Ok`/`Err`
+/// handling as `Seat::do_action`'s `Action::Terminal` arm (consistency, not
 /// reinvention). Arguments are passed individually to `Command`, not
 /// through a shell, so arbitrary tag names in `session_name` carry no
 /// shell-injection risk regardless of their contents.
+///
+/// `terminal` is configurable, but the `-a <app_id>` flag it is passed is
+/// not: `PINNED_TERM_APP_ID` is how every other part of this WM recognizes
+/// the pinned terminal, so a terminal that doesn't take `-a` can't fill the
+/// role at all.
 // Called from `ensure_pinned_terminal_spawned`, which gained its own
 // production call site in `manage_seats` in Story 1.7.
-fn spawn_pinned_terminal(session_name: &str) {
-    match std::process::Command::new("foot")
+fn spawn_pinned_terminal(session_name: &str, terminal: &str) {
+    match std::process::Command::new(terminal)
         .arg("-a")
         .arg(PINNED_TERM_APP_ID)
         .arg("zellij")
@@ -1124,7 +1114,7 @@ fn spawn_pinned_terminal(session_name: &str) {
         .spawn()
     {
         Ok(_) => {}
-        Err(e) => eprintln!("Failed to spawn pinned terminal: {e}"),
+        Err(e) => eprintln!("Failed to spawn pinned terminal `{terminal}`: {e}"),
     }
 }
 
@@ -1139,7 +1129,7 @@ impl Seat {
             interacted: None,
             xkb_bindings: HashMap::new(),
             pointer_bindings: HashMap::new(),
-            pending_action: Action::None,
+            pending_action: None,
             op: SeatOp::None,
             op_dx: 0,
             op_dy: 0,
@@ -1199,27 +1189,80 @@ impl Seat {
         // `active_output_id` being `None`: append no extra argument at all,
         // rather than a bogus/empty one (AC 2).
         active_output_name: Option<&str>,
+        config: &Config,
     ) -> Option<TagId> {
-        let pending_action = self.pending_action;
-        self.pending_action = Action::None;
+        let pending_action = self.pending_action.take()?;
         match pending_action {
-            Action::None => None,
             // Don't pass WAYLAND_DEBUG on to children, the added noise makes
             // debugging the window manager itself impractical.
-            Action::SpawnFoot => {
-                match std::process::Command::new("foot")
+            Action::Terminal => {
+                match std::process::Command::new(&config.defaults.terminal)
                     .env_remove("WAYLAND_DEBUG")
                     .spawn()
                 {
                     Ok(_) => {}
-                    Err(e) => eprintln!("Failed to spawn foot: {e}"),
+                    Err(e) => eprintln!(
+                        "Failed to spawn terminal `{}`: {e}",
+                        config.defaults.terminal
+                    ),
                 }
                 None
+            }
+            // Runs through `sh -c` so a bind can carry a whole command line —
+            // arguments, pipes, `~` expansion — instead of just a bare
+            // program name. The string comes from the user's own config
+            // file, so shell interpretation is the intent here, not an
+            // injection vector: anyone who can edit it can already run
+            // anything as this user.
+            Action::Exec(command_line) => {
+                match std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&command_line)
+                    .env_remove("WAYLAND_DEBUG")
+                    .spawn()
+                {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Failed to exec `{command_line}`: {e}"),
+                }
+                None
+            }
+            // Create-on-demand: a named-tag bind is meant to be pressed
+            // before the tag exists (`Super+1` = "email" on a fresh
+            // session), so a missing tag is created rather than treated as
+            // an error. An existing name is looked up first so repeated
+            // presses reuse that tag instead of piling up duplicates —
+            // ADR-006 has no tag-deletion operation, so a duplicate would
+            // be permanent.
+            Action::SwitchTag(name) => {
+                let Some(output_id) = active_output_id else {
+                    eprintln!("Tag keybind for `{name}` pressed but no output is registered yet");
+                    return None;
+                };
+                let tag_id = match wm_core.tag_id_by_name(&name) {
+                    Some(tag_id) => tag_id,
+                    None => match wm_core.create_tag(name.clone()) {
+                        Ok(tag_id) => tag_id,
+                        Err(e) => {
+                            eprintln!("Failed to create tag `{name}`: {e:?}");
+                            return None;
+                        }
+                    },
+                };
+                match wm_core.switch_tag(output_id, tag_id) {
+                    // Mirrors `Action::TagCycle`: the returned tag id is the
+                    // signal `manage_seats` uses to spawn this tag's pinned
+                    // terminal on first use.
+                    Ok(()) => Some(tag_id),
+                    Err(e) => {
+                        eprintln!("Failed to switch to tag `{name}`: {e:?}");
+                        None
+                    }
+                }
             }
             // `Mod4+R`: same fire-and-forget spawn shape as `SpawnFoot`
             // above. Bare `fuzzel` (no `--dmenu`) runs its own built-in
             // desktop-entry launcher, so no argument wiring is needed.
-            Action::SpawnLauncher => {
+            Action::Launcher => {
                 // "overlay" (not the default "top") renders above a
                 // fullscreen window too (fuzzel.ini(5)) - kept as
                 // defense-in-depth even though the pinned terminal no
@@ -1237,7 +1280,7 @@ impl Seat {
                 // keyboard focus and accept input, but paint to a screen
                 // nothing shows on. No flag at all when the name isn't yet
                 // known, same as every other `--output=` call site.
-                let mut command = std::process::Command::new("fuzzel");
+                let mut command = std::process::Command::new(&config.defaults.launcher);
                 command.arg("--layer=overlay");
                 if let Some(name) = active_output_name {
                     command.arg(format!("--output={name}"));
@@ -1248,7 +1291,7 @@ impl Seat {
                 }
                 None
             }
-            Action::ShowHotkeys => {
+            Action::Hotkeys => {
                 // `HOTKEY_HELP` is small and fixed (well under the ~64KiB
                 // default pipe buffer), so writing it synchronously here
                 // can't block waiting for fuzzel to drain its stdin —
@@ -1274,7 +1317,7 @@ impl Seat {
                     Ok(mut child) => {
                         if let Some(mut stdin) = child.stdin.take() {
                             use std::io::Write;
-                            if let Err(e) = writeln!(stdin, "{}", HOTKEY_HELP.join("\n")) {
+                            if let Err(e) = writeln!(stdin, "{}", config.hotkey_help().join("\n")) {
                                 eprintln!("Failed to write hotkey list to fuzzel's stdin: {e}");
                             }
                         }
@@ -1377,7 +1420,7 @@ impl Seat {
                 wm_proxy.exit_session();
                 None
             }
-            Action::TagCycle => match active_output_id {
+            Action::CycleTag => match active_output_id {
                 Some(output_id) => match wm_core.cycle_tag(output_id) {
                     Ok(Some(tag_id)) => Some(tag_id),
                     Ok(None) => None,
@@ -1407,7 +1450,7 @@ impl Seat {
             // panicking (NFR2). Once resolved, the spawn/error-handling
             // shape is otherwise byte-for-byte the same as
             // `Action::SpawnFoot`'s above.
-            Action::OpenTagPicker => {
+            Action::TagPicker => {
                 match std::env::current_exe() {
                     Ok(wm_exe) => {
                         let mut command = std::process::Command::new(tag_picker_path(&wm_exe));
@@ -1784,7 +1827,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
                 // here (a fresh registry, a just-registered output), but
                 // log-and-continue rather than panic either way (NFR2).
                 let bootstrapped_tag_id = if wm_core_guard.tag_count() == 0 {
-                    match wm_core_guard.create_tag("default") {
+                    match wm_core_guard.create_tag(state.wm.config.defaults.default_tag.clone()) {
                         Ok(tag_id) => {
                             if let Err(e) = wm_core_guard.switch_tag(output_id, tag_id) {
                                 eprintln!(
@@ -1999,7 +2042,7 @@ impl Dispatch<RiverXkbBindingV1, ObjectId> for AppData {
             .get(&proxy.id())
             .expect("xkb_binding not found");
         match event {
-            Event::Pressed => seat.pending_action = binding.action,
+            Event::Pressed => seat.pending_action = Some(binding.action.clone()),
             Event::Released => {}
             Event::StopRepeat => {}
         }
@@ -2022,7 +2065,7 @@ impl Dispatch<RiverPointerBindingV1, ObjectId> for AppData {
             .get(&proxy.id())
             .expect("xkb_binding not found");
         match event {
-            Event::Pressed => seat.pending_action = binding.action,
+            Event::Pressed => seat.pending_action = Some(binding.action.clone()),
             Event::Released => {}
         }
     }
@@ -2045,6 +2088,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initial state
     let mut app_data = AppData::default();
 
+    // A broken config file is reported and then ignored in favour of the
+    // built-in defaults, rather than aborting startup: this WM is the only
+    // thing that can put a screen in front of the user to fix the typo
+    // with, so refusing to start over a bad keybind would lock them out of
+    // their own session. Loaded before the first roundtrip binds any seat,
+    // since `init_new_seats` registers whatever this produces.
+    app_data.wm.config = match Config::load() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!(
+                "Failed to load {}: {e}\nFalling back to built-in defaults.",
+                config::config_path().display()
+            );
+            Config::default()
+        }
+    };
+
     // Roundtrip to process the get_registry event and bind interfaces.
     event_queue.roundtrip(&mut app_data)?;
     if app_data.river_wm.is_none() {
@@ -2065,7 +2125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // otherwise reserves for unrecoverable Wayland-protocol-level
     // failures only.
     let socket_path = ipc::server::default_socket_path();
-    if let Err(e) = ipc::server::spawn(Arc::clone(&app_data.wm.wm_core), &socket_path) {
+    if let Err(e) = ipc::server::spawn(
+        Arc::clone(&app_data.wm.wm_core),
+        &socket_path,
+        app_data.wm.config.defaults.terminal.clone(),
+    ) {
         eprintln!("Failed to start IPC server on {socket_path:?}: {e}");
     }
 

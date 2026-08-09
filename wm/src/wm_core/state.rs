@@ -565,6 +565,17 @@ impl WmCore {
         Some(target)
     }
 
+    /// Returns the id of the tag named `name`, if one exists. Matching is
+    /// exact: a named-tag keybind that matched loosely could switch to a
+    /// near-miss tag and then never be able to create the one actually
+    /// asked for. A pure query; never mutates `self`.
+    pub fn tag_id_by_name(&self, name: &str) -> Option<TagId> {
+        self.tags
+            .ids()
+            .into_iter()
+            .find(|id| self.tags.get(*id).is_some_and(|tag| tag.name == name))
+    }
+
     /// Returns the topmost currently-visible view — the view keyboard focus
     /// should fall to when whatever held it stops being visible, which is
     /// what a tag switch does to every window on the outgoing tag. Scans
@@ -1617,6 +1628,35 @@ mod tests {
         core.toggle_view_tag(hidden, hidden_tag).unwrap();
 
         assert_eq!(core.cycle_focus(), None);
+    }
+
+    #[test]
+    fn tag_id_by_name_finds_an_existing_tag() {
+        let mut core = WmCore::new();
+        let web = core.create_tag("web").unwrap();
+        core.create_tag("term").unwrap();
+
+        assert_eq!(core.tag_id_by_name("web"), Some(web));
+    }
+
+    #[test]
+    fn tag_id_by_name_returns_none_for_an_unknown_name() {
+        let mut core = WmCore::new();
+        core.create_tag("web").unwrap();
+
+        assert_eq!(core.tag_id_by_name("nope"), None);
+        assert_eq!(core.tag_id_by_name(""), None);
+    }
+
+    /// Tag names are matched exactly — a named-tag keybind must not switch
+    /// to a differently-cased tag and then be unable to create the one the
+    /// user actually asked for.
+    #[test]
+    fn tag_id_by_name_is_case_sensitive() {
+        let mut core = WmCore::new();
+        core.create_tag("web").unwrap();
+
+        assert_eq!(core.tag_id_by_name("Web"), None);
     }
 
     #[test]
