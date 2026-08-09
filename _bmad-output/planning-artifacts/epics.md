@@ -28,6 +28,10 @@ FR10: A per-output status bar element always shows the currently selected tag fo
 FR11: The WM exposes a Unix domain socket IPC server connecting the WM process to the tag-picker and status-bar companion client processes.
 FR12: The WM provides keybind routing for baseline window operations — spawn terminal, close focused window (never routable to the pinned terminal), cycle keyboard focus between windows, exit the session — adapted from the `tinyrwm` skeleton's keybind set.
 FR13: The WM provides raw-keybind-driven tag switching (cycle/select among existing tags) and tag creation, sufficient to validate multi-tag behavior end-to-end before the fuzzel-based picker (FR6–FR9) exists. The underlying `wm-core` tag-switch/create logic this exercises is reused directly by the picker's IPC handlers in Epic 2 — this is not throwaway code.
+FR14: The WM reads an optional user configuration file at `$XDG_CONFIG_HOME/buoy/config.toml` (falling back to `~/.config/buoy/config.toml`). Absence of the file is not an error — the built-in defaults reproduce the previously-hardcoded behavior exactly. A file that exists but cannot be parsed is reported and the defaults are used, rather than aborting session startup.
+FR15: Every keybind and mousebind is declared by that configuration file — modifier set, key name (an X11 keysym name) or pointer button, and action — replacing the compile-time binding table. Declaring any binding replaces the built-in set for that binding kind, so a default can be rebound *or removed*. The hotkey cheat-sheet is generated from the bindings actually in effect.
+FR16: Configuration-declared bindings support, in addition to the built-in window/tag operations: switching the active output to a tag *by name*, creating that tag on demand if it does not exist; and executing an arbitrary command line, so applications and scripts can be launched from a hotkey.
+FR17: The program names the WM spawns — the terminal (used both for new windows and for each tag's pinned terminal), the launcher, and the name of the tag bootstrapped at login — are configuration values rather than compile-time constants.
 
 ### NonFunctional Requirements
 
@@ -67,6 +71,10 @@ A running river WM (built from the `tinyrwm` Rust skeleton) that tracks full tag
 Two companion clients: a fuzzel-driven tag-manager picker (hotkey → checkboxes to toggle existing tags, text-input row to create new ones, second hotkey reused for tag-switching) and an always-visible per-output status bar showing the active tag — both driven over a new WM IPC socket. This turns Epic 1's keybind-only WM into the full multi-tag daily driver.
 **FRs covered:** FR6, FR7, FR8, FR9, FR10, FR11
 
+### Epic 3: User Configuration — data-driven keybinds and defaults
+An optional `~/.config/buoy/config.toml` that owns every keybind, mousebind and spawned program name, replacing the compile-time binding table in `init_new_seats`. Adds the two actions that motivated it — switching to a tag *by name* (created on demand, so a bind works on a fresh session) and running an arbitrary command line — and generates the hotkey cheat-sheet from the live bindings so it cannot drift. Config-file-defined behavior was explicitly out of scope for v1 (`scope.md`), so this epic is new ground opened after the project retrospective, driven by real daily-driver use.
+**FRs covered:** FR14, FR15, FR16, FR17
+
 ### FR Coverage Map
 
 FR1: Epic 1 - In-memory tag/view/output state model
@@ -82,6 +90,10 @@ FR10: Epic 2 - Per-output status bar
 FR11: Epic 2 - IPC server for picker/bar clients
 FR12: Epic 1 - Baseline keybind routing (spawn/close/focus-cycle/exit)
 FR13: Epic 1 - Raw-keybind tag switching and creation
+FR14: Epic 3 - TOML config file, loaded at startup, defaults on absence or error
+FR15: Epic 3 - Data-driven keybind/mousebind registration and generated hotkey help
+FR16: Epic 3 - Named-tag (create-on-demand) and exec keybind actions
+FR17: Epic 3 - Configurable terminal, launcher and login tag name
 
 ## Epic 1: Core WM Skeleton — tag-aware placement, keybind-driven
 
@@ -282,3 +294,101 @@ So that I always know which tag is active where, especially in multi-monitor ses
 **And** this holds independently for each connected output
 **Given** the IPC connection to the WM drops
 **Then** the bar does not crash and indicates a disconnected/stale state rather than showing stale data silently
+
+## Epic 3: User Configuration — data-driven keybinds and defaults
+
+An optional `~/.config/buoy/config.toml` that owns every keybind, mousebind and spawned program name, replacing the compile-time binding table in `init_new_seats`. Adds the two actions that motivated it — switching to a tag *by name* (created on demand, so a bind works on a fresh session) and running an arbitrary command line — and generates the hotkey cheat-sheet from the live bindings so it cannot drift.
+
+This epic was opened after the project retrospective declared Epics 1–2 complete. `docs/planning/prd/scope.md` lists "session presets (config-file-defined tag/layout bundles, hotkey-invoked)" as explicitly out of scope for v1; daily-driver use established that the narrower need — rebinding keys and naming programs without recompiling — was worth doing ahead of that.
+
+### Story 3.1: Config File Foundation — TOML Schema and Loader
+
+As a user,
+I want buoy-wm to read a TOML configuration file,
+So that I can change its behavior without editing Rust source and rebuilding.
+
+**Acceptance Criteria:**
+
+**Given** no config file exists
+**When** the WM starts
+**Then** the built-in defaults apply and behavior is byte-for-byte what it was before configuration existed
+**Given** a config file with only some `[defaults]` keys set
+**When** it is parsed
+**Then** the named keys override and every unnamed key keeps its built-in value
+**Given** a config file declaring any `[[keybind]]`
+**When** it is parsed
+**Then** the built-in keybind set is replaced outright, not merged — so a default can be removed, not merely rebound
+**Given** a config file with an unknown modifier, unknown action, unresolvable key name, or malformed TOML
+**When** it is parsed
+**Then** parsing fails with an error naming the offending value, rather than silently dropping that binding
+
+### Story 3.2: Keysym Name Resolution Without libxkbcommon
+
+As a user,
+I want to write `key = "Return"` rather than a hex keysym,
+So that the config file is readable and writable by hand.
+
+**Acceptance Criteria:**
+
+**Given** a single ASCII printable character
+**Then** it resolves to its own codepoint as a keysym, case-sensitively (`a` and `A` differ)
+**Given** a function-key name `F1`–`F35`
+**Then** it resolves by computation from the contiguous keysym block; `F0` and `F36` and beyond are rejected
+**Given** a named special key (`Return`, `Space`, `Tab`, `Escape`, arrows, `Page_Up`, …)
+**Then** it resolves case-insensitively, since X11 spells these lowercase but config authors reasonably capitalize them
+**Given** an unrecognized or non-ASCII name
+**Then** it is rejected at load, never registered as a binding that would silently never fire
+
+### Story 3.3: Data-Driven Keybind Registration and Generated Hotkey Help
+
+As a user,
+I want the WM to register exactly the bindings my config declares,
+So that the config file is the single source of truth for the keymap.
+
+**Acceptance Criteria:**
+
+**Given** a loaded config
+**When** a seat is initialized
+**Then** every declared keybind and mousebind is registered against that seat, with modifiers translated to the protocol's bitfield and buttons to Linux input event codes
+**Given** a binding whose key cannot be resolved
+**Then** that one binding is skipped and logged, without taking down the session (NFR2)
+**Given** the hotkey cheat-sheet is opened
+**Then** it lists every binding actually in effect — including user-added ones — with parameterized payloads and the configured program names shown, generated from the bindings rather than hand-maintained
+
+### Story 3.4: Named-Tag and Exec Keybind Actions
+
+As a user,
+I want hotkeys that jump to a named tag and hotkeys that run commands,
+So that `Super+1` reaches "email" and `Super+P` takes a screenshot.
+
+**Acceptance Criteria:**
+
+**Given** a `{ switch_tag = "<name>" }` binding and no tag by that name
+**When** it is pressed
+**Then** the tag is created, the active output switches to it, and its pinned terminal is spawned on first use
+**Given** the same binding pressed again
+**Then** the existing tag is reused — no duplicate is created (ADR-006 provides no tag deletion, so a duplicate would be permanent)
+**Given** no output is registered yet
+**When** a named-tag binding is pressed
+**Then** it logs and does nothing, rather than fabricating an output id
+**Given** an `{ exec = "<command line>" }` binding
+**When** it is pressed
+**Then** the command line runs with shell semantics, so arguments, pipes and `~` expansion work
+
+### Story 3.5: Configurable Program Defaults and Startup Config Loading
+
+As a user,
+I want to name the terminal and launcher buoy-wm spawns,
+So that I am not bound to `foot` and `fuzzel` by a compile-time constant.
+
+**Acceptance Criteria:**
+
+**Given** a configured `terminal`
+**Then** it is used both for newly spawned windows and for every tag's pinned terminal, including the IPC/picker-driven spawn path
+**Given** a configured `launcher`
+**Then** it is used for the launcher hotkey
+**Given** a configured `default_tag`
+**Then** the tag bootstrapped at login carries that name
+**Given** a config file that exists but fails to load or parse
+**When** the WM starts
+**Then** the failure is reported on stderr naming the path, and the session starts with built-in defaults — never aborting startup, since this WM is the only thing that can put a screen in front of the user to fix the file with
