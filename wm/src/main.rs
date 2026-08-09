@@ -10,6 +10,7 @@ use wayland_backend::client::ObjectId;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, protocol::wl_registry};
 
 use crate::river::{
+    river_layer_shell_v1::RiverLayerShellV1,
     river_node_v1::RiverNodeV1,
     river_output_v1::RiverOutputV1,
     river_pointer_binding_v1::RiverPointerBindingV1,
@@ -34,12 +35,19 @@ mod river {
             use super::rwm::*;
             wayland_scanner::generate_interfaces!("./protocol/river-xkb-bindings-v1.xml");
         }
+
+        pub(super) mod rlayer {
+            use super::rwm::*;
+            wayland_scanner::generate_interfaces!("./protocol/river-layer-shell-v1.xml");
+        }
     }
 
+    use self::interfaces::rlayer::*;
     use self::interfaces::rwm::*;
     use self::interfaces::rxkb::*;
     wayland_scanner::generate_client_code!("./protocol/river-window-management-v1.xml");
     wayland_scanner::generate_client_code!("./protocol/river-xkb-bindings-v1.xml");
+    wayland_scanner::generate_client_code!("./protocol/river-layer-shell-v1.xml");
 }
 
 mod ipc;
@@ -96,6 +104,12 @@ enum SeatOp {
 struct AppData {
     river_wm: Option<RiverWindowManagerV1>,
     river_xkb: Option<RiverXkbBindingsV1>,
+    /// Story 2.6: optional, unlike `river_xkb` - binding this global is what
+    /// tells `river` to allow layer-shell clients (eg waybar's status bar)
+    /// to map surfaces at all, instead of closing them immediately. Absence
+    /// is not fatal; it just means layer-shell surfaces can't map, same as
+    /// `buoy-wm`'s behavior before this story.
+    river_layer_shell: Option<RiverLayerShellV1>,
     wm: WindowManager,
 }
 
@@ -963,6 +977,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
         {
             const RIVER_WINDOW_MANAGER_V1_VERSION: u32 = 4;
             const RIVER_XKB_BINDINGS_V1_VERSION: u32 = 1;
+            const RIVER_LAYER_SHELL_V1_VERSION: u32 = 1;
             match interface.as_str() {
                 "river_window_manager_v1" => {
                     if version < RIVER_WINDOW_MANAGER_V1_VERSION {
@@ -993,6 +1008,25 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                         (),
                     );
                     state.river_xkb = Some(xkb);
+                }
+                "river_layer_shell_v1" => {
+                    // Optional (Story 2.6): unlike the two globals above, a
+                    // version mismatch here is not fatal - just skip binding
+                    // and fall back to `buoy-wm`'s pre-Story-2.6 behavior
+                    // (layer-shell surfaces can't map).
+                    if version < RIVER_LAYER_SHELL_V1_VERSION {
+                        eprintln!(
+                            "Server supports river_layer_shell_v1 v{version}, but we need at least v{RIVER_LAYER_SHELL_V1_VERSION} - layer-shell surfaces (eg a waybar status bar) will not be able to map"
+                        );
+                        return;
+                    }
+                    let layer_shell = registry.bind::<RiverLayerShellV1, _, _>(
+                        name,
+                        RIVER_LAYER_SHELL_V1_VERSION,
+                        qh,
+                        (),
+                    );
+                    state.river_layer_shell = Some(layer_shell);
                 }
                 _ => {}
             }
@@ -1194,6 +1228,10 @@ impl Dispatch<RiverPointerBindingV1, ObjectId> for AppData {
 
 wayland_client::delegate_noop!(AppData: ignore RiverXkbBindingsV1);
 wayland_client::delegate_noop!(AppData: ignore RiverNodeV1);
+// Story 2.6: the global itself has no events (get_output/get_seat, whose
+// child objects DO have events, are out of this story's scope - see
+// story-2-6.md's Technical notes).
+wayland_client::delegate_noop!(AppData: ignore RiverLayerShellV1);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Queue up a get_registry event.
