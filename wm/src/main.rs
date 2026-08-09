@@ -255,12 +255,12 @@ impl WindowManager {
         self.init_new_seats(river_xkb, qh);
         self.manage_windows();
         self.manage_seats(proxy);
-        // Story 2.7 Task 5.2: re-resolve fullscreen assignment for every
-        // pinned terminal after `manage_seats` may have switched a tag onto
-        // a different output (or off every output) via a raw keybind -
-        // still within this same manage sequence, satisfying
-        // `river_window_v1.fullscreen`'s manage-sequence-only constraint.
-        self.recompute_pinned_terminal_fullscreen();
+        // Re-resolve size/position for every pinned terminal after
+        // `manage_seats` may have switched a tag onto a different output
+        // (or off every output) via a raw keybind - still within this same
+        // manage sequence, satisfying `propose_dimensions`'
+        // manage-sequence-only constraint.
+        self.recompute_pinned_terminal_geometry();
         proxy.manage_finish();
     }
 
@@ -508,24 +508,38 @@ impl WindowManager {
                             wm_core.toggle_view_tag(view_id, tag_id),
                             "Failed to tag newly-mapped pinned terminal",
                         );
-                        // Story 2.7 Task 5.1: fullscreen is window
-                        // management state and may only be requested as
-                        // part of a manage sequence (per the protocol's
-                        // own `river_window_v1.fullscreen` description) -
-                        // `init_new_windows` runs inside
-                        // `handle_manage_start`, so this is the correct
-                        // place for it. If the tag isn't currently shown
-                        // on any output, do nothing here: Task 3's
-                        // render-sequence visibility pass
+                        // Code review follow-up: no longer uses
+                        // `river_window_v1.fullscreen()` (Story 2.7's
+                        // original mechanism) - live testing found that a
+                        // truly fullscreen window moves into river's own
+                        // `fullscreen_tree` scene layer, which sits ABOVE
+                        // the ordinary `wm_tree` layer every other window
+                        // lives in (confirmed via river's own architecture
+                        // docs). `place_top()`/`place_bottom()` only
+                        // reorder nodes *within* a layer, so no amount of
+                        // WM-side stacking control can make an ordinary
+                        // window (Zen, Chromium, anything) render above a
+                        // truly-fullscreen one - they render behind it,
+                        // always, regardless of `place_top()`. Sizing the
+                        // pinned terminal manually instead
+                        // (`set_position`/`propose_dimensions`, to exactly
+                        // fill the output) keeps it an ordinary `wm_tree`
+                        // window, so `place_bottom()` (already called
+                        // above) and every other window's `place_top()`
+                        // behave exactly as documented. If the tag isn't
+                        // currently shown on any output, do nothing here:
+                        // Task 3's render-sequence visibility pass
                         // (`recompute_window_visibility`) will hide it via
                         // the same `is_view_visible` decision every other
                         // view uses, rather than this call site
                         // special-casing a hide.
                         if let Some(output_id) = wm_core.output_showing_tag(tag_id)
-                            && let Some(output_proxy) =
-                                output_proxy_for_id(&self.outputs, output_id)
+                            && let Some(output) = output_for_id(&self.outputs, output_id)
                         {
-                            window.proxy.fullscreen(output_proxy);
+                            window.set_position(output.position.0, output.position.1);
+                            window
+                                .proxy
+                                .propose_dimensions(output.dimensions.0, output.dimensions.1);
                         }
                     }
                     None => {
@@ -583,25 +597,34 @@ impl WindowManager {
         }
     }
 
-    /// Story 2.7 Task 5.2: re-resolves and re-applies fullscreen/exit-
-    /// fullscreen for every mapped pinned terminal, one per tag it's been
-    /// associated with (Task 2). Called unconditionally at the end of every
-    /// `handle_manage_start`, the same "simplest-correct first cut, recompute
-    /// broadly rather than track precisely which tag-state change to react
-    /// to" strategy `recompute_window_visibility` uses for hide/show (Task
-    /// 3) - the two recomputations can't be the same function because the
-    /// protocol restricts `fullscreen`/`exit_fullscreen` to a manage
-    /// sequence (this method's caller) while `show`/`hide` are restricted to
-    /// a render sequence (`recompute_window_visibility`'s caller). This
-    /// covers `switch_tag`/`cycle_tag` reassigning a tag to a different
-    /// output (or off every output) regardless of whether that happened via
-    /// the raw keybind (`manage_seats`, same manage sequence as this call)
-    /// or asynchronously via the IPC-driven picker (picked up the next time
-    /// any manage sequence runs - see `WmCore::pending_pinned_terminal_tags`'s
-    /// doc comment for why that's the shared, cross-thread-correct queue).
-    fn recompute_pinned_terminal_fullscreen(&mut self) {
+    /// Re-resolves and re-applies the pinned terminal's size/position, one
+    /// per tag it's been associated with (Story 2.7 Task 2). Called
+    /// unconditionally at the end of every `handle_manage_start`, the same
+    /// "simplest-correct first cut, recompute broadly rather than track
+    /// precisely which tag-state change to react to" strategy
+    /// `recompute_window_visibility` uses for hide/show (Story 2.7 Task 3).
+    /// This covers `switch_tag`/`cycle_tag` reassigning a tag to a
+    /// different output (or off every output) regardless of whether that
+    /// happened via the raw keybind (`manage_seats`, same manage sequence
+    /// as this call) or asynchronously via the IPC-driven picker (picked up
+    /// the next time any manage sequence runs - see
+    /// `WmCore::pending_pinned_terminal_tags`'s doc comment for why that's
+    /// the shared, cross-thread-correct queue).
+    ///
+    /// Code review follow-up: no longer uses `river_window_v1.fullscreen()`
+    /// (Story 2.7's original mechanism, renamed from
+    /// `recompute_pinned_terminal_fullscreen`) - see `init_new_windows`'s
+    /// pinned-terminal branch for the full explanation of why a truly
+    /// fullscreen window can never render below an ordinary one regardless
+    /// of `place_top()` (river's own scene graph puts fullscreen windows in
+    /// a separate, higher layer). `set_position`/`propose_dimensions` sized
+    /// to exactly fill the output achieve the same visual result (the
+    /// terminal fills the screen) while keeping it an ordinary `wm_tree`
+    /// window other windows correctly render above via their own
+    /// `place_top()`.
+    fn recompute_pinned_terminal_geometry(&mut self) {
         let wm_core = ipc::lock_recovering(&self.wm_core);
-        for window in self.windows.iter() {
+        for window in self.windows.iter_mut() {
             if window.app_id != PINNED_TERM_APP_ID {
                 continue;
             }
@@ -617,19 +640,20 @@ impl WindowManager {
                     None
                 }
             };
-            match tag_id.and_then(|tag_id| wm_core.output_showing_tag(tag_id)) {
-                Some(output_id) => {
-                    if let Some(output_proxy) = output_proxy_for_id(&self.outputs, output_id) {
-                        window.proxy.fullscreen(output_proxy);
-                    }
-                }
-                // Not in scope (see this story's Technical notes): the
-                // brief non-fullscreen frame this may cause immediately
-                // before Task 3's next render sequence hides the window is
-                // accepted, not tuned away - correctness (it ends up
-                // hidden, not stuck fullscreen-but-invisible) matters more
-                // here than frame-perfection.
-                None => window.proxy.exit_fullscreen(),
+            // If the tag isn't currently shown on any output, do nothing:
+            // `recompute_window_visibility`'s next render sequence hides
+            // the window via the same `is_view_visible` decision every
+            // other view uses, rather than this call site special-casing
+            // it - leaving the last-known position/dimensions in place is
+            // harmless since the window is hidden regardless.
+            if let Some(output) = tag_id
+                .and_then(|tag_id| wm_core.output_showing_tag(tag_id))
+                .and_then(|output_id| output_for_id(&self.outputs, output_id))
+            {
+                window.set_position(output.position.0, output.position.1);
+                window
+                    .proxy
+                    .propose_dimensions(output.dimensions.0, output.dimensions.1);
             }
         }
     }
@@ -803,7 +827,7 @@ impl WindowManager {
 
     /// Story 2.9 Task 2: resolves a `wm-core` [`OutputId`] to its real
     /// Wayland connector name (e.g. `"eDP-1"`), for `fuzzel --output=` (Task
-    /// 5). Same linear-scan-by-`output_id` shape `output_proxy_for_id`
+    /// 5). Same linear-scan-by-`output_id` shape `output_for_id`
     /// already uses (`outputs` is keyed by `ObjectId`, not `OutputId`).
     /// Returns `None` at any missing step — no matching `Output`, no
     /// correlated `wl_output` object yet (or ever), or that `wl_output`'s
@@ -975,24 +999,26 @@ impl Output {
     }
 }
 
-/// Resolves the real `river_output_v1` proxy for a `wm-core` [`OutputId`],
-/// by scanning `outputs`' values for a matching `Output::output_id` (the
-/// map's own keys are `ObjectId`s, not `OutputId`s - `wm-core` never sees
-/// Wayland object ids). A free function rather than a `WindowManager`
-/// method (Story 2.7 Tasks 2/5): it borrows only the `outputs` field
-/// directly, so callers already holding a disjoint mutable borrow of
-/// `self.windows` (`init_new_windows`,
-/// `recompute_pinned_terminal_fullscreen`) can call it without the whole-
-/// `self` re-borrow a method call would require (same reasoning as
-/// `active_output_id` needing to be computed before such a loop begins).
-fn output_proxy_for_id(
-    outputs: &HashMap<ObjectId, Output>,
-    output_id: OutputId,
-) -> Option<&RiverOutputV1> {
+/// Resolves the real `Output` record for a `wm-core` [`OutputId`], by
+/// scanning `outputs`' values for a matching `Output::output_id` (the map's
+/// own keys are `ObjectId`s, not `OutputId`s - `wm-core` never sees Wayland
+/// object ids). A free function rather than a `WindowManager` method
+/// (Story 2.7 Tasks 2/5): it borrows only the `outputs` field directly, so
+/// callers already holding a disjoint mutable borrow of `self.windows`
+/// (`init_new_windows`, `recompute_pinned_terminal_geometry`) can call it
+/// without the whole-`self` re-borrow a method call would require (same
+/// reasoning as `active_output_id` needing to be computed before such a
+/// loop begins).
+///
+/// Code review follow-up: renamed from `output_proxy_for_id` (which
+/// returned only the `RiverOutputV1` proxy) - callers need the output's
+/// real `position`/`dimensions` too now that the pinned terminal is sized
+/// to fill its output manually rather than via `river_window_v1.fullscreen`
+/// (see `recompute_pinned_terminal_geometry`'s doc comment for why).
+fn output_for_id(outputs: &HashMap<ObjectId, Output>, output_id: OutputId) -> Option<&Output> {
     outputs
         .values()
         .find(|output| output.output_id == output_id)
-        .map(|output| &output.proxy)
 }
 
 /// Code review follow-up (Story 2.2, finding #1): resolves the `tag-picker`
@@ -1127,17 +1153,29 @@ impl Seat {
             // above. Bare `fuzzel` (no `--dmenu`) runs its own built-in
             // desktop-entry launcher, so no argument wiring is needed.
             Action::SpawnLauncher => {
-                // The pinned terminal is fullscreened on whatever tag is
-                // active (Story 2.7). fuzzel's own default layer, "top",
-                // explicitly renders below fullscreen windows
-                // (fuzzel.ini(5)) - only "overlay" renders above them too,
-                // so without this the launcher opens invisibly behind the
-                // fullscreen terminal every time.
-                match std::process::Command::new("fuzzel")
-                    .arg("--layer=overlay")
-                    .env_remove("WAYLAND_DEBUG")
-                    .spawn()
-                {
+                // "overlay" (not the default "top") renders above a
+                // fullscreen window too (fuzzel.ini(5)) - kept as
+                // defense-in-depth even though the pinned terminal no
+                // longer uses real protocol fullscreen (see
+                // `recompute_pinned_terminal_geometry`'s doc comment).
+                //
+                // Code review follow-up: also pass `--output=<name>`, the
+                // same real connector name `Action::OpenTagPicker`/
+                // `TagSwitch` already pass to `tag-picker` (Story 2.9) -
+                // this arm spawns `fuzzel` directly, bypassing `tag-picker`
+                // entirely, so it never got that fix. Without it, `fuzzel`
+                // fell back to "let the compositor choose", which could
+                // pick a disabled/off output when docked (kanshi disables
+                // the laptop panel) - the launcher would map with real
+                // keyboard focus and accept input, but paint to a screen
+                // nothing shows on. No flag at all when the name isn't yet
+                // known, same as every other `--output=` call site.
+                let mut command = std::process::Command::new("fuzzel");
+                command.arg("--layer=overlay");
+                if let Some(name) = active_output_name {
+                    command.arg(format!("--output={name}"));
+                }
+                match command.env_remove("WAYLAND_DEBUG").spawn() {
                     Ok(_) => {}
                     Err(e) => eprintln!("Failed to spawn fuzzel launcher: {e}"),
                 }
@@ -1150,14 +1188,18 @@ impl Seat {
                 // unlike `tag-picker`'s own `run_fuzzel`, whose checklist
                 // input can grow arbitrarily large and needs a writer
                 // thread for that reason.
-                // See `Action::SpawnLauncher`'s comment above: without
-                // `--layer=overlay`, fuzzel's default "top" layer renders
-                // below the always-fullscreen pinned terminal.
-                match std::process::Command::new("fuzzel")
+                // See `Action::SpawnLauncher`'s comments above: `--layer=
+                // overlay` and `--output=<name>` for the same reasons.
+                let mut command = std::process::Command::new("fuzzel");
+                command
                     .arg("--dmenu")
                     .arg("--layer=overlay")
                     .arg("--prompt")
-                    .arg("Hotkeys: ")
+                    .arg("Hotkeys: ");
+                if let Some(name) = active_output_name {
+                    command.arg(format!("--output={name}"));
+                }
+                match command
                     .stdin(std::process::Stdio::piped())
                     .env_remove("WAYLAND_DEBUG")
                     .spawn()
