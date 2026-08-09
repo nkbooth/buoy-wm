@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use super::ids::{OutputId, TagId, ViewId};
 use super::output::Output;
 use super::tag::{TagRegistry, TagRegistryError};
+use super::tag_set::TagSet;
 use super::view::{Geometry, View};
 
 /// The `app_id` reserved for the lazily-spawned pinned terminal (Story
@@ -104,6 +105,23 @@ pub struct WmCore {
     /// vendored `main.rs` `WindowManager.windows: VecDeque<Window>`
     /// convention).
     stacking_order: VecDeque<ViewId>,
+    /// Story 2.7 Task 2: FIFO queue of tag ids for pinned-terminal
+    /// processes that [`WmCore::claim_pinned_terminal_spawn`] has just
+    /// claimed (and thus caused to actually be spawned) but whose window
+    /// has not yet mapped and been correlated back to that tag. Lives
+    /// here rather than in `main.rs`'s `WindowManager` because
+    /// `claim_pinned_terminal_spawn` has two real production call sites on
+    /// two different threads that share only this `WmCore` behind its
+    /// `Arc<Mutex<_>>`: the Wayland-dispatch main thread's keybind path
+    /// (`ensure_pinned_terminal_spawned`) and the IPC server's per-
+    /// connection thread's switch-tag path
+    /// (`ipc::dispatch::handle_request`'s `SwitchTag` arm). A
+    /// `WindowManager`-local queue would silently miss every
+    /// picker-driven switch-mode spawn, since that path never touches
+    /// `WindowManager` at all. `main.rs`'s `init_new_windows` pops FIFO
+    /// via [`WmCore::pop_pending_pinned_terminal_tag`] the next time a
+    /// pinned-terminal window maps.
+    pending_pinned_terminal_tags: VecDeque<TagId>,
 }
 
 impl WmCore {
@@ -381,18 +399,23 @@ impl WmCore {
 
     /// The single atomic "check + claim" decision for the pinned
     /// terminal's lazy-spawn-once invariant: if `tag_id`'s terminal has
-    /// not yet been spawned, marks it spawned and returns
+    /// not yet been spawned, marks it spawned, pushes `tag_id` onto the
+    /// internal [`WmCore::pending_pinned_terminal_tags`] queue (Story 2.7
+    /// Task 2 - see that field's doc comment for why the push lives here
+    /// rather than at each call site), and returns
     /// `Ok(Some("tag-<name>"))` — the zellij session name the caller
     /// should spawn `foot -a pinned-term zellij attach --create` with. On
     /// every subsequent call for the same tag, returns `Ok(None)` without
-    /// side effects. Deliberately bundled into one method (mirroring
-    /// `cycle_focus`'s precedent of composing several `wm-core`-internal
-    /// steps into one atomic call) rather than exposing separate
-    /// `tag_terminal_spawned`/`tag_name` queries, so no caller can
-    /// accidentally check without claiming or claim twice. Fails with
+    /// side effects (including no queue push). Deliberately bundled into
+    /// one method (mirroring `cycle_focus`'s precedent of composing
+    /// several `wm-core`-internal steps into one atomic call) rather than
+    /// exposing separate `tag_terminal_spawned`/`tag_name` queries, so no
+    /// caller can accidentally check without claiming, claim twice, or
+    /// claim without also queueing the correlation entry. Fails with
     /// [`WmCoreError::UnknownTag`] for an unregistered id.
     // Wired into `main.rs`'s tag-cycle/tag-create keybind path since Story
-    // 1.7, via `ensure_pinned_terminal_spawned`.
+    // 1.7, via `ensure_pinned_terminal_spawned`; and into
+    // `ipc::dispatch::handle_request`'s `SwitchTag` arm since Story 2.4.
     pub fn claim_pinned_terminal_spawn(
         &mut self,
         tag_id: TagId,
@@ -404,7 +427,20 @@ impl WmCore {
         let session_name = format!("tag-{}", tag.name);
         self.mark_terminal_spawned(tag_id)
             .expect("tag_id was just confirmed registered above");
+        self.pending_pinned_terminal_tags.push_back(tag_id);
         Ok(Some(session_name))
+    }
+
+    /// Pops the next pending pinned-terminal tag association, FIFO (Story
+    /// 2.7 Task 2's other half of the correlation mechanism started by
+    /// [`WmCore::claim_pinned_terminal_spawn`]). `main.rs`'s
+    /// `init_new_windows` calls this exactly when a window with `app_id ==
+    /// PINNED_TERM_APP_ID` maps, to recover which tag it was spawned for.
+    /// Returns `None` if the queue is empty - defensively handled by the
+    /// caller (NFR2: log and leave the window untagged), not expected in
+    /// practice given spawn-then-map ordering.
+    pub fn pop_pending_pinned_terminal_tag(&mut self) -> Option<TagId> {
+        self.pending_pinned_terminal_tags.pop_front()
     }
 
     /// Returns the stacking/render order, front-to-back (front=bottom,
@@ -508,11 +544,21 @@ impl WmCore {
     /// succeed since it was just read from this same `WmCore`'s own
     /// stacking order, so their `Result`s are unwrapped rather than
     /// propagated (NFR2: safe-by-construction, not caller-facing).
+    ///
+    /// Code review follow-up (Story 2.7): also skips any view
+    /// `is_view_visible` reports as hidden (not shown on any output's
+    /// current tag) — without this, cycling focus could jump to a window
+    /// on a different, currently-hidden tag, giving it real keyboard focus
+    /// while nothing on screen shows it's focused. A view with an unknown
+    /// id can't occur here (`id` is always read from this `WmCore`'s own
+    /// `stacking_order`), so `unwrap_or(false)` on the `Result` is
+    /// unreachable in practice, not a silently-wrong fallback.
     pub fn cycle_focus(&mut self) -> Option<ViewId> {
         let target = self.stacking_order.iter().copied().find(|&id| {
             self.views
                 .get(&id)
                 .is_some_and(|view| view.app_id != PINNED_TERM_APP_ID)
+                && self.is_view_visible(id).unwrap_or(false)
         })?;
         self.raise_view(target)
             .expect("target was just read from this WmCore's own stacking order");
@@ -575,6 +621,77 @@ impl WmCore {
             outputs,
             focused_view: self.focused_view,
         }
+    }
+
+    /// The pure visibility DECISION (Story 2.7 Task 1): a view is visible
+    /// if any of its tags matches any registered output's `current_tag`
+    /// (standard multi-output dwm semantics - a view can be simultaneously
+    /// visible on more than one output). A view with no tags at all is
+    /// visible by default (the one exception, for the bootstrap case
+    /// before any tag exists yet - see this story's ACs). `main.rs` is the
+    /// only caller that turns this into a real `river_window_v1.show()`/
+    /// `hide()` request; this method itself has no knowledge of the
+    /// Wayland protocol (`wm-core` stays protocol-agnostic). Fails with
+    /// [`WmCoreError::UnknownView`] for an unregistered id. A pure query;
+    /// never mutates `self`.
+    pub fn is_view_visible(&self, view_id: ViewId) -> Result<bool, WmCoreError> {
+        let view = self.views.get(&view_id).ok_or(WmCoreError::UnknownView)?;
+        if view.tags == TagSet::default() {
+            return Ok(true);
+        }
+        Ok(self.outputs.values().any(|output| {
+            output
+                .current_tag
+                .is_some_and(|tag_id| view.tags.contains(tag_id.0))
+        }))
+    }
+
+    /// Returns the id of the tag (if any) currently assigned to `view_id`,
+    /// in tag-registry creation order (mirrors [`WmCore::snapshot`]'s
+    /// ordering convention for a `ViewSnapshot`'s `tags` field). Story 2.7
+    /// Task 5's `main.rs` fullscreen-recompute pass uses this to recover
+    /// which tag a pinned terminal was associated with at mapping time
+    /// (Task 2), since `wm-core`'s own tag membership - not the transient
+    /// spawn queue - is the durable source of truth afterward. Fails with
+    /// [`WmCoreError::UnknownView`] for an unregistered id. A pure query;
+    /// never mutates `self`.
+    pub fn view_tags(&self, view_id: ViewId) -> Result<Vec<TagId>, WmCoreError> {
+        let view = self.views.get(&view_id).ok_or(WmCoreError::UnknownView)?;
+        Ok(self
+            .tags
+            .ids()
+            .into_iter()
+            .filter(|id| view.tags.contains(id.0))
+            .collect())
+    }
+
+    /// Returns the [`OutputId`] currently displaying `tag_id`, if any.
+    /// ADR-005's one-tag-per-output invariant (enforced by
+    /// [`WmCore::switch_tag`]'s reroute logic) guarantees at most one
+    /// output ever matches, so the first match found is unambiguous.
+    /// Returns `None` both for a tag no output currently shows and for an
+    /// unregistered `tag_id` - Story 2.7 Task 5's only caller
+    /// (`main.rs`'s pinned-terminal fullscreen resolution) treats both
+    /// cases identically ("nowhere to fullscreen it, fall back to hidden"),
+    /// so no separate error variant is needed here. A pure query; never
+    /// mutates `self`.
+    pub fn output_showing_tag(&self, tag_id: TagId) -> Option<OutputId> {
+        self.outputs
+            .values()
+            .find(|output| output.current_tag == Some(tag_id))
+            .map(|output| output.id)
+    }
+
+    /// Returns `output_id`'s current tag, or `None` if it has no current
+    /// tag or is not registered. Story 2.7 Task 4's `main.rs` auto-tag-on-
+    /// create wiring uses this to resolve the active output's current tag
+    /// for a freshly registered non-pinned window; that call site only
+    /// ever passes an id already known to be registered (from
+    /// `active_output_id()`'s own live-output scan), so collapsing
+    /// "unregistered" and "no tag" into one `None` costs that caller
+    /// nothing. A pure query; never mutates `self`.
+    pub fn output_current_tag(&self, output_id: OutputId) -> Option<TagId> {
+        self.outputs.get(&output_id).and_then(|o| o.current_tag)
     }
 }
 
@@ -1408,6 +1525,57 @@ mod tests {
         assert_eq!(core.cycle_focus(), None);
     }
 
+    /// Code review follow-up (Story 2.7): before this fix, `cycle_focus`
+    /// only excluded the pinned terminal, so it could select a view on a
+    /// tag that isn't currently shown on any output — giving a hidden
+    /// window real keyboard focus with nothing visible to receive it. A
+    /// view whose tag isn't displayed anywhere must never be a cycle
+    /// target, even though it's still in `stacking_order`.
+    #[test]
+    fn cycle_focus_skips_views_not_visible_on_any_output_current_tag() {
+        let mut core = WmCore::new();
+        let visible_tag = core.create_tag("web").unwrap();
+        let hidden_tag = core.create_tag("term").unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, visible_tag).unwrap();
+
+        let shown = core.register_view("shown-app");
+        core.toggle_view_tag(shown, visible_tag).unwrap();
+        let hidden = core.register_view("hidden-app");
+        core.toggle_view_tag(hidden, hidden_tag).unwrap();
+
+        for _ in 0..10 {
+            let next = core.cycle_focus();
+            assert_ne!(
+                next,
+                Some(hidden),
+                "cycle_focus must never select a view hidden on every output"
+            );
+            assert_eq!(next, Some(shown));
+        }
+    }
+
+    /// Code review follow-up (Story 2.7), edge case: if every other
+    /// registered view is hidden, `cycle_focus` must return `None` rather
+    /// than falling back to a hidden view just because it's the only
+    /// non-pinned candidate left.
+    #[test]
+    fn cycle_focus_returns_none_when_only_candidate_is_hidden() {
+        let mut core = WmCore::new();
+        let visible_tag = core.create_tag("web").unwrap();
+        let hidden_tag = core.create_tag("term").unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, visible_tag).unwrap();
+
+        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        core.toggle_view_tag(pinned, visible_tag).unwrap();
+        core.lower_view(pinned).unwrap();
+        let hidden = core.register_view("hidden-app");
+        core.toggle_view_tag(hidden, hidden_tag).unwrap();
+
+        assert_eq!(core.cycle_focus(), None);
+    }
+
     #[test]
     fn fresh_wm_core_is_fully_empty() {
         let core = WmCore::new();
@@ -1769,5 +1937,293 @@ mod tests {
         assert_eq!(core.cycle_focus(), Some(a));
         assert_eq!(core.stacking_order(), vec![c, b, a]);
         assert!(core.views.get(&a).unwrap().focused);
+    }
+
+    // Story 2.7 Task 1 RED: `is_view_visible` is the pure visibility
+    // DECISION this story adds to `wm-core` (no Wayland types involved) —
+    // `main.rs` reuses it to decide whether to call `river_window_v1`'s
+    // `show()`/`hide()`. These tests are written before the method exists
+    // (RED) and must fail to compile until Task 1.2's GREEN step adds it.
+
+    #[test]
+    fn is_view_visible_true_when_a_tag_matches_some_output_current_tag() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let tag_id = core.create_tag("web").unwrap();
+        core.toggle_view_tag(view_id, tag_id).unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, tag_id).unwrap();
+
+        assert_eq!(core.is_view_visible(view_id), Ok(true));
+    }
+
+    #[test]
+    fn is_view_visible_false_when_tags_exist_but_none_match_any_output() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let view_tag = core.create_tag("web").unwrap();
+        core.toggle_view_tag(view_id, view_tag).unwrap();
+        let output_id = core.register_output();
+        let displayed_tag = core.create_tag("term").unwrap();
+        core.switch_tag(output_id, displayed_tag).unwrap();
+
+        assert_eq!(core.is_view_visible(view_id), Ok(false));
+    }
+
+    #[test]
+    fn is_view_visible_false_when_view_has_tags_but_no_output_is_registered() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let tag_id = core.create_tag("web").unwrap();
+        core.toggle_view_tag(view_id, tag_id).unwrap();
+
+        assert_eq!(core.is_view_visible(view_id), Ok(false));
+    }
+
+    #[test]
+    fn is_view_visible_true_when_view_has_no_tags_at_all_bootstrap_exception() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+
+        assert_eq!(core.is_view_visible(view_id), Ok(true));
+    }
+
+    #[test]
+    fn is_view_visible_true_when_untagged_even_with_tags_and_outputs_registered() {
+        // The bootstrap exception is about *this view's own* tag
+        // membership being empty, not about the overall registry being
+        // empty - a freshly-created window on a desktop that already has
+        // tags/outputs must still be visible until it's explicitly tagged
+        // (Task 4 auto-tags it immediately in practice, but the pure
+        // decision here must not assume that already happened).
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        core.switch_tag(output_id, tag_id).unwrap();
+        let view_id = core.register_view("app-one");
+
+        assert_eq!(core.is_view_visible(view_id), Ok(true));
+    }
+
+    #[test]
+    fn is_view_visible_true_when_view_has_multiple_tags_and_any_one_matches() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let tag_a = core.create_tag("web").unwrap();
+        let tag_b = core.create_tag("term").unwrap();
+        core.toggle_view_tag(view_id, tag_a).unwrap();
+        core.toggle_view_tag(view_id, tag_b).unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, tag_b).unwrap();
+
+        assert_eq!(core.is_view_visible(view_id), Ok(true));
+    }
+
+    #[test]
+    fn is_view_visible_true_when_shown_simultaneously_on_two_outputs() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let tag_id = core.create_tag("web").unwrap();
+        core.toggle_view_tag(view_id, tag_id).unwrap();
+        let o1 = core.register_output();
+        let o2 = core.register_output();
+        core.switch_tag(o1, tag_id).unwrap();
+        // Distinct tag on o2 so o1 keeps tag_id (switch_tag would otherwise
+        // reroute it away, ADR-005) - o1 is the one that must still match.
+        let other_tag = core.create_tag("term").unwrap();
+        core.switch_tag(o2, other_tag).unwrap();
+
+        assert_eq!(core.is_view_visible(view_id), Ok(true));
+    }
+
+    #[test]
+    fn is_view_visible_unknown_view_returns_unknown_view_error() {
+        let core = WmCore::new();
+        let bogus_view = ViewId(999);
+        assert_eq!(
+            core.is_view_visible(bogus_view),
+            Err(WmCoreError::UnknownView)
+        );
+    }
+
+    #[test]
+    fn is_view_visible_is_a_pure_query_and_never_mutates_state() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let tag_id = core.create_tag("web").unwrap();
+        core.toggle_view_tag(view_id, tag_id).unwrap();
+        let output_id = core.register_output();
+        core.switch_tag(output_id, tag_id).unwrap();
+        let snapshot = core.clone();
+
+        let _ = core.is_view_visible(view_id);
+        assert_eq!(core, snapshot);
+    }
+
+    // Story 2.7 Task 2/5 RED: `output_showing_tag` is the pure query
+    // `main.rs`'s pinned-terminal fullscreen wiring (Task 5) uses to find
+    // which real `river_output_v1` proxy a tag is currently displayed on -
+    // `main.rs` maps the returned `OutputId` to its own `Output` struct's
+    // proxy; this method itself stays protocol-agnostic.
+
+    #[test]
+    fn output_showing_tag_returns_none_when_no_output_shows_it() {
+        let mut core = WmCore::new();
+        core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        assert_eq!(core.output_showing_tag(tag_id), None);
+    }
+
+    #[test]
+    fn output_showing_tag_returns_the_output_currently_displaying_it() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        core.switch_tag(output_id, tag_id).unwrap();
+        assert_eq!(core.output_showing_tag(tag_id), Some(output_id));
+    }
+
+    #[test]
+    fn output_showing_tag_returns_none_for_a_registered_tag_no_output_shows() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let shown_tag = core.create_tag("web").unwrap();
+        let unshown_tag = core.create_tag("term").unwrap();
+        core.switch_tag(output_id, shown_tag).unwrap();
+        assert_eq!(core.output_showing_tag(unshown_tag), None);
+    }
+
+    #[test]
+    fn output_showing_tag_reflects_reroute_after_switch_tag_moves_it() {
+        let mut core = WmCore::new();
+        let o1 = core.register_output();
+        let o2 = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        core.switch_tag(o1, tag_id).unwrap();
+        core.switch_tag(o2, tag_id).unwrap();
+        assert_eq!(
+            core.output_showing_tag(tag_id),
+            Some(o2),
+            "after a reroute, the tag's old output must no longer be reported"
+        );
+    }
+
+    // Story 2.7 Task 5 RED: `view_tags` is the pure query
+    // `main.rs`'s pinned-terminal fullscreen-recompute pass uses to
+    // recover which tag a pinned terminal was associated with (Task 2's
+    // `pending_pinned_terminal_tags` queue only carries the association at
+    // mapping time - after that, `wm-core`'s own tag membership is the
+    // source of truth).
+
+    #[test]
+    fn view_tags_returns_empty_vec_for_untagged_view() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        assert_eq!(core.view_tags(view_id), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn view_tags_returns_assigned_tag() {
+        let mut core = WmCore::new();
+        let view_id = core.register_view("app-one");
+        let tag_id = core.create_tag("web").unwrap();
+        core.toggle_view_tag(view_id, tag_id).unwrap();
+        assert_eq!(core.view_tags(view_id), Ok(vec![tag_id]));
+    }
+
+    #[test]
+    fn view_tags_unknown_view_returns_error() {
+        let core = WmCore::new();
+        let bogus_view = ViewId(999);
+        assert_eq!(core.view_tags(bogus_view), Err(WmCoreError::UnknownView));
+    }
+
+    // Story 2.7 Task 4 RED: `output_current_tag` is the pure lookup
+    // `main.rs`'s auto-tag-on-create wiring uses to resolve the active
+    // output's current tag before calling `toggle_view_tag` on a freshly
+    // registered non-pinned window.
+
+    #[test]
+    fn output_current_tag_returns_none_when_output_has_no_tag() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        assert_eq!(core.output_current_tag(output_id), None);
+    }
+
+    #[test]
+    fn output_current_tag_returns_the_displayed_tag() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_id = core.create_tag("web").unwrap();
+        core.switch_tag(output_id, tag_id).unwrap();
+        assert_eq!(core.output_current_tag(output_id), Some(tag_id));
+    }
+
+    #[test]
+    fn output_current_tag_returns_none_for_unregistered_output() {
+        let core = WmCore::new();
+        let bogus_output = crate::wm_core::ids::OutputId(999);
+        assert_eq!(core.output_current_tag(bogus_output), None);
+    }
+
+    // Story 2.7 Task 2 RED: `claim_pinned_terminal_spawn` must push the
+    // claimed tag id onto an internal FIFO queue, and
+    // `pop_pending_pinned_terminal_tag` must pop it back off - the
+    // correlation mechanism `main.rs`'s `init_new_windows` uses to tag a
+    // freshly-mapped pinned-terminal window with the tag it was spawned
+    // for. Lives in `WmCore` (not `main.rs`'s `WindowManager`) because
+    // `claim_pinned_terminal_spawn` has two real callers on two different
+    // threads (see the field's own doc comment).
+
+    #[test]
+    fn pop_pending_pinned_terminal_tag_returns_none_when_queue_empty() {
+        let mut core = WmCore::new();
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
+    }
+
+    #[test]
+    fn claim_pinned_terminal_spawn_pushes_tag_onto_pending_queue_on_first_claim() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("web").unwrap();
+        core.claim_pinned_terminal_spawn(tag_id).unwrap();
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_id));
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
+    }
+
+    #[test]
+    fn claim_pinned_terminal_spawn_idempotent_second_call_does_not_push_again() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("web").unwrap();
+        core.claim_pinned_terminal_spawn(tag_id).unwrap();
+        core.claim_pinned_terminal_spawn(tag_id).unwrap();
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_id));
+        assert_eq!(
+            core.pop_pending_pinned_terminal_tag(),
+            None,
+            "an idempotent no-op second claim must not push a second queue entry"
+        );
+    }
+
+    #[test]
+    fn claim_pinned_terminal_spawn_unknown_tag_does_not_push_to_pending_queue() {
+        let mut core = WmCore::new();
+        let bogus_tag = TagId(63);
+        assert_eq!(
+            core.claim_pinned_terminal_spawn(bogus_tag),
+            Err(WmCoreError::UnknownTag)
+        );
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
+    }
+
+    #[test]
+    fn pending_pinned_terminal_tags_pop_in_fifo_order_across_multiple_claims() {
+        let mut core = WmCore::new();
+        let tag_a = core.create_tag("a").unwrap();
+        let tag_b = core.create_tag("b").unwrap();
+        core.claim_pinned_terminal_spawn(tag_a).unwrap();
+        core.claim_pinned_terminal_spawn(tag_b).unwrap();
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_a));
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_b));
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
     }
 }

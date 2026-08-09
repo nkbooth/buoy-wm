@@ -188,6 +188,12 @@ impl WindowManager {
         self.init_new_seats(river_xkb, qh);
         self.manage_windows();
         self.manage_seats(proxy);
+        // Story 2.7 Task 5.2: re-resolve fullscreen assignment for every
+        // pinned terminal after `manage_seats` may have switched a tag onto
+        // a different output (or off every output) via a raw keybind -
+        // still within this same manage sequence, satisfying
+        // `river_window_v1.fullscreen`'s manage-sequence-only constraint.
+        self.recompute_pinned_terminal_fullscreen();
         proxy.manage_finish();
     }
 
@@ -233,6 +239,12 @@ impl WindowManager {
                 }
             }
         }
+
+        // Story 2.7 Task 3: `river_window_v1.hide`/`show` "modif[y]
+        // rendering state and may only be made as part of a render
+        // sequence" per the protocol, so this visibility recompute belongs
+        // here, not in `handle_manage_start`.
+        self.recompute_window_visibility();
 
         proxy.render_finish();
     }
@@ -305,13 +317,19 @@ impl WindowManager {
     }
 
     fn init_new_windows(&mut self) {
+        // Computed before the `&mut self.wm_core` borrow below begins, same
+        // reasoning as `manage_seats`'s own `active_output_id` precedent
+        // (Story 1.7): `active_output_id()` is a whole-`&self` method call
+        // (it reads `self.outputs`), which cannot run during the loop's
+        // mutable `wm_core` borrow even though the fields are disjoint.
+        // Story 2.7 Task 4: this is the "active output" a freshly-created
+        // non-pinned window auto-tags onto.
+        let active_output_id = self.active_output_id();
         let mut wm_core = ipc::lock_recovering(&self.wm_core);
         for window in self.windows.iter_mut().filter(|w| w.new) {
             let view_id = wm_core.register_view(&window.app_id);
             window.view_id = Some(view_id);
             if window.app_id == PINNED_TERM_APP_ID {
-                window.set_position(window.x, window.y);
-                window.proxy.propose_dimensions(window.width, window.height);
                 log_wm_core_err(
                     wm_core.set_view_floating(view_id, false),
                     "Failed to set pinned terminal non-floating",
@@ -320,6 +338,65 @@ impl WindowManager {
                     wm_core.lower_view(view_id),
                     "Failed to lower pinned terminal in stacking order",
                 );
+                // Story 2.7 Task 2.3: recover which tag this pinned
+                // terminal was spawned for (the protocol gives no way to
+                // know from the mapped window alone - it only carries
+                // `app_id == PINNED_TERM_APP_ID`). Popping from an empty
+                // queue (no corresponding pending spawn) shouldn't happen
+                // given the spawn-then-map ordering, but is handled
+                // gracefully rather than panicking (NFR2): log and leave
+                // the window untagged, which Task 1's bootstrap exception
+                // (`is_view_visible`) keeps visible rather than
+                // permanently hidden.
+                match wm_core.pop_pending_pinned_terminal_tag() {
+                    Some(tag_id) => {
+                        log_wm_core_err(
+                            wm_core.toggle_view_tag(view_id, tag_id),
+                            "Failed to tag newly-mapped pinned terminal",
+                        );
+                        // Story 2.7 Task 5.1: fullscreen is window
+                        // management state and may only be requested as
+                        // part of a manage sequence (per the protocol's
+                        // own `river_window_v1.fullscreen` description) -
+                        // `init_new_windows` runs inside
+                        // `handle_manage_start`, so this is the correct
+                        // place for it. If the tag isn't currently shown
+                        // on any output, do nothing here: Task 3's
+                        // render-sequence visibility pass
+                        // (`recompute_window_visibility`) will hide it via
+                        // the same `is_view_visible` decision every other
+                        // view uses, rather than this call site
+                        // special-casing a hide.
+                        if let Some(output_id) = wm_core.output_showing_tag(tag_id)
+                            && let Some(output_proxy) =
+                                output_proxy_for_id(&self.outputs, output_id)
+                        {
+                            window.proxy.fullscreen(output_proxy);
+                        }
+                    }
+                    None => {
+                        eprintln!(
+                            "Pinned terminal window mapped with no pending spawn tag queued; leaving untagged"
+                        );
+                        // Code review follow-up (Story 2.7): an untagged
+                        // window is shown by `is_view_visible`'s bootstrap
+                        // exception, so give it the same explicit
+                        // position/dimensions the non-pinned branch below
+                        // gives every new window, rather than leaving it
+                        // with whatever undefined geometry the compositor
+                        // happens to pick — this is a stray window (no
+                        // known caller maps `app_id == PINNED_TERM_APP_ID`
+                        // without going through this WM's own spawn
+                        // tracking), but it must still render sanely if it
+                        // ever occurs.
+                        window
+                            .set_position(DEFAULT_FLOATING_GEOMETRY.x, DEFAULT_FLOATING_GEOMETRY.y);
+                        window.proxy.propose_dimensions(
+                            DEFAULT_FLOATING_GEOMETRY.width,
+                            DEFAULT_FLOATING_GEOMETRY.height,
+                        );
+                    }
+                }
             } else {
                 log_wm_core_err(
                     wm_core.set_view_geometry(view_id, DEFAULT_FLOATING_GEOMETRY),
@@ -331,8 +408,107 @@ impl WindowManager {
                     DEFAULT_FLOATING_GEOMETRY.height,
                 );
                 window.node.place_top();
+                // Story 2.7 Task 4: auto-tag a freshly-created (non-pinned)
+                // window with the active output's current tag (dwm
+                // convention) so it's immediately visible on the tag the
+                // user is looking at, rather than silently invisible until
+                // manually tagged via the assign-mode picker. If no output
+                // is registered yet, or the active output has no current
+                // tag yet (e.g. no tag exists at all), leave the window
+                // untagged - Task 1's bootstrap exception keeps it visible.
+                if let Some(output_id) = active_output_id
+                    && let Some(tag_id) = wm_core.output_current_tag(output_id)
+                {
+                    log_wm_core_err(
+                        wm_core.toggle_view_tag(view_id, tag_id),
+                        "Failed to auto-tag new window with active output's current tag",
+                    );
+                }
             }
             window.new = false;
+        }
+    }
+
+    /// Story 2.7 Task 5.2: re-resolves and re-applies fullscreen/exit-
+    /// fullscreen for every mapped pinned terminal, one per tag it's been
+    /// associated with (Task 2). Called unconditionally at the end of every
+    /// `handle_manage_start`, the same "simplest-correct first cut, recompute
+    /// broadly rather than track precisely which tag-state change to react
+    /// to" strategy `recompute_window_visibility` uses for hide/show (Task
+    /// 3) - the two recomputations can't be the same function because the
+    /// protocol restricts `fullscreen`/`exit_fullscreen` to a manage
+    /// sequence (this method's caller) while `show`/`hide` are restricted to
+    /// a render sequence (`recompute_window_visibility`'s caller). This
+    /// covers `switch_tag`/`cycle_tag` reassigning a tag to a different
+    /// output (or off every output) regardless of whether that happened via
+    /// the raw keybind (`manage_seats`, same manage sequence as this call)
+    /// or asynchronously via the IPC-driven picker (picked up the next time
+    /// any manage sequence runs - see `WmCore::pending_pinned_terminal_tags`'s
+    /// doc comment for why that's the shared, cross-thread-correct queue).
+    fn recompute_pinned_terminal_fullscreen(&mut self) {
+        let wm_core = ipc::lock_recovering(&self.wm_core);
+        for window in self.windows.iter() {
+            if window.app_id != PINNED_TERM_APP_ID {
+                continue;
+            }
+            let Some(view_id) = window.view_id else {
+                continue;
+            };
+            let tag_id = match wm_core.view_tags(view_id) {
+                Ok(tags) => tags.first().copied(),
+                Err(e) => {
+                    eprintln!(
+                        "Failed to resolve pinned terminal's tags for view {view_id:?}: {e:?}"
+                    );
+                    None
+                }
+            };
+            match tag_id.and_then(|tag_id| wm_core.output_showing_tag(tag_id)) {
+                Some(output_id) => {
+                    if let Some(output_proxy) = output_proxy_for_id(&self.outputs, output_id) {
+                        window.proxy.fullscreen(output_proxy);
+                    }
+                }
+                // Not in scope (see this story's Technical notes): the
+                // brief non-fullscreen frame this may cause immediately
+                // before Task 3's next render sequence hides the window is
+                // accepted, not tuned away - correctness (it ends up
+                // hidden, not stuck fullscreen-but-invisible) matters more
+                // here than frame-perfection.
+                None => window.proxy.exit_fullscreen(),
+            }
+        }
+    }
+
+    /// Story 2.7 Task 3: the broad visibility recomputation pass - for
+    /// every mapped window, decides show vs. hide via `WmCore::
+    /// is_view_visible` (Task 1's pure decision) and issues the matching
+    /// `river_window_v1` request. `hide`/`show` "modif[y] rendering state
+    /// and may only be made as part of a render sequence" per the
+    /// protocol, so this is called from `handle_render_start`, not
+    /// `handle_manage_start` - the same manage-vs-render sequence
+    /// constraint Story 1.4/1.6's `set_position`/`place_top` calls satisfy
+    /// by being called from within the correct sequence's handler. Runs
+    /// unconditionally every render sequence (simplest-correct first cut
+    /// per this story's Task 3.1: NFR1's 50ms budget isn't at risk for a
+    /// handful of windows) rather than tracking precisely which tag/output
+    /// mutation call site needs to trigger it - this covers every case in
+    /// the AC's list (`toggle_view_tag` via the assign-mode picker or
+    /// Task 4's auto-tag, `switch_tag`/`cycle_tag` via keybind or the
+    /// switch-mode picker, window registration/removal) uniformly.
+    fn recompute_window_visibility(&mut self) {
+        let wm_core = ipc::lock_recovering(&self.wm_core);
+        for window in self.windows.iter() {
+            let Some(view_id) = window.view_id else {
+                continue;
+            };
+            match wm_core.is_view_visible(view_id) {
+                Ok(true) => window.proxy.show(),
+                Ok(false) => window.proxy.hide(),
+                Err(e) => {
+                    eprintln!("Failed to resolve visibility for view {view_id:?}: {e:?}")
+                }
+            }
         }
     }
 
@@ -555,6 +731,26 @@ impl Output {
             output_id,
         }
     }
+}
+
+/// Resolves the real `river_output_v1` proxy for a `wm-core` [`OutputId`],
+/// by scanning `outputs`' values for a matching `Output::output_id` (the
+/// map's own keys are `ObjectId`s, not `OutputId`s - `wm-core` never sees
+/// Wayland object ids). A free function rather than a `WindowManager`
+/// method (Story 2.7 Tasks 2/5): it borrows only the `outputs` field
+/// directly, so callers already holding a disjoint mutable borrow of
+/// `self.windows` (`init_new_windows`,
+/// `recompute_pinned_terminal_fullscreen`) can call it without the whole-
+/// `self` re-borrow a method call would require (same reasoning as
+/// `active_output_id` needing to be computed before such a loop begins).
+fn output_proxy_for_id(
+    outputs: &HashMap<ObjectId, Output>,
+    output_id: OutputId,
+) -> Option<&RiverOutputV1> {
+    outputs
+        .values()
+        .find(|output| output.output_id == output_id)
+        .map(|output| &output.proxy)
 }
 
 /// Code review follow-up (Story 2.2, finding #1): resolves the `tag-picker`
@@ -903,8 +1099,34 @@ impl Seat {
         }
     }
 
+    // Code review follow-up (Story 2.7): `windows.back()` is the most-
+    // recently-interacted-with window WM-wide, with no tag/visibility
+    // filtering of its own — nothing about tag switching (`cycle_tag`/
+    // `switch_tag`) reorders `self.windows` or reassigns focus. Before this
+    // fix, a tag switch could leave Wayland keyboard focus and
+    // `wm_core::focused_view` pointed at a window `recompute_window_visibility`
+    // hides on the very next render sequence, with nothing else ever
+    // refocusing a window actually visible on the new tag — the user's
+    // keypresses would go nowhere until they clicked something. Filtering
+    // `windows.back()` through `is_view_visible` here means a hidden
+    // back-of-stack window is treated the same as no window at all (focus
+    // cleared) rather than wrongly re-affirmed as focused.
     fn focus_top(&mut self, windows: &VecDeque<Window>, wm_core: &mut WmCore) {
-        match windows.back() {
+        let target = windows.back().filter(|window| {
+            let view_id = window.view_id.expect(
+                "every window reaches focus_top only after init_new_windows registered it earlier in the same handle_manage_start call",
+            );
+            match wm_core.is_view_visible(view_id) {
+                Ok(visible) => visible,
+                Err(e) => {
+                    eprintln!(
+                        "Failed to check visibility for view {view_id:?} in wm_core: {e:?}"
+                    );
+                    true
+                }
+            }
+        });
+        match target {
             Some(window) => {
                 self.proxy.focus_window(&window.proxy);
                 window.node.place_top();
