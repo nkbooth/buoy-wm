@@ -55,7 +55,12 @@ fn read_response(reader: &mut BufReader<UnixStream>) -> Option<wire::Response> {
 /// id column on selection, `--nth-delimiter` is the tab this module's
 /// stdin rows use. When `initial_search` is `Some(text)`, `--search=<text>`
 /// pre-fills fuzzel's input box (Story 2.3: restores the rejected name into
-/// view on a cap-rejection reopen — a real, documented flag). Returns
+/// view on a cap-rejection reopen — a real, documented flag). When
+/// `output_name` is `Some(name)`, `--output=<name>` targets the real
+/// Wayland connector `wm` resolved as the active output (Story 2.9); `None`
+/// omits the flag entirely, leaving fuzzel's own "let the compositor
+/// choose" default in effect, same as this story's baseline behavior.
+/// Returns
 /// `(exit_success, stdout_as_lossy_utf8)`; a failure to spawn or wait is
 /// treated as a failed/cancelled invocation rather than panicking (never
 /// exercised live in this sandbox — no `fuzzel` binary and no Wayland
@@ -70,7 +75,11 @@ fn read_response(reader: &mut BufReader<UnixStream>) -> Option<wire::Response> {
 /// 64-tag cap with realistic names, but not bounded/documented either; this
 /// is the standard `std::process::Command` pattern for avoiding that class
 /// of deadlock.
-fn run_fuzzel(input: &str, initial_search: Option<&str>) -> (bool, String) {
+fn run_fuzzel(
+    input: &str,
+    initial_search: Option<&str>,
+    output_name: Option<&str>,
+) -> (bool, String) {
     let mut command = Command::new("fuzzel");
     command
         .arg("--dmenu")
@@ -80,6 +89,23 @@ fn run_fuzzel(input: &str, initial_search: Option<&str>) -> (bool, String) {
         .arg("--placeholder=type to filter, or a new name to create");
     if let Some(text) = initial_search {
         command.arg(format!("--search={text}"));
+    }
+    // Story 2.9 Task 5: tells fuzzel which real monitor to render on (its
+    // own manual: "-o, --output=OUTPUT ... default: let the compositor
+    // choose output"). Only appended when known — `None` here means `wm`
+    // hadn't yet resolved a connector name for the active output (Story 2.9
+    // AC 2), and fuzzel's own default ("let the compositor choose") is
+    // exactly today's pre-Story-2.9 behavior, so omitting the flag entirely
+    // (never an empty/malformed `--output=`) preserves it exactly.
+    //
+    // Code review follow-up (Story 2.9): also guard against an empty
+    // string specifically, not just `None` — nothing upstream currently
+    // validates that a resolved connector name is non-empty, and an empty
+    // `--output=` argument would be exactly the malformed flag this AC
+    // rules out. Defends the boundary directly rather than trusting every
+    // caller to have already checked.
+    if let Some(name) = output_name.filter(|name| !name.is_empty()) {
+        command.arg(format!("--output={name}"));
     }
     let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
         Ok(child) => child,
@@ -190,6 +216,7 @@ fn run_assign_mode(
     mut tags: Vec<wire::TagDto>,
     views: Vec<wire::ViewDto>,
     focused_view: Option<u64>,
+    output_name: Option<&str>,
 ) {
     if !checklist::should_open_picker(focused_view) {
         eprintln!("tag-picker: no window focused");
@@ -228,7 +255,8 @@ fn run_assign_mode(
         }
         let entries = checklist::build_checklist_entries(&tags, &current_tags);
         input.push_str(&checklist::render_fuzzel_input(&entries));
-        let (exit_success, stdout) = run_fuzzel(&input, pending_rejected_name.as_deref());
+        let (exit_success, stdout) =
+            run_fuzzel(&input, pending_rejected_name.as_deref(), output_name);
 
         match checklist::parse_fuzzel_output(exit_success, &stdout, &known_ids) {
             checklist::PickerAction::Cancelled => break,
@@ -358,13 +386,14 @@ fn run_switch_mode(
     mut reader: BufReader<UnixStream>,
     tags: Vec<wire::TagDto>,
     output_id: u64,
+    output_name: Option<&str>,
 ) {
     let known_ids: Vec<u8> = tags.iter().map(|t| t.id).collect();
     let input = checklist::render_switch_list(&tags);
     // No `initial_search` — switch mode never has a rejection row to
     // restore (that mechanism is assign mode's create-tag-cap concept
     // only).
-    let (exit_success, stdout) = run_fuzzel(&input, None);
+    let (exit_success, stdout) = run_fuzzel(&input, None, output_name);
 
     match checklist::parse_switch_selection(exit_success, &stdout, &known_ids) {
         checklist::SwitchAction::Cancelled => {}
@@ -399,17 +428,27 @@ fn main() {
     };
 
     match mode {
-        mode::Mode::Assign => {
+        mode::Mode::Assign { output_name } => {
             let (writer, reader, tags, views, focused_view) = connect_and_get_state();
-            run_assign_mode(writer, reader, tags, views, focused_view);
+            run_assign_mode(
+                writer,
+                reader,
+                tags,
+                views,
+                focused_view,
+                output_name.as_deref(),
+            );
         }
         // Switch mode has no focused-view precondition at all — pressing
         // `Mod4+S` works with no window focused and none existing — so
         // `checklist::should_open_picker`'s check is deliberately not
         // applied on this branch.
-        mode::Mode::Switch { output_id } => {
+        mode::Mode::Switch {
+            output_id,
+            output_name,
+        } => {
             let (writer, reader, tags, _views, _focused_view) = connect_and_get_state();
-            run_switch_mode(writer, reader, tags, output_id);
+            run_switch_mode(writer, reader, tags, output_id, output_name.as_deref());
         }
     }
 }

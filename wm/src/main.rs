@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use wayland_backend::client::ObjectId;
-use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, protocol::wl_registry};
+use wayland_client::{
+    Connection, Dispatch, Proxy, QueueHandle,
+    protocol::{wl_output, wl_registry},
+};
 
 use crate::river::{
     river_layer_shell_v1::RiverLayerShellV1,
@@ -119,6 +122,23 @@ struct WindowManager {
     outputs: HashMap<ObjectId, Output>,
     seats: HashMap<ObjectId, Seat>,
     wm_core: Arc<Mutex<WmCore>>,
+    /// Story 2.9 Task 1: every bound `wl_output` global, keyed by the
+    /// registry `name: u32` it was bound for — populated as soon as each
+    /// global is advertised, independent of (and generally *before*) the
+    /// `river_output_v1::WlOutput` event that later references the same
+    /// registry name (Task 2). Never removed; a `wl_output` global going
+    /// away isn't handled by this story (see Technical notes' scope
+    /// boundary) — YAGNI until a real hotplug-removal story needs it.
+    pending_wl_outputs: HashMap<u32, wl_output::WlOutput>,
+    /// Story 2.9 Task 1: each bound `wl_output`'s real connector name (e.g.
+    /// `"eDP-1"`), keyed by that `wl_output` proxy's own id, populated
+    /// whenever its `Name` event fires. Deliberately a separate map from
+    /// `pending_wl_outputs` (keyed by object id, not registry name) so a
+    /// name can be looked up fresh at the point it's actually needed
+    /// (`WindowManager::output_name`) without ever caching "no name yet" as
+    /// a permanent negative — the event's arrival time relative to
+    /// `river_output_v1::WlOutput` is not guaranteed (Technical notes).
+    wl_output_names: HashMap<ObjectId, String>,
 }
 
 #[derive(Debug)]
@@ -153,6 +173,18 @@ struct Output {
     /// `river_output_v1`'s `dimensions` event. Defaults to `(0, 0)` until
     /// the first such event arrives (Story 2.8 Task 1).
     dimensions: (i32, i32),
+    /// The id of this output's correlated `wl_output` proxy (Story 2.9 Task
+    /// 2), set once `river_output_v1`'s `WlOutput` event resolves the
+    /// registry name it carries to a `wl_output` binding in
+    /// `WindowManager::pending_wl_outputs`. `None` until that event
+    /// arrives, or permanently if the correlation somehow fails (AC 2's
+    /// documented fallback). Deliberately just the object id, not the real
+    /// connector name string directly — the corresponding `wl_output`'s own
+    /// `Name` event isn't guaranteed to have arrived yet at correlation
+    /// time (Technical notes), so the name itself must always be looked up
+    /// fresh from `WindowManager::wl_output_names` when actually needed
+    /// (`output_name`), never cached here.
+    wl_output_object_id: Option<ObjectId>,
 }
 
 #[derive(Debug)]
@@ -279,9 +311,19 @@ impl WindowManager {
         let mut orphaned_tags: Vec<TagId> = Vec::new();
         {
             let mut wm_core = ipc::lock_recovering(&self.wm_core);
+            let wl_output_names = &mut self.wl_output_names;
             self.outputs.retain(|_, output| {
                 if output.removed {
                     output.proxy.destroy();
+                    // Code review follow-up (Story 2.9): prune the
+                    // matching `wl_output_names` entry too, mirroring the
+                    // `wm_core.unregister_output` cleanup just below for
+                    // the same removal event — otherwise this map grows
+                    // without bound across dock/undock cycles for the life
+                    // of this long-running process.
+                    if let Some(wl_output_object_id) = &output.wl_output_object_id {
+                        wl_output_names.remove(wl_output_object_id);
+                    }
                     // This output_id was registered in wm_core the moment
                     // the real output appeared (Event::Output) and only
                     // this call site ever removes it, so `Err(UnknownOutput)`
@@ -715,6 +757,25 @@ impl WindowManager {
         pointed_output_id.or_else(|| self.outputs.values().map(|o| o.output_id).min())
     }
 
+    /// Story 2.9 Task 2: resolves a `wm-core` [`OutputId`] to its real
+    /// Wayland connector name (e.g. `"eDP-1"`), for `fuzzel --output=` (Task
+    /// 5). Same linear-scan-by-`output_id` shape `output_proxy_for_id`
+    /// already uses (`outputs` is keyed by `ObjectId`, not `OutputId`).
+    /// Returns `None` at any missing step — no matching `Output`, no
+    /// correlated `wl_output` object yet (or ever), or that `wl_output`'s
+    /// own `Name` event hasn't arrived yet — never panics (NFR2); AC 2's
+    /// "no `--output` flag at all" fallback covers every `None` case
+    /// uniformly. Always looks `wl_output_names` up fresh rather than
+    /// caching a name on `Output` itself, since the `Name` event's arrival
+    /// relative to correlation time is not guaranteed (Technical notes).
+    fn output_name(&self, output_id: OutputId) -> Option<&str> {
+        let output = self.outputs.values().find(|o| o.output_id == output_id)?;
+        let wl_output_object_id = output.wl_output_object_id.as_ref()?;
+        self.wl_output_names
+            .get(wl_output_object_id)
+            .map(String::as_str)
+    }
+
     fn manage_seats(&mut self, wm_proxy: &RiverWindowManagerV1) {
         // Computed before the `&mut self.wm_core` borrow below begins:
         // `active_output_id` is a whole-`&self` method call (it reads
@@ -722,6 +783,16 @@ impl WindowManager {
         // `wm_core` borrow even though the two fields are disjoint (Story
         // 1.7).
         let active_output_id = self.active_output_id();
+        // Story 2.9 Task 3: resolved alongside `active_output_id` above,
+        // before the `wm_core` mutable borrow below begins, same reasoning
+        // — `output_name` is a whole-`&self` method call (it reads
+        // `self.outputs`/`self.wl_output_names`). Owned (`String`, not
+        // `&str`) so it outlives the borrow of `self` that `output_name`
+        // itself requires, letting it be passed down as `&str` via
+        // `.as_deref()` at the `do_action` call site below.
+        let active_output_name = active_output_id
+            .and_then(|id| self.output_name(id))
+            .map(str::to_owned);
         let mut pending_terminal_spawns: Vec<TagId> = Vec::new();
         let mut wm_core_guard = ipc::lock_recovering(&self.wm_core);
         let wm_core = &mut *wm_core_guard;
@@ -783,9 +854,13 @@ impl WindowManager {
             if !pinned_terminal_focused_directly {
                 seat.focus_top(&self.windows, wm_core);
             }
-            if let Some(tag_id) =
-                seat.do_action(&mut self.windows, wm_proxy, wm_core, active_output_id)
-            {
+            if let Some(tag_id) = seat.do_action(
+                &mut self.windows,
+                wm_proxy,
+                wm_core,
+                active_output_id,
+                active_output_name.as_deref(),
+            ) {
                 pending_terminal_spawns.push(tag_id);
             }
             if seat.op_release {
@@ -851,6 +926,7 @@ impl Output {
             output_id,
             position: (0, 0),
             dimensions: (0, 0),
+            wl_output_object_id: None,
         }
     }
 }
@@ -980,6 +1056,14 @@ impl Seat {
         wm_proxy: &RiverWindowManagerV1,
         wm_core: &mut WmCore,
         active_output_id: Option<OutputId>,
+        // Story 2.9 Task 3: the active output's real Wayland connector name
+        // (e.g. `"eDP-1"`), resolved by `manage_seats` alongside
+        // `active_output_id` above via `WindowManager::output_name`. `None`
+        // whenever that name isn't yet known (Technical notes) — both
+        // `tag-picker` spawn arms below treat that the same as
+        // `active_output_id` being `None`: append no extra argument at all,
+        // rather than a bogus/empty one (AC 2).
+        active_output_name: Option<&str>,
     ) -> Option<TagId> {
         let pending_action = self.pending_action;
         self.pending_action = Action::None;
@@ -1130,10 +1214,17 @@ impl Seat {
             Action::OpenTagPicker => {
                 match std::env::current_exe() {
                     Ok(wm_exe) => {
-                        match std::process::Command::new(tag_picker_path(&wm_exe))
-                            .env_remove("WAYLAND_DEBUG")
-                            .spawn()
-                        {
+                        let mut command = std::process::Command::new(tag_picker_path(&wm_exe));
+                        // Story 2.9 Task 3.3: the active output's real
+                        // connector name, so `tag-picker` can in turn tell
+                        // `fuzzel --output=<name>` which monitor to render
+                        // on (Task 5) — never appended when unknown,
+                        // preserving today's zero-args default exactly (AC
+                        // 2).
+                        if let Some(name) = active_output_name {
+                            command.arg(name);
+                        }
+                        match command.env_remove("WAYLAND_DEBUG").spawn() {
                             Ok(_) => {}
                             Err(e) => eprintln!("Failed to spawn tag-picker: {e}"),
                         }
@@ -1161,12 +1252,18 @@ impl Seat {
                 match active_output_id {
                     Some(output_id) => match std::env::current_exe() {
                         Ok(wm_exe) => {
-                            match std::process::Command::new(tag_picker_path(&wm_exe))
-                                .arg("switch")
-                                .arg(output_id.0.to_string())
-                                .env_remove("WAYLAND_DEBUG")
-                                .spawn()
-                            {
+                            let mut command = std::process::Command::new(tag_picker_path(&wm_exe));
+                            command.arg("switch").arg(output_id.0.to_string());
+                            // Story 2.9 Task 3.4: same trailing-name
+                            // convention as `Action::OpenTagPicker` above —
+                            // appended after the existing two args, only
+                            // when known, preserving today's two-arg
+                            // `switch <id>` shape exactly when it isn't (AC
+                            // 2).
+                            if let Some(name) = active_output_name {
+                                command.arg(name);
+                            }
+                            match command.env_remove("WAYLAND_DEBUG").spawn() {
                                 Ok(_) => {}
                                 Err(e) => {
                                     eprintln!("Failed to spawn tag-picker in switch mode: {e}")
@@ -1373,6 +1470,30 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                     );
                     state.river_layer_shell = Some(layer_shell);
                 }
+                // Story 2.9 Task 1: bind every `wl_output` global as soon
+                // as it's advertised, regardless of which `river_output_v1`
+                // it will later correlate to (Task 2) — the protocol
+                // guarantees a `wl_output` global is advertised before any
+                // `river_output_v1::WlOutput` event that references it by
+                // this same registry `name`, but binding eagerly here,
+                // keyed by that `name`, is what makes the later lookup
+                // possible at all. Capped at v4 (adds the `name` event this
+                // story needs) — a lower server version isn't fatal, same
+                // optional-global shape as `river_layer_shell_v1` above,
+                // not the required-global shape `river_window_manager_v1`/
+                // `river_xkb_bindings_v1` use: this is purely best-effort
+                // cosmetic data for `fuzzel --output=`, not core WM
+                // function.
+                "wl_output" => {
+                    const WL_OUTPUT_NAME_VERSION: u32 = 4;
+                    let wl_output = registry.bind::<wl_output::WlOutput, _, _>(
+                        name,
+                        version.min(WL_OUTPUT_NAME_VERSION),
+                        qh,
+                        (),
+                    );
+                    state.wm.pending_wl_outputs.insert(name, wl_output);
+                }
                 _ => {}
             }
         }
@@ -1489,13 +1610,62 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
             .expect("Output not found");
         match event {
             Event::Removed => output.removed = true,
-            Event::WlOutput { name: _ } => {}
+            // Story 2.9 Task 2: `name` here is the *registry* name the
+            // corresponding `wl_output` global was advertised with (per the
+            // event's own doc comment) — not a connector string. Look it up
+            // in `pending_wl_outputs` (Task 1, populated as each `wl_output`
+            // global was bound, guaranteed by the protocol to have already
+            // happened by this point) to find which bound `wl_output`
+            // object correlates to this `Output`, and remember *that
+            // object's own id* — not a name string yet, since its own
+            // `Name` event isn't guaranteed to have arrived yet (Technical
+            // notes). If somehow not found (the global wasn't bound —
+            // shouldn't happen per the protocol's ordering guarantee, but
+            // handled gracefully per NFR2), leave it `None`; AC 2's
+            // fallback covers this.
+            //
+            // Code review follow-up (Story 2.9): `.remove()`, not `.get()`
+            // — `pending_wl_outputs` exists only to bridge the gap between
+            // a `wl_output` global being advertised and this correlation
+            // event arriving; once correlated, the entry serves no further
+            // purpose (`output_name` reads `wl_output_names` from here on,
+            // keyed by the object id just captured, not this map). Leaving
+            // it behind after every successful correlation — which is
+            // effectively every output, ever — grew this map without
+            // bound for the life of the long-running WM process.
+            Event::WlOutput { name } => {
+                if let Some(wl_output_proxy) = state.wm.pending_wl_outputs.remove(&name) {
+                    output.wl_output_object_id = Some(wl_output_proxy.id());
+                }
+            }
             // Story 2.8 Task 1: track the output's real global-coordinate
             // rectangle, previously discarded — `active_output_id`
             // (Task 3) now reads these to find which output the pointer is
             // actually over.
             Event::Position { x, y } => output.position = (x, y),
             Event::Dimensions { width, height } => output.dimensions = (width, height),
+        }
+    }
+}
+
+/// Story 2.9 Task 1.2: real event handling (not `delegate_noop!` —
+/// `wl_output`'s `Name` event is exactly the data this story needs), for
+/// every `wl_output` global bound in the `wl_registry::Event::Global`
+/// handler above. Only `Name` is handled; `Geometry`/`Mode`/`Scale`/`Done`/
+/// `Description` are redundant with `river_output_v1`'s own
+/// `position`/`dimensions` events (Story 2.8) or simply not needed here
+/// (Technical notes' scope boundary) and are intentionally ignored.
+impl Dispatch<wl_output::WlOutput, ()> for AppData {
+    fn event(
+        state: &mut Self,
+        proxy: &wl_output::WlOutput,
+        event: wl_output::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Name { name } = event {
+            state.wm.wl_output_names.insert(proxy.id(), name);
         }
     }
 }
