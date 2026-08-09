@@ -227,6 +227,21 @@ struct Seat {
     /// for this seat (Story 2.8 Task 2) — the AC 2 fallback case
     /// `WindowManager::active_output_id` handles explicitly.
     pointer_position: Option<(i32, i32)>,
+    /// Code review follow-up: whether the pinned terminal currently holds
+    /// this seat's real keyboard focus by deliberate choice (a direct
+    /// click), as opposed to `focus_top()`'s default `windows.back()`
+    /// resolution. Unlike the one-shot local flag this replaced, this
+    /// persists across `manage_seats` calls — the pinned terminal is
+    /// permanently excluded from `self.windows`' back-of-queue reordering
+    /// (FR4: always bottom of z-order), so once it's focused,
+    /// `windows.back()` never becomes it. Without this persisted flag,
+    /// `focus_top()` would silently steal focus back to whatever WAS at
+    /// `windows.back()` on every manage sequence *after* the one where the
+    /// terminal was clicked — not just the very next click — since nothing
+    /// remembered the terminal was deliberately focused a moment earlier
+    /// (confirmed live: focus visibly jumped away from the terminal on the
+    /// next keystroke-driven manage sequence, not just eventually).
+    terminal_intentionally_focused: bool,
 }
 
 #[derive(Debug)]
@@ -251,10 +266,16 @@ impl WindowManager {
         self.remove_outputs();
         self.remove_windows();
         self.remove_seats();
+        // Code review follow-up: captured before `init_new_windows` below
+        // flips every new window's `new` flag to `false` - `manage_seats`
+        // needs to know whether a genuinely new window showed up this pass
+        // (which should always claim focus, even from a deliberately-
+        // focused pinned terminal) versus nothing having changed at all.
+        let any_new_windows = self.windows.iter().any(|w| w.new);
         self.init_new_windows();
         self.init_new_seats(river_xkb, qh);
         self.manage_windows();
-        self.manage_seats(proxy);
+        self.manage_seats(proxy, any_new_windows);
         // Re-resolve size/position for every pinned terminal after
         // `manage_seats` may have switched a tag onto a different output
         // (or off every output) via a raw keybind - still within this same
@@ -844,7 +865,7 @@ impl WindowManager {
             .map(String::as_str)
     }
 
-    fn manage_seats(&mut self, wm_proxy: &RiverWindowManagerV1) {
+    fn manage_seats(&mut self, wm_proxy: &RiverWindowManagerV1, any_new_windows: bool) {
         // Computed before the `&mut self.wm_core` borrow below begins:
         // `active_output_id` is a whole-`&self` method call (it reads
         // `self.outputs`), which cannot run *during* the loop's mutable
@@ -865,16 +886,6 @@ impl WindowManager {
         let mut wm_core_guard = ipc::lock_recovering(&self.wm_core);
         let wm_core = &mut *wm_core_guard;
         for seat in self.seats.values_mut() {
-            // Code review follow-up (Story 1.5, finding #2): when the
-            // interacted window is the pinned terminal, this pass already
-            // gives it real Wayland keyboard focus directly below, so the
-            // unconditional `seat.focus_top` call further down (which
-            // always targets `self.windows.back()`, and thus would
-            // immediately re-focus + re-`place_top()` whatever real window
-            // is actually on top) must be skipped for this one pass —
-            // otherwise it would instantly undo the direct focus call in
-            // the same iteration.
-            let mut pinned_terminal_focused_directly = false;
             if let Some(window_proxy) = seat.interacted.take() {
                 let i = self
                     .windows
@@ -914,12 +925,27 @@ impl WindowManager {
                         eprintln!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
                     }
                     self.windows.insert(i, window);
-                    pinned_terminal_focused_directly = true;
+                    seat.terminal_intentionally_focused = true;
                 } else {
                     self.windows.push_back(window);
+                    // A different window just legitimately claimed focus —
+                    // the pinned terminal no longer holds it, regardless of
+                    // whether it did a moment ago.
+                    seat.terminal_intentionally_focused = false;
                 }
             }
-            if !pinned_terminal_focused_directly {
+            // Code review follow-up: `seat.terminal_intentionally_focused`
+            // (see its own doc comment) replaces a one-shot local flag that
+            // only survived for the single pass in which the pinned
+            // terminal was clicked — on every *later* pass, with no new
+            // click and no new window, `windows.back()` still pointed at
+            // whatever was focused *before* the terminal, so the old
+            // unconditional `focus_top()` call below silently stole focus
+            // right back. `any_new_windows` still forces `focus_top()` to
+            // run even while the terminal holds intentional focus — a
+            // freshly-mapped window should always be able to claim focus.
+            if any_new_windows || !seat.terminal_intentionally_focused {
+                seat.terminal_intentionally_focused = false;
                 seat.focus_top(&self.windows, wm_core);
             }
             if let Some(tag_id) = seat.do_action(
@@ -1079,6 +1105,7 @@ impl Seat {
             op_dy: 0,
             op_release: false,
             pointer_position: None,
+            terminal_intentionally_focused: false,
         }
     }
 
