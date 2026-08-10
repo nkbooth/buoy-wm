@@ -6,11 +6,14 @@
 //! notes "Spike finding"): building the checkbox-glyph-prefixed row list
 //! from a `wm`-reported tag registry and a focused view's current tags,
 //! rendering that list into `fuzzel --dmenu`'s tab-delimited stdin format,
-//! parsing `fuzzel`'s exit status/stdout back into a toggle-or-create-or-
-//! cancel decision (Story 2.3 adds the create-tag branch and the 64-tag-
-//! cap rejection row — see `docs/planning/epics/story-2-3.md`'s Technical
-//! notes "Free-text disambiguation evidence"), and applying a toggle to
-//! the loop's local tag-membership copy. None of this touches a socket or
+//! parsing `fuzzel`'s exit status/stdout back into a toggle-or-cancel
+//! decision, and applying a toggle to the loop's local tag-membership
+//! copy. The create-tag branch and its 64-tag-cap rejection row (Story
+//! 2.3 — see `docs/planning/epics/story-2-3.md`'s Technical notes
+//! "Free-text disambiguation evidence") belong to *switch* mode's
+//! [`parse_switch_selection`] as of Story 2.13, not to assign mode: a new
+//! tag is a place you go, not a label you attach. None of this touches a
+//! socket or
 //! spawns a process — that's `main.rs`'s job, kept separate so every
 //! decision here stays unit-testable without a live `fuzzel` binary, which
 //! this sandbox does not have.
@@ -77,13 +80,18 @@ fn sanitize_name(name: &str) -> String {
     name.replace(['\t', '\n'], " ")
 }
 
-/// One outcome of a single `fuzzel` invocation: an existing tag was
-/// selected (toggle it), free text was typed and confirmed (create a tag
-/// with that name), or the invocation is treated as cancelled.
+/// One outcome of a single assign-mode `fuzzel` invocation: an existing
+/// tag was selected (toggle it), or the invocation is treated as cancelled.
+///
+/// Story 2.13 removed this enum's `CreateTag` variant. Creating a tag is
+/// how you *start working somewhere new* — a switch, not an assignment —
+/// so it now lives exclusively in [`SwitchAction`]. Do not restore it here:
+/// two dialogs that both create means two cap-rejection paths and two
+/// idempotent-collision rules to keep in sync, which is precisely what
+/// Story 2.3's three code-review findings came out of.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PickerAction {
     Toggled(u8),
-    CreateTag(String),
     Cancelled,
 }
 
@@ -103,47 +111,38 @@ pub const REJECTION_MESSAGE: &str = "tag limit reached (64)";
 ///
 /// Defensive by construction for the cancel cases (Technical notes gap #5,
 /// Story 2.2: fuzzel's exact cancel exit code/stdout behavior isn't
-/// verifiable live in this sandbox) — *any* non-success exit, or empty
-/// (trimmed) stdout on a success exit, is unconditionally `Cancelled`,
-/// checked before the create/toggle split. This is also the rejection
-/// row's dismissal mechanism for free (Story 2.3): its second column is
-/// deliberately empty, so selecting it or pressing Escape both land on
-/// this same path.
+/// verifiable live in this sandbox) — *any* non-success exit is
+/// unconditionally `Cancelled`, checked before anything is parsed at all.
 ///
-/// Code review follow-up: `stdout` is now the **full raw line** `fuzzel`
+/// Code review follow-up: `stdout` is the **full raw line** `fuzzel`
 /// returns (no `--accept-nth`, see `main.rs`'s `run_fuzzel` doc comment
 /// for why that flag is gone — it corrupted every created tag's name).
-/// Splitting the trimmed line on the *last* tab distinguishes the two real
-/// cases: a real, rendered row (`"[ ] name\tid\n"`, always exactly one
-/// tab) comes back as the full line including that tab, so a `Some` split
-/// with an `id` part that parses as `u8` *and* is a member of
-/// `known_tag_ids` is `Toggled`; a typed, non-matching custom entry has no
-/// tab at all (`fuzzel(1)`'s documented "input string does not match any
-/// entry, printed as-is" behavior), so a `None` split is `CreateTag` with
-/// the raw trimmed text as the literal new tag name. A split that finds a
-/// tab but whose id part is empty (the rejection/apply-failed rows) or
-/// doesn't match a known id (should not occur — every real row's id is
-/// always current) safely falls back to `Cancelled` rather than creating
-/// a tag out of row furniture.
+/// Splitting the trimmed line on the *last* tab is what identifies a real
+/// pick: a rendered row (`"[ ] name\tid\n"`, always exactly one tab) comes
+/// back as the full line including that tab, so a `Some` split with an `id`
+/// part that parses as `u8` *and* is a member of `known_tag_ids` is
+/// `Toggled`.
+///
+/// Every other shape is `Cancelled`, including a typed, non-matching custom
+/// entry with no tab at all (`fuzzel(1)`'s documented "input string does
+/// not match any entry, printed as-is" behavior). That line used to mean
+/// `CreateTag` here; Story 2.13 moved creation to switch mode entirely, so
+/// assign mode now has nothing to do with a name that isn't already a tag —
+/// see [`parse_switch_selection`], which owns that arm now.
 pub fn parse_fuzzel_output(exit_success: bool, stdout: &str, known_tag_ids: &[u8]) -> PickerAction {
     if !exit_success {
         return PickerAction::Cancelled;
     }
     // Only the trailing newline is stripped, *not* a blanket `.trim()` -
-    // tab is ASCII whitespace, and a blanket trim would eat the
-    // rejection/apply-failed rows' significant trailing tab (their whole
-    // dismissal mechanism depends on a tab being present with nothing
-    // after it).
+    // tab is ASCII whitespace, and a blanket trim would eat a row's
+    // significant trailing tab.
     let trimmed = stdout.trim_end_matches('\n');
-    if trimmed.is_empty() {
-        return PickerAction::Cancelled;
-    }
     match trimmed.rsplit_once('\t') {
         Some((_, id)) => match id.parse::<u8>() {
             Ok(id) if known_tag_ids.contains(&id) => PickerAction::Toggled(id),
             _ => PickerAction::Cancelled,
         },
-        None => PickerAction::CreateTag(trimmed.to_string()),
+        None => PickerAction::Cancelled,
     }
 }
 
@@ -155,57 +154,6 @@ pub fn parse_fuzzel_output(exit_success: bool, stdout: &str, known_tag_ids: &[u8
 /// dismissal code.
 pub fn render_rejection_row() -> String {
     format!("{REJECTION_MESSAGE}\t\n")
-}
-
-/// Decides whether a chained `toggle-tag` request should follow a
-/// successful `create-tag` response resolving to `tag_id` (Code review
-/// follow-up, finding 1). `wm_core::TagRegistry::create_tag` is idempotent
-/// by exact name: a `create-tag` call can resolve to an *existing* tag's
-/// id instead of a genuinely new one. Blindly toggling that resolved id
-/// would, if it's already applied to the focused view, *remove* it
-/// (`toggle_view_tag`'s add-if-absent/remove-if-present semantics) — the
-/// opposite of what typing its name was supposed to do, with both IPC
-/// calls still reporting success and nothing signalling the mistake.
-///
-/// The correct rule is "ensure applied," not "blindly toggle": skip the
-/// chained toggle only when `tag_id` is already a member of `current_tags`
-/// (the focused view's current tag membership, as already tracked locally
-/// from `get-state`); otherwise send it — this covers both a genuinely new
-/// tag (never already a member, so the toggle-to-apply always fires) and a
-/// name-collision with an existing-but-not-yet-applied tag (the toggle
-/// still needs to fire to apply it).
-pub fn should_toggle_after_create(tag_id: u8, current_tags: &[u8]) -> bool {
-    !current_tags.contains(&tag_id)
-}
-
-/// Decides whether `tag_id` should be appended to the picker's local
-/// `tags` mirror after a `create-tag` response (Code review follow-up,
-/// finding 3 — a direct consequence of finding 1's idempotent-collision
-/// case): only push when `tag_id` isn't already present in `tags`, so a
-/// name-collision with an already-registered tag doesn't duplicate that
-/// tag's row on every subsequent `fuzzel` reopen for the rest of the
-/// session.
-pub fn should_add_to_tag_mirror(tag_id: u8, tags: &[TagDto]) -> bool {
-    !tags.iter().any(|t| t.id == tag_id)
-}
-
-/// The literal message row shown when a `create-tag` request succeeds but
-/// the immediately-chained `toggle-tag` request fails (Code review
-/// follow-up, finding 2). `wm_core` has no delete-tag API (ADR-006/v1
-/// scope, deliberate) — a tag once created is permanent for the session,
-/// so a failed chained toggle leaves a brand-new tag registered but never
-/// applied. `tag-picker` is spawned by a WM keybind with no attached
-/// terminal, so a bare `eprintln!` is invisible to the user; this row
-/// surfaces the failure in the only UI surface the user can actually see.
-/// Deliberately distinct wording from [`REJECTION_MESSAGE`] so the two
-/// synthetic notices are never confused with each other.
-pub const CREATE_APPLY_FAILED_MESSAGE: &str = "tag created but not applied — toggle it manually";
-
-/// Renders [`CREATE_APPLY_FAILED_MESSAGE`] as a synthetic checklist row:
-/// same shape, and same empty-second-column dismissal mechanism, as
-/// [`render_rejection_row`].
-pub fn render_create_apply_failed_row() -> String {
-    format!("{CREATE_APPLY_FAILED_MESSAGE}\t\n")
 }
 
 /// Toggles `tag_id`'s membership in `tags` in place: removes it if
@@ -228,23 +176,31 @@ pub fn toggle_local_membership(tags: &mut Vec<u8>, tag_id: u8) {
 /// Story 2.10 Task 5). Restores the guard `should_open_picker` used to
 /// provide (deleted when the old "must have a focused view" precondition
 /// was relaxed) with the same shape, generalized to the new either/or
-/// requirement. Called *before* any wire traffic in `run_assign_mode` —
-/// without it, a `CreateTag` request could succeed and permanently
-/// register a tag (no delete-tag API exists) in the rare case where
-/// neither a view nor an output is known, only to then have nowhere to
-/// apply or switch to it.
+/// requirement. Called *before* any wire traffic in `run_assign_mode`.
+///
+/// Story 2.13 removed assign mode's create path, so this guard's original
+/// rationale — a `CreateTag` request permanently registering a tag (no
+/// delete-tag API exists) that then has nowhere to be applied — no longer
+/// applies. Its own claim still does, and is why it stays: a pick with
+/// neither a view to toggle nor an output to switch has no destination at
+/// all, so opening the picker could only waste the user's time.
 pub fn should_open_picker(view_id: Option<u64>, output_id: Option<u64>) -> bool {
     view_id.is_some() || output_id.is_some()
 }
 
 /// One outcome of a single switch-mode `fuzzel` invocation (Story 2.4):
-/// an existing tag was selected (switch to it), or the invocation is
-/// treated as cancelled. Deliberately no `CreateTag`-shaped variant —
-/// switching only ever operates on existing tags (EXPERIENCE.md), unlike
-/// assign mode's [`PickerAction`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// an existing tag was selected (switch to it), free text was typed and
+/// confirmed (create a tag with that name, then switch to it — Story
+/// 2.13), or the invocation is treated as cancelled.
+///
+/// `CreateTag` is the variant Story 2.13 moved here from assign mode's
+/// [`PickerAction`]: creating a tag is how you start working somewhere
+/// new, which is a switch, not an assignment. Not `Copy` as a result — the
+/// typed name is an owned `String`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum SwitchAction {
     Selected(u8),
+    CreateTag(String),
     Cancelled,
 }
 
@@ -262,13 +218,24 @@ pub fn render_switch_list(tags: &[TagDto]) -> String {
 /// Decides the outcome of one switch-mode `fuzzel` invocation from its
 /// exit status, captured stdout, and the tag ids actually rendered this
 /// invocation (`known_tag_ids`). Structurally the same shape as
-/// [`parse_fuzzel_output`] (see its doc comment for why `stdout` is now
-/// the full raw line, not an `--accept-nth`-extracted id) minus the
-/// `CreateTag` catch-all arm: anything that isn't a real matched row
-/// (non-success exit, empty stdout, no tab at all, or a tab with an
-/// in-range-but-unregistered numeral) is simply `Cancelled`, never treated
-/// as a create attempt — switching only ever operates on existing tags
-/// (`EXPERIENCE.md`).
+/// [`parse_fuzzel_output`] (see its doc comment for why `stdout` is the
+/// full raw line, not an `--accept-nth`-extracted id), plus the
+/// `CreateTag` catch-all arm Story 2.13 moved here from that function:
+/// a line with no tab at all is `fuzzel(1)`'s documented "input string
+/// does not match any of the entries, printed as is" behavior, i.e. a name
+/// the user typed that isn't a tag yet.
+///
+/// A whitespace-only (or empty) typed line is `Cancelled`, not a create.
+/// `wm_core` has no delete-tag API by design (ADR-006), so a tag created
+/// from a stray Enter on a blank-looking input box would be stuck in the
+/// registry for the whole session as an unreadable, unselectable row. This
+/// is deliberately *not* a trim — `"web "` still creates `"web "`,
+/// unchanged from the behavior this arm had in assign mode; only the
+/// all-whitespace case is refused.
+///
+/// Everything else is `Cancelled`: a non-success exit, or a tab whose id
+/// part is empty (the cap-rejection row's dismissal mechanism) or doesn't
+/// match a currently-rendered id.
 pub fn parse_switch_selection(
     exit_success: bool,
     stdout: &str,
@@ -280,15 +247,13 @@ pub fn parse_switch_selection(
     // See `parse_fuzzel_output`'s doc comment: only the trailing newline
     // is stripped, not a blanket `.trim()`, since tab is ASCII whitespace.
     let trimmed = stdout.trim_end_matches('\n');
-    if trimmed.is_empty() {
-        return SwitchAction::Cancelled;
-    }
     match trimmed.rsplit_once('\t') {
         Some((_, id)) => match id.parse::<u8>() {
             Ok(id) if known_tag_ids.contains(&id) => SwitchAction::Selected(id),
             _ => SwitchAction::Cancelled,
         },
-        None => SwitchAction::Cancelled,
+        None if trimmed.trim().is_empty() => SwitchAction::Cancelled,
+        None => SwitchAction::CreateTag(trimmed.to_string()),
     }
 }
 
@@ -456,38 +421,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_fuzzel_output_returns_create_tag_for_freeform_text_with_no_tab() {
-        // A typed, non-matching custom entry has no tab at all —
-        // `fuzzel(1)`'s documented "input string does not match any of the
-        // entries, printed as is" behavior — so this is exactly the
-        // `CreateTag` case, the *primary* real-world path for creating a
-        // new tag, not an edge case.
+    fn parse_fuzzel_output_returns_cancelled_for_freeform_text_with_no_tab() {
+        // Story 2.13: this assertion is inverted from Story 2.3's. A typed,
+        // non-matching custom entry (no tab at all — `fuzzel(1)`'s
+        // documented "input string does not match any of the entries,
+        // printed as is" behavior) used to be assign mode's `CreateTag`
+        // path. Creation now lives in the switcher only, so the same input
+        // is simply cancelled here.
         assert_eq!(
             parse_fuzzel_output(true, "deploy-watch\n", &[0, 1, 2]),
-            PickerAction::CreateTag("deploy-watch".into())
+            PickerAction::Cancelled
         );
     }
 
     #[test]
-    fn parse_fuzzel_output_returns_create_tag_for_a_bare_numeral_with_no_tab() {
-        // A typed tag name that happens to look like a number is still a
-        // create, not a toggle attempt, as long as it has no tab — there is
-        // no real row this could be confused with. ADR-006 doesn't forbid
-        // numeral-shaped tag names.
+    fn parse_fuzzel_output_returns_cancelled_for_a_bare_numeral_with_no_tab() {
+        // Same inversion as above for a numeral-shaped typed name — with no
+        // create path in assign mode there is nothing for a no-tab line to
+        // mean, whatever it looks like.
         assert_eq!(
             parse_fuzzel_output(true, "5\n", &[0, 1, 2]),
-            PickerAction::CreateTag("5".into())
-        );
-    }
-
-    #[test]
-    fn parse_fuzzel_output_returns_cancelled_for_the_rejection_row_selection() {
-        // Direct round-trip test of `render_rejection_row`'s own dismissal
-        // mechanism: selecting it returns the full line with an empty id
-        // part after the tab, which fails to parse and falls to
-        // `Cancelled` — not `CreateTag` with the message text as a name.
-        assert_eq!(
-            parse_fuzzel_output(true, &render_rejection_row(), &[0, 1, 2]),
             PickerAction::Cancelled
         );
     }
@@ -521,8 +474,9 @@ mod tests {
         // `describe_wm_core_error` returns for `TagLimitReached`; column 2
         // is deliberately empty, which is what makes selecting this row
         // land on the same cancelled path as pressing Escape (Task 1.2;
-        // see `parse_fuzzel_output_returns_cancelled_for_the_rejection_row_selection`
-        // for the actual round-trip through `parse_fuzzel_output`).
+        // see `parse_switch_selection_returns_cancelled_for_the_rejection_row_selection`
+        // for the actual round-trip, which Story 2.13 moved to switch mode
+        // along with the create path that is the only way to reach the cap).
         assert_eq!(render_rejection_row(), "tag limit reached (64)\t\n");
     }
 
@@ -579,69 +533,6 @@ mod tests {
         assert_eq!(tags, original);
     }
 
-    #[test]
-    fn should_toggle_after_create_true_for_genuinely_new_tag() {
-        // Code review follow-up, finding 1(a): a genuinely new tag can
-        // never already be a member of `current_tags`, so the
-        // toggle-to-apply must still fire — existing behavior preserved.
-        assert!(should_toggle_after_create(5, &[0, 1]));
-    }
-
-    #[test]
-    fn should_toggle_after_create_false_when_resolved_tag_already_applied() {
-        // Code review follow-up, finding 1(b): `create-tag` resolved to an
-        // existing tag id (name-collision, idempotent by name) that is
-        // already applied to the focused view — skip the toggle, since
-        // sending it would remove the tag instead of leaving it applied.
-        assert!(!should_toggle_after_create(1, &[0, 1]));
-    }
-
-    #[test]
-    fn should_toggle_after_create_true_when_resolved_tag_exists_but_not_applied() {
-        // Code review follow-up, finding 1(c): `create-tag` resolved to an
-        // existing tag id (name-collision) that is *not* currently applied
-        // to the focused view — the toggle must still fire to apply it,
-        // this is "ensure applied," not "skip all toggles on collision."
-        assert!(should_toggle_after_create(2, &[0, 1]));
-    }
-
-    #[test]
-    fn should_add_to_tag_mirror_true_when_tag_id_absent() {
-        assert!(should_add_to_tag_mirror(
-            5,
-            &[tag(0, "web"), tag(1, "chat")]
-        ));
-    }
-
-    #[test]
-    fn should_add_to_tag_mirror_false_when_tag_id_already_present() {
-        // Code review follow-up, finding 3: a name-collision resolves to an
-        // already-known tag id — pushing it again would duplicate that
-        // tag's row in every subsequent picker reopen this session.
-        assert!(!should_add_to_tag_mirror(
-            1,
-            &[tag(0, "web"), tag(1, "chat")]
-        ));
-    }
-
-    #[test]
-    fn render_create_apply_failed_row_is_the_literal_message_with_an_empty_accept_column() {
-        // Code review follow-up, finding 2: column 1 is the literal
-        // CREATE_APPLY_FAILED_MESSAGE, column 2 is deliberately empty,
-        // same dismissal mechanism as render_rejection_row.
-        assert_eq!(
-            render_create_apply_failed_row(),
-            "tag created but not applied — toggle it manually\t\n"
-        );
-    }
-
-    #[test]
-    fn create_apply_failed_message_is_textually_distinct_from_rejection_message() {
-        // Code review follow-up, finding 2: the two synthetic notice rows
-        // must never be visually/textually confusable with each other.
-        assert_ne!(CREATE_APPLY_FAILED_MESSAGE, REJECTION_MESSAGE);
-    }
-
     // --- Story 2.4: switch-mode rendering and selection parsing ---
 
     #[test]
@@ -696,24 +587,54 @@ mod tests {
     }
 
     #[test]
-    fn parse_switch_selection_returns_cancelled_for_freeform_text_with_no_tab() {
-        // The deliberate, load-bearing difference from assign mode's
-        // `parse_fuzzel_output`: switch mode has no create-tag branch at
-        // all, so a typed, non-matching entry (no tab at all) is simply
-        // cancelled, never treated as a create attempt.
+    fn parse_switch_selection_returns_create_tag_for_freeform_text_with_no_tab() {
+        // Story 2.13: the deliberate, load-bearing difference from assign
+        // mode's `parse_fuzzel_output` now points the other way — switch
+        // mode is the *only* mode that creates. A typed, non-matching entry
+        // (no tab at all) is the primary real-world path for creating a new
+        // tag and switching to it in one action, not an edge case.
         assert_eq!(
             parse_switch_selection(true, "deploy-watch\n", &[0, 1, 2]),
+            SwitchAction::CreateTag("deploy-watch".into())
+        );
+    }
+
+    #[test]
+    fn parse_switch_selection_returns_create_tag_for_a_bare_numeral_with_no_tab() {
+        // A typed tag name that happens to look like a number is still a
+        // create, not a selection — there is no real row a tab-less line
+        // could be confused with, and ADR-006 doesn't forbid numeral-shaped
+        // tag names.
+        assert_eq!(
+            parse_switch_selection(true, "99\n", &[0, 1, 2]),
+            SwitchAction::CreateTag("99".into())
+        );
+    }
+
+    #[test]
+    fn parse_switch_selection_returns_cancelled_for_whitespace_only_input() {
+        // Story 2.13: `wm_core` has no delete-tag API (ADR-006), so a tag
+        // created from a stray Enter on a blank-looking input box would be
+        // stuck in the registry for the session, rendering as an
+        // unreadable, unselectable row. Empty input was already cancelled;
+        // whitespace-only lands on the same path. Note this is *not* a
+        // trim — `"web "` still creates `"web "` — only the all-whitespace
+        // case is refused.
+        assert_eq!(
+            parse_switch_selection(true, "   \n", &[0, 1, 2]),
             SwitchAction::Cancelled
         );
     }
 
     #[test]
-    fn parse_switch_selection_returns_cancelled_for_a_bare_numeral_with_no_tab() {
-        // Unlike assign mode, a numeral-shaped typed entry with no tab
-        // never becomes a selection, since switch mode has no create path
-        // to fall back to at all.
+    fn parse_switch_selection_returns_cancelled_for_the_rejection_row_selection() {
+        // Story 2.13: the cap-rejection row moved to switch mode along with
+        // the create path that is the only way to reach it. Same dismissal
+        // mechanism as it had in assign mode — its empty id column fails to
+        // parse, landing on `Cancelled` rather than being treated as a
+        // typed name of the message text.
         assert_eq!(
-            parse_switch_selection(true, "99\n", &[0, 1, 2]),
+            parse_switch_selection(true, &render_rejection_row(), &[0, 1, 2]),
             SwitchAction::Cancelled
         );
     }

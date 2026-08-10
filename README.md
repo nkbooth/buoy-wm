@@ -76,7 +76,7 @@ These are the defaults, used when no config file overrides them. All use
 | `Super+Tab` | Cycle the active output to the next tag |
 | `Super+R` | Open the application launcher (`fuzzel`) |
 | `Super+A` | Open the tag-assignment picker for the focused window |
-| `Super+S` | Open the tag-switch picker for the active output |
+| `Super+S` | Open the tag-switch picker for the active output (also creates tags) |
 | `Super+Shift+?` | Show the hotkey cheat-sheet |
 | `Super+Esc` | Exit the session |
 | `Super+Left-click` | Move a window (drag) |
@@ -91,13 +91,22 @@ reflects your config rather than this table.
 
 Opens a `fuzzel` checklist of every tag, checked for the tags the focused
 window currently has. Type to filter the list; selecting a row toggles that
-tag on the window. Typing a name that doesn't match an existing tag and
-confirming it creates a new tag and applies it.
+tag on the window and reopens the list, so several tags can be toggled in
+one visit. Only existing tags — new tags are created from the switcher
+below.
 
 ### Tag-switch picker (`Super+S`)
 
 Opens a `fuzzel` list of every tag. Selecting one switches the active
 output to display that tag (spawning its pinned terminal on first use).
+
+Typing a name that matches no existing tag and confirming it creates that
+tag and switches to it in the same action — creating a tag is how you start
+working somewhere new, so it lives here rather than in the assignment
+picker. Typing the exact name of a tag that already exists switches to it
+rather than duplicating it. At the 64-tag registry cap the picker reopens
+with the rejection shown and your typed name restored, and nothing is
+created or switched.
 
 ## Development
 

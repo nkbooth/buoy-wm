@@ -489,7 +489,7 @@ impl Action {
             Action::Exit => "Exit session".to_string(),
             Action::CycleTag => "Cycle tag".to_string(),
             Action::TagPicker => "Tag manager (assign tags to focused window)".to_string(),
-            Action::TagSwitch => "Switch tag".to_string(),
+            Action::TagSwitch => "Switch tag (or type a new name to create)".to_string(),
             Action::Hotkeys => "Show this hotkey list".to_string(),
             Action::Move => "Move window".to_string(),
             Action::Resize => "Resize window".to_string(),
