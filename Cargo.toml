@@ -10,3 +10,11 @@
 [workspace]
 resolver = "2"
 members = ["wm", "tag-picker", "status-bar"]
+
+# Release builds are what `scripts/install.sh` copies into
+# `~/.local/lib/buoy-wm`, where they run as a long-lived session process
+# rather than a short-lived command — extra link-time work is paid once at
+# build and recovered over the whole login session.
+[profile.release]
+lto = "thin"
+strip = true

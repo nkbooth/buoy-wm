@@ -118,4 +118,23 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## Installing
+
+The session must not run out of `target/`, which `cargo clean` wipes. Build a
+release inside the devcontainer, then install from the host:
+
+```sh
+cargo build --workspace --release   # in the devcontainer
+./scripts/install.sh                # on the host
+```
+
+All three binaries go to `~/.local/lib/buoy-wm` (override with
+`BUOY_INSTALL_DIR`), and they must stay in one directory — the WM finds
+`tag-picker` as a sibling of its own executable. Only `buoy-wm` is symlinked
+onto `PATH`; nothing resolves the other two through it.
+
+River `exec`s the WM as the session leader, so a broken install means a black
+screen and a bounce back to GDM with no shell to recover from. Verify from a
+TTY or a nested river before logging out.
+
 Story specs and Dev Agent Records live under `docs/planning/epics/`.
