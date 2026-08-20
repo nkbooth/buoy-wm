@@ -97,6 +97,24 @@ fn log_wm_core_err(result: Result<(), WmCoreError>, context: &str) {
     }
 }
 
+/// Formats a protocol enum for a log line without `WEnum`'s wrapper.
+///
+/// `{:?}` on a `WEnum` prints `Value(Disabled)`, leaking a detail of how
+/// wayland-rs models "this could be a value the client's copy of the
+/// protocol has never heard of" into output a person reads. An unknown
+/// value still has to say so — it means river and this binary disagree
+/// about the protocol — but it says it in words rather than a wrapper.
+fn wenum_label<T: Debug>(value: wayland_client::WEnum<T>) -> String {
+    // Matched on the variants rather than via `into_result`, whose `Err`
+    // carries a pre-formatted "Unknown numeric value N for enum ..." string
+    // — the raw number is the useful half, and the type name is already
+    // implied by the log line it lands in.
+    match value {
+        wayland_client::WEnum::Value(known) => format!("{known:?}"),
+        wayland_client::WEnum::Unknown(raw) => format!("unknown ({raw})"),
+    }
+}
+
 /// Every child this WM spawns is fire-and-forget — nothing ever reads an
 /// exit status. Without a `wait` each finished child lingers as a zombie
 /// for the lifetime of the session, and this process is a long-lived
@@ -2476,12 +2494,15 @@ impl Dispatch<RiverLibinputDeviceV1, ()> for AppData {
             // configured device the confirmation that it took effect.
             Event::TapCurrent { state: tap_state } => {
                 if let Some(name) = state.wm.configured_device_name(&proxy.id()) {
-                    eprintln!("libinput {name:?}: tap-to-click is {tap_state:?}");
+                    eprintln!(
+                        "libinput {name:?}: tap-to-click is {}",
+                        wenum_label(tap_state)
+                    );
                 }
             }
             Event::ClickMethodCurrent { method } => {
                 if let Some(name) = state.wm.configured_device_name(&proxy.id()) {
-                    eprintln!("libinput {name:?}: click method is {method:?}");
+                    eprintln!("libinput {name:?}: click method is {}", wenum_label(method));
                 }
             }
             _ => {}
@@ -2597,6 +2618,27 @@ mod tests {
     // handler so it's testable without actually calling `current_exe()`.
     // The `current_exe()`/`Command::spawn()` call site itself stays
     // untested I/O glue, same carve-out as the rest of this file.
+
+    #[test]
+    fn wenum_label_prints_a_known_value_without_the_wrapper() {
+        use river::river_libinput_device_v1::TapState;
+        assert_eq!(
+            wenum_label(wayland_client::WEnum::Value(TapState::Disabled)),
+            "Disabled"
+        );
+    }
+
+    /// An unrecognized value means river and this binary disagree about the
+    /// protocol, which has to stay visible rather than being smoothed into
+    /// something that looks like a real setting.
+    #[test]
+    fn wenum_label_names_an_unknown_value_and_keeps_the_raw_number() {
+        use river::river_libinput_device_v1::TapState;
+        assert_eq!(
+            wenum_label::<TapState>(wayland_client::WEnum::Unknown(7)),
+            "unknown (7)"
+        );
+    }
 
     #[test]
     fn tag_picker_path_resolves_to_sibling_of_debug_wm_exe() {
