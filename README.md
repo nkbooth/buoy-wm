@@ -8,6 +8,8 @@ and input while `buoy` decides window policy. It owns **all** tag state
 itself — the compositor keeps none — so the model below is entirely `buoy`'s
 to define.
 
+It has been the author's daily driver since August 2026.
+
 ## The idea
 
 Two convictions shape everything here.
