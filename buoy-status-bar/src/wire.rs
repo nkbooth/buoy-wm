@@ -1,18 +1,32 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
-//! `status-bar`'s own minimal mirror of the wire shapes it needs from
-//! `wm/src/ipc/protocol.rs` (ADR-007), following `tag-picker/src/wire.rs`'s
+//! `buoy-status-bar`'s own minimal mirror of the wire shapes it needs from
+//! `wm/src/ipc/protocol.rs` (ADR-007), following `buoy-tag-picker/src/wire.rs`'s
 //! exact existing shape and doc-comment convention (Story 2.5 Task 1.3).
 //!
 //! **Why this is a third copy, not a shared crate (the three-strike-DRY
 //! decision, recorded here in full so a future reader hits the same
-//! reasoning at the same place as the story file).** `tag-picker/src/
+//! reasoning at the same place as the story file).** `buoy-tag-picker/src/
 //! wire.rs`'s own doc comment already named this exact moment: "A shared
-//! crate is deferred to whichever story first gives `status-bar` (Story
-//! 2.5) the same need, a genuine third consumer." `status-bar` is that
+//! crate is deferred to whichever story first gives `buoy-status-bar` (Story
+//! 2.5) the same need, a genuine third consumer." `buoy-status-bar` is that
 //! third independent occurrence (`wm/src/ipc/protocol.rs`,
-//! `tag-picker/src/wire.rs`, and this module). The three-strike rule
+//! `buoy-tag-picker/src/wire.rs`, and this module). The three-strike rule
 //! exists to bound *future* maintenance drift across call sites that keep
 //! evolving independently — but this is the last story in Epic 2 and in
 //! the entire currently planned project, so there is no fourth consumer
@@ -31,7 +45,7 @@
 //! too: `views`/`focused_view` are omitted, since this client has no use
 //! for them (serde's default unknown-field tolerance means the server can
 //! keep sending them without this client having to model them) — but,
-//! unlike `tag-picker`, `outputs` **is** modeled, since `status-bar` is the
+//! unlike `buoy-tag-picker`, `outputs` **is** modeled, since `buoy-status-bar` is the
 //! first client to need per-output current-tag data at all.
 //! `Response::Ok`/`TagCreated` are kept only so `parse_response_rejects_*`
 //! negative tests and any defensive "unexpected response" handling in
@@ -57,7 +71,7 @@ pub struct TagDto {
 
 /// An output as it appears on the wire: `id` and its currently-displayed
 /// tag, if any. The first client-side mirror to need this DTO at all
-/// (`tag-picker` never needed per-output state).
+/// (`buoy-tag-picker` never needed per-output state).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct OutputDto {
     pub id: u64,

@@ -1,9 +1,23 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
-//! Pure CLI-argument-to-mode decision (Story 2.4 Task 4). `tag-picker` is
+//! Pure CLI-argument-to-mode decision (Story 2.4 Task 4). `buoy-tag-picker` is
 //! invoked with zero args (`Mod4+A`'s existing "assign mode") or as
-//! `tag-picker switch <output_id>` (`Mod4+S`'s new "switch mode") — this
+//! `buoy-tag-picker switch <output_id>` (`Mod4+S`'s new "switch mode") — this
 //! module decides which, and rejects any other argument shape before
 //! `main` ever connects to the socket, the same "fail closed on malformed
 //! input" discipline `wm`'s own `parse_request` applies (NFR2-style,
@@ -20,7 +34,7 @@
 /// `SwitchTag` request. Its zero-args invocation is still byte-for-byte
 /// unchanged, now with `output_id: None, output_name: None`. `Switch`
 /// carries the `output_id` `wm` resolved once at spawn time via its own
-/// `WindowManager::active_output_id` (Task 1.2) — `tag-picker` treats it as
+/// `WindowManager::active_output_id` (Task 1.2) — `buoy-tag-picker` treats it as
 /// an opaque argument, never re-deriving "the active output" itself. Both
 /// variants' `output_name` is the real Wayland connector name (e.g.
 /// `"eDP-1"`) `wm`'s `WindowManager::output_name` resolved for that same
@@ -52,7 +66,7 @@ pub enum Mode {
 /// `fuzzel --output=`); it now means an output *id* (a `u64`, for the
 /// `SwitchTag` IPC request Task 5's no-focused-window fallback needs to
 /// send), with the name becoming a second, optional argument below. This is
-/// safe because `tag-picker` has exactly one real caller — `wm`'s own spawn
+/// safe because `buoy-tag-picker` has exactly one real caller — `wm`'s own spawn
 /// command — updated in the same story (see this story's Technical notes);
 /// contrast with `Request`/`Response` shapes in `wire.rs`, a stable-ish
 /// contract between two independently-evolving binaries that only ever
@@ -80,12 +94,12 @@ pub enum Mode {
 ///
 /// Code review follow-up (Story 2.9): a one-argument invocation used to be
 /// rejected when that argument was exactly `"switch"` (to give a clearer
-/// error for a mistyped `tag-picker switch` missing its output id) — but
+/// error for a mistyped `buoy-tag-picker switch` missing its output id) — but
 /// `wm` used to always spawn assign mode with the active output's *real*
 /// connector name as this single argument, and nothing stopped a real
 /// Wayland output from being named `"switch"`. Story 2.10's grammar change
 /// makes this moot either way: a single argument is now always parsed as a
-/// `u64` output id, so a bare `tag-picker switch` typed by hand simply
+/// `u64` output id, so a bare `buoy-tag-picker switch` typed by hand simply
 /// fails to parse `"switch"` as a number and is rejected — no longer a
 /// special case, just the general non-numeric-id rejection path.
 pub fn parse_args(args: &[String]) -> Result<Mode, String> {
@@ -123,7 +137,7 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
             })
             .map_err(|_| format!("invalid output id: {id}")),
         _ => Err(format!(
-            "usage: tag-picker [<output_id> [<output_name>]] | [switch <output_id> [<output_name>]], got: {args:?}"
+            "usage: buoy-tag-picker [<output_id> [<output_name>]] | [switch <output_id> [<output_name>]], got: {args:?}"
         )),
     }
 }

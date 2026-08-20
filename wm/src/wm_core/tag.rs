@@ -1,12 +1,26 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
 //! Tag registry: named, arbitrary-string tags backed by a 64-slot `u64`
 //! bitset (ADR-006). Tag creation is idempotent by name; there is no
 //! delete-tag API in v1 — that omission is deliberate, not an oversight.
 
 // This module's public API is wired in: `create_tag` (via
-// `WmCore::create_tag`, `tag-picker`'s IPC-driven tag-creation flow),
+// `WmCore::create_tag`, `buoy-tag-picker`'s IPC-driven tag-creation flow),
 // `mark_terminal_spawned` (via
 // `WmCore::claim_pinned_terminal_spawn`/`ensure_pinned_terminal_spawned`,
 // the pinned-terminal lazy-spawn), and this registry's ordering (via
@@ -60,7 +74,7 @@ impl TagRegistry {
 
     /// Returns the number of registered tags.
     // Not called from production code since the `Mod4+T` generated-name
-    // keybind that used it was removed (superseded by `tag-picker`'s
+    // keybind that used it was removed (superseded by `buoy-tag-picker`'s
     // named tag-creation flow) - kept as public API/for test ergonomics,
     // same precedent as `new()` above.
     #[allow(dead_code)]

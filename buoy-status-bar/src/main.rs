@@ -1,8 +1,22 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
-//! `status-bar`: a companion binary driving one waybar `custom/tag` module
-//! per physical output (Story 2.5). Invoked as `status-bar <output_id>`,
+//! `buoy-status-bar`: a companion binary driving one waybar `custom/tag` module
+//! per physical output (Story 2.5). Invoked as `buoy-status-bar <output_id>`,
 //! `output_id` being `wm`'s own raw `OutputId` (see `wire`'s module doc
 //! comment and the story's Description "output-identity mapping gap" for
 //! why no connector-name mapping is attempted here). Connects to `wm`'s
@@ -15,7 +29,7 @@
 //! `format_waybar_line`, `changed`, `resolve_socket_path`) is unit-tested
 //! in `bar_line`/`wire`/`socket_path` and this module's own `tests`;
 //! nothing in `try_get_state`/the poll loop has its own RED/GREEN tests
-//! (same carve-out class as `tag-picker/src/main.rs`'s own connection
+//! (same carve-out class as `buoy-tag-picker/src/main.rs`'s own connection
 //! glue).
 
 mod bar_line;
@@ -27,17 +41,17 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-/// `status-bar`'s poll cadence (Task 1.4): comfortably under typical
+/// `buoy-status-bar`'s poll cadence (Task 1.4): comfortably under typical
 /// human just-noticeable-lag for a passive display, far below any
 /// NFR1-relevant threshold (NFR1 bounds `wm`'s own action-handling
 /// latency, not this passive bar's refresh cadence). Not user-configurable
 /// in v1 (YAGNI — a single hobby user, no stated need for tuning).
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Parses `status-bar`'s sole CLI argument, the target output's numeric
+/// Parses `buoy-status-bar`'s sole CLI argument, the target output's numeric
 /// `OutputId`. Exactly one numeric argument is accepted; zero, more than
 /// one, or a non-numeric argument is a startup error — the same
-/// fail-closed-on-malformed-invocation discipline `tag-picker`'s own
+/// fail-closed-on-malformed-invocation discipline `buoy-tag-picker`'s own
 /// `mode::parse_args` established (Story 2.4 Task 1.1), checked **before**
 /// `main` ever touches the socket.
 fn parse_output_id(args: &[String]) -> Result<u64, String> {
@@ -45,7 +59,7 @@ fn parse_output_id(args: &[String]) -> Result<u64, String> {
         [id] => id
             .parse::<u64>()
             .map_err(|_| format!("invalid output id: {id}")),
-        _ => Err(format!("usage: status-bar <output_id>, got: {args:?}")),
+        _ => Err(format!("usage: buoy-status-bar <output_id>, got: {args:?}")),
     }
 }
 
@@ -109,7 +123,7 @@ fn main() {
     let output_id = match parse_output_id(&args) {
         Ok(output_id) => output_id,
         Err(message) => {
-            eprintln!("status-bar: {message}");
+            eprintln!("buoy-status-bar: {message}");
             std::process::exit(1);
         }
     };
@@ -132,7 +146,7 @@ fn main() {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
             if let Err(e) = writeln!(handle, "{line}").and_then(|()| handle.flush()) {
-                eprintln!("status-bar: failed to write to stdout: {e}");
+                eprintln!("buoy-status-bar: failed to write to stdout: {e}");
             } else {
                 last_printed = Some(line);
             }
@@ -178,7 +192,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let socket_path = std::env::temp_dir().join(format!(
-            "status-bar-connect-with-timeout-test-{}.sock",
+            "buoy-status-bar-connect-with-timeout-test-{}.sock",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&socket_path);

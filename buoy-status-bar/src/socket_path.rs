@@ -1,14 +1,27 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
 //! Mirrors `wm/src/ipc/server.rs`'s `resolve_socket_path`/
-//! `default_socket_path` byte-for-byte. Both processes must resolve to the
-//! *same* socket path to talk to each other, so this is a deliberate,
-//! two-occurrence-tolerated duplication (Technical notes gap #3) rather
-//! than a shared crate — keep the two copies in sync if the resolution
-//! rule ever changes; a future shared crate (deferred to a genuine third
-//! consumer, e.g. Story 2.5's `status-bar`) would eliminate this drift
-//! risk.
+//! `default_socket_path` byte-for-byte, same as `buoy-tag-picker/src/
+//! socket_path.rs`'s own copy. This is the third accepted occurrence of
+//! this duplication (Story 2.5 Task 1.3/`wire.rs`'s module doc comment
+//! records the full three-strike-DRY rationale for why no shared crate is
+//! extracted here) — keep all three copies in sync if the resolution rule
+//! ever changes.
 
 use std::path::PathBuf;
 

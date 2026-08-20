@@ -1,15 +1,45 @@
 # SPDX-FileCopyrightText: © 2026 Nick Booth
-# SPDX-License-Identifier: 0BSD
+# SPDX-License-Identifier: RPL-1.5
 #
-# Story 2.2 Task 2: workspace root manifest, added when `tag-picker` became
+# Unless explicitly acquired and licensed from Licensor under another
+# license, the contents of this file are subject to the Reciprocal Public
+# License ("RPL") Version 1.5, or subsequent versions as allowed by the
+# RPL, and You may not copy or use this file in either source code or
+# executable form, except in compliance with the terms and conditions of
+# the RPL.
+#
+# All software distributed under the RPL is provided strictly on an "AS
+# IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+# LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+# LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+# language governing rights and limitations under the RPL.
+#
+# Story 2.2 Task 2: workspace root manifest, added when `buoy-tag-picker` became
 # the first second Cargo target. `wm/` remains a normal member manifest
 # (no `[workspace]` table of its own); Story 2.1's Technical notes deferred
 # exactly this conversion to "whichever future story first adds
-# `tag-picker`/`status-bar` as actual separate Cargo targets."
+# `buoy-tag-picker`/`buoy-status-bar` as actual separate Cargo targets."
 
 [workspace]
 resolver = "2"
-members = ["wm", "tag-picker", "status-bar"]
+members = ["wm", "buoy-tag-picker", "buoy-status-bar"]
+
+# Shared package metadata. Every member inherits these with
+# `field.workspace = true`, so the license, MSRV and repository URL can
+# never drift apart between the three published crates.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Edition 2024 stabilised in Rust 1.85; nothing here needs anything newer.
+rust-version = "1.85"
+authors = ["Nick Booth <n1cck@onlyhams.radio>"]
+license = "RPL-1.5"
+repository = "https://github.com/nkbooth/buoy-wm"
+homepage = "https://github.com/nkbooth/buoy-wm"
+keywords = ["wayland", "river", "window-manager", "tiling", "compositor"]
+categories = ["command-line-utilities", "gui"]
+
 
 # Release builds are what `scripts/install.sh` copies into
 # `~/.local/lib/buoy-wm`, where they run as a long-lived session process

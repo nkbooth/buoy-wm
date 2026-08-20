@@ -1,7 +1,21 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
-//! `tag-picker`: a companion binary spawned by `wm`'s `Mod4+A` ("assign
+//! `buoy-tag-picker`: a companion binary spawned by `wm`'s `Mod4+A` ("assign
 //! mode", Story 2.2 Task 7) and `Mod4+S` ("switch mode", Story 2.4 Task 7)
 //! keybinds. Connects to `wm`'s IPC socket and fetches state, then either
 //! drives a sequential `fuzzel --dmenu` toggle-and-reopen loop (assign
@@ -75,17 +89,17 @@ fn send_switch_tag_or_exit(
     tag_id: u8,
 ) {
     if !send_request(writer, &wire::Request::SwitchTag { output_id, tag_id }) {
-        eprintln!("tag-picker: failed to send switch-tag request");
+        eprintln!("buoy-tag-picker: failed to send switch-tag request");
         std::process::exit(1);
     }
     match read_response(reader) {
         Some(wire::Response::Ok) => {}
         Some(wire::Response::Error { message }) => {
-            eprintln!("tag-picker: {message}");
+            eprintln!("buoy-tag-picker: {message}");
             std::process::exit(1);
         }
         other => {
-            eprintln!("tag-picker: unexpected response to switch-tag: {other:?}");
+            eprintln!("buoy-tag-picker: unexpected response to switch-tag: {other:?}");
             std::process::exit(1);
         }
     }
@@ -177,7 +191,7 @@ fn run_fuzzel(
     let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("tag-picker: failed to spawn fuzzel: {e}");
+            eprintln!("buoy-tag-picker: failed to spawn fuzzel: {e}");
             return (false, String::new());
         }
     };
@@ -191,7 +205,7 @@ fn run_fuzzel(
         let input = input.to_owned();
         std::thread::spawn(move || {
             if let Err(e) = stdin.write_all(input.as_bytes()) {
-                eprintln!("tag-picker: failed to write to fuzzel's stdin: {e}");
+                eprintln!("buoy-tag-picker: failed to write to fuzzel's stdin: {e}");
             }
             // Explicit drop closes fuzzel's stdin so it sees EOF and can
             // exit its input-reading phase.
@@ -205,7 +219,7 @@ fn run_fuzzel(
             String::from_utf8_lossy(&output.stdout).into_owned(),
         ),
         Err(e) => {
-            eprintln!("tag-picker: failed to wait for fuzzel: {e}");
+            eprintln!("buoy-tag-picker: failed to wait for fuzzel: {e}");
             (false, String::new())
         }
     };
@@ -237,21 +251,21 @@ fn connect_and_get_state() -> (
     let stream = match UnixStream::connect(&socket_path) {
         Ok(stream) => stream,
         Err(e) => {
-            eprintln!("tag-picker: failed to connect to {socket_path:?}: {e}");
+            eprintln!("buoy-tag-picker: failed to connect to {socket_path:?}: {e}");
             std::process::exit(1);
         }
     };
     let mut writer = match stream.try_clone() {
         Ok(writer) => writer,
         Err(e) => {
-            eprintln!("tag-picker: failed to clone connection for writing: {e}");
+            eprintln!("buoy-tag-picker: failed to clone connection for writing: {e}");
             std::process::exit(1);
         }
     };
     let mut reader = BufReader::new(stream);
 
     if !send_request(&mut writer, &wire::Request::GetState) {
-        eprintln!("tag-picker: failed to send get-state request");
+        eprintln!("buoy-tag-picker: failed to send get-state request");
         std::process::exit(1);
     }
     let (tags, views, focused_view) = match read_response(&mut reader) {
@@ -261,11 +275,11 @@ fn connect_and_get_state() -> (
             focused_view,
         }) => (tags, views, focused_view),
         Some(other) => {
-            eprintln!("tag-picker: unexpected response to get-state: {other:?}");
+            eprintln!("buoy-tag-picker: unexpected response to get-state: {other:?}");
             std::process::exit(1);
         }
         None => {
-            eprintln!("tag-picker: no usable response to get-state");
+            eprintln!("buoy-tag-picker: no usable response to get-state");
             std::process::exit(1);
         }
     };
@@ -308,7 +322,7 @@ fn run_assign_mode(
     output_name: Option<&str>,
 ) {
     if !checklist::should_open_picker(view_id, output_id) {
-        eprintln!("tag-picker: no window focused and no output known");
+        eprintln!("buoy-tag-picker: no window focused and no output known");
         std::process::exit(0);
     }
 
@@ -332,7 +346,7 @@ fn run_assign_mode(
             checklist::PickerAction::Toggled(tag_id) => match view_id {
                 Some(view_id) => {
                     if !send_request(&mut writer, &wire::Request::ToggleTag { view_id, tag_id }) {
-                        eprintln!("tag-picker: failed to send toggle-tag request");
+                        eprintln!("buoy-tag-picker: failed to send toggle-tag request");
                         break;
                     }
                     match read_response(&mut reader) {
@@ -340,11 +354,13 @@ fn run_assign_mode(
                             checklist::toggle_local_membership(&mut current_tags, tag_id);
                         }
                         Some(wire::Response::Error { message }) => {
-                            eprintln!("tag-picker: {message}");
+                            eprintln!("buoy-tag-picker: {message}");
                             break;
                         }
                         other => {
-                            eprintln!("tag-picker: unexpected response to toggle-tag: {other:?}");
+                            eprintln!(
+                                "buoy-tag-picker: unexpected response to toggle-tag: {other:?}"
+                            );
                             break;
                         }
                     }
@@ -428,7 +444,7 @@ fn run_switch_mode(
                     &mut writer,
                     &wire::Request::CreateTag { name: name.clone() },
                 ) {
-                    eprintln!("tag-picker: failed to send create-tag request");
+                    eprintln!("buoy-tag-picker: failed to send create-tag request");
                     break;
                 }
                 match read_response(&mut reader) {
@@ -446,12 +462,12 @@ fn run_switch_mode(
                         if message == checklist::REJECTION_MESSAGE {
                             pending_rejected_name = Some(name);
                         } else {
-                            eprintln!("tag-picker: {message}");
+                            eprintln!("buoy-tag-picker: {message}");
                             break;
                         }
                     }
                     other => {
-                        eprintln!("tag-picker: unexpected response to create-tag: {other:?}");
+                        eprintln!("buoy-tag-picker: unexpected response to create-tag: {other:?}");
                         break;
                     }
                 }
@@ -465,7 +481,7 @@ fn main() {
     let mode = match mode::parse_args(&args) {
         Ok(mode) => mode,
         Err(message) => {
-            eprintln!("tag-picker: {message}");
+            eprintln!("buoy-tag-picker: {message}");
             std::process::exit(1);
         }
     };

@@ -1,14 +1,28 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
-//! `tag-picker`'s own minimal mirror of the wire shapes it needs from
+//! `buoy-tag-picker`'s own minimal mirror of the wire shapes it needs from
 //! `wm/src/ipc/protocol.rs` (ADR-007). This is a deliberate, accepted
 //! duplication, not an oversight: this project's own three-strike DRY rule
 //! extracts shared code after ~3 independent occurrences, and right now
 //! there are exactly two (`wm`'s and this one) — one below the threshold. A
-//! shared crate is deferred to whichever story first gives `status-bar`
+//! shared crate is deferred to whichever story first gives `buoy-status-bar`
 //! (Story 2.5) the same need, a genuine third consumer. As of Story 2.3,
-//! `tag-picker` sends `get-state`/`toggle-tag`/`create-tag`/`switch-tag` and
+//! `buoy-tag-picker` sends `get-state`/`toggle-tag`/`create-tag`/`switch-tag` and
 //! understands the `state`/`ok`/`tag-created`/`error` responses those
 //! produce (Story 2.4 adds `switch-tag`, the switch-mode picker's sole
 //! mutation). `State`/`ViewDto` still omit `outputs`/`app_id` — fields this

@@ -1,5 +1,21 @@
-// SPDX-FileCopyrightText: © 2026 Julian Andrews
-// SPDX-License-Identifier: 0BSD
+// SPDX-FileCopyrightText: © 2026 Nick Booth
+// Portions © 2026 Julian Andrews, originally distributed under 0BSD as
+// part of tinyrwm <https://codeberg.org/river/tinyrwm>.
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
@@ -1331,20 +1347,20 @@ fn output_for_id(outputs: &HashMap<ObjectId, Output>, output_id: OutputId) -> Op
         .find(|output| output.output_id == output_id)
 }
 
-/// Code review follow-up (Story 2.2, finding #1): resolves the `tag-picker`
+/// Code review follow-up (Story 2.2, finding #1): resolves the `buoy-tag-picker`
 /// binary's path as a sibling of the WM's own running executable, rather
 /// than trusting `$PATH` — nothing in this repo installs the built
-/// `tag-picker` binary onto `PATH`, and both binaries land in the same
+/// `buoy-tag-picker` binary onto `PATH`, and both binaries land in the same
 /// Cargo workspace `target/{profile}/` directory, so `wm_exe`'s parent
-/// directory is exactly where `tag-picker` lives too. Falls back to the
+/// directory is exactly where `buoy-tag-picker` lives too. Falls back to the
 /// bare name if `wm_exe` unexpectedly has no parent (e.g. a bare filename
 /// with no directory component) — `Command::spawn()` will then fail the
 /// same `$PATH`-dependent way the old code always did, handled by the
 /// existing error-logging call site rather than invented here.
 fn tag_picker_path(wm_exe: &Path) -> PathBuf {
     match wm_exe.parent() {
-        Some(dir) => dir.join("tag-picker"),
-        None => PathBuf::from("tag-picker"),
+        Some(dir) => dir.join("buoy-tag-picker"),
+        None => PathBuf::from("buoy-tag-picker"),
     }
 }
 
@@ -1438,7 +1454,7 @@ impl Seat {
         // (e.g. `"eDP-1"`), resolved by `manage_seats` alongside
         // `active_output_id` above via `WindowManager::output_name`. `None`
         // whenever that name isn't yet known (Technical notes) — both
-        // `tag-picker` spawn arms below treat that the same as
+        // `buoy-tag-picker` spawn arms below treat that the same as
         // `active_output_id` being `None`: append no extra argument at all,
         // rather than a bogus/empty one (AC 2).
         active_output_name: Option<&str>,
@@ -1522,8 +1538,8 @@ impl Seat {
                 //
                 // Code review follow-up: also pass `--output=<name>`, the
                 // same real connector name `Action::OpenTagPicker`/
-                // `TagSwitch` already pass to `tag-picker` (Story 2.9) -
-                // this arm spawns `fuzzel` directly, bypassing `tag-picker`
+                // `TagSwitch` already pass to `buoy-tag-picker` (Story 2.9) -
+                // this arm spawns `fuzzel` directly, bypassing `buoy-tag-picker`
                 // entirely, so it never got that fix. Without it, `fuzzel`
                 // fell back to "let the compositor choose", which could
                 // pick a disabled/off output when docked (kanshi disables
@@ -1550,7 +1566,7 @@ impl Seat {
                 // at all, so a large enough config could fill the pipe and
                 // block this — the WM's only thread — until fuzzel drained
                 // it, freezing all window management. Hand the write to a
-                // thread, exactly as `tag-picker`'s `run_fuzzel` already
+                // thread, exactly as `buoy-tag-picker`'s `run_fuzzel` already
                 // does for its arbitrarily-long checklist (code-review
                 // follow-up).
                 //
@@ -1701,12 +1717,12 @@ impl Seat {
                 }
             },
             // Story 2.2: fire-and-forget process spawn, no `wm_core` access.
-            // `tag-picker` resolves the focused view itself via its own
+            // `buoy-tag-picker` resolves the focused view itself via its own
             // `get-state` IPC call, so this arm never switches an output's
             // active tag and thus never triggers `manage_seats`'
             // pinned-terminal-spawn signal.
             //
-            // Code review follow-up (finding #1): spawning `"tag-picker"` by
+            // Code review follow-up (finding #1): spawning `"buoy-tag-picker"` by
             // bare name relied on `$PATH`, but nothing in this repo installs
             // the built binary there — in a real session this silently
             // ENOENTs and `Mod4+A` does nothing. Resolve the sibling
@@ -1733,7 +1749,7 @@ impl Seat {
                         if let Some(output_id) = active_output_id {
                             command.arg(output_id.0.to_string());
                             // Story 2.9 Task 3.3: the active output's real
-                            // connector name, so `tag-picker` can in turn
+                            // connector name, so `buoy-tag-picker` can in turn
                             // tell `fuzzel --output=<name>` which monitor
                             // to render on (Task 5) — never appended when
                             // unknown, preserving today's argument shape
@@ -1742,7 +1758,7 @@ impl Seat {
                                 command.arg(name);
                             }
                         }
-                        spawn_tracked(&mut command, "tag-picker");
+                        spawn_tracked(&mut command, "buoy-tag-picker");
                     }
                     Err(e) => {
                         eprintln!("Failed to resolve wm's own executable path: {e}")
@@ -1750,10 +1766,10 @@ impl Seat {
                 }
                 None
             }
-            // Story 2.4: `Mod4+S` ("Switch") spawns the same `tag-picker`
+            // Story 2.4: `Mod4+S` ("Switch") spawns the same `buoy-tag-picker`
             // binary in switch mode, passing the WM's own deterministic
             // `active_output_id` resolution across the process boundary as
-            // a CLI argument — `tag-picker` never re-derives "the active
+            // a CLI argument — `buoy-tag-picker` never re-derives "the active
             // output" itself (Task 1.2). Same fire-and-forget spawn shape
             // as `Action::OpenTagPicker` above, plus the same
             // `None`-output defensive no-op shape as `Action::TagCycle`.
@@ -1778,7 +1794,7 @@ impl Seat {
                             if let Some(name) = active_output_name {
                                 command.arg(name);
                             }
-                            spawn_tracked(&mut command, "tag-picker in switch mode");
+                            spawn_tracked(&mut command, "buoy-tag-picker in switch mode");
                         }
                         Err(e) => {
                             eprintln!("Failed to resolve wm's own executable path: {e}")
@@ -2644,7 +2660,7 @@ mod tests {
     fn tag_picker_path_resolves_to_sibling_of_debug_wm_exe() {
         assert_eq!(
             tag_picker_path(Path::new("/workspaces/buoy-wm/target/debug/wm")),
-            PathBuf::from("/workspaces/buoy-wm/target/debug/tag-picker")
+            PathBuf::from("/workspaces/buoy-wm/target/debug/buoy-tag-picker")
         );
     }
 
@@ -2652,7 +2668,7 @@ mod tests {
     fn tag_picker_path_resolves_to_sibling_of_release_wm_exe() {
         assert_eq!(
             tag_picker_path(Path::new("/workspaces/buoy-wm/target/release/wm")),
-            PathBuf::from("/workspaces/buoy-wm/target/release/tag-picker")
+            PathBuf::from("/workspaces/buoy-wm/target/release/buoy-tag-picker")
         );
     }
 
@@ -2663,6 +2679,9 @@ mod tests {
         // the fallback branch, not just a single-component relative path
         // (whose `.parent()` is `Some("")`, which `join` already reduces to
         // the bare name anyway).
-        assert_eq!(tag_picker_path(Path::new("/")), PathBuf::from("tag-picker"));
+        assert_eq!(
+            tag_picker_path(Path::new("/")),
+            PathBuf::from("buoy-tag-picker")
+        );
     }
 }

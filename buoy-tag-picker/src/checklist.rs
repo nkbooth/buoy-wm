@@ -1,5 +1,19 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
 //! Pure decision logic driving the toggle-and-reopen loop (Story 2.2's
 //! spike finding — see `docs/planning/epics/story-2-2.md`'s Technical
@@ -46,7 +60,7 @@ pub fn build_checklist_entries(tags: &[TagDto], focused_view_tags: &[u8]) -> Vec
 /// `"[ ] <name>\t<tag_id>\n"` (unchecked). Column 1 (before the tab) is
 /// what `--with-nth=1` displays; column 2 is the bare tag id
 /// [`parse_fuzzel_output`] extracts from the full accepted line on
-/// selection (Technical notes' "Spike finding"), so `tag-picker` never has
+/// selection (Technical notes' "Spike finding"), so `buoy-tag-picker` never has
 /// to parse a display name back into an id.
 ///
 /// Code review follow-up (finding #3): `wm_core::create_tag` accepts any
@@ -99,7 +113,7 @@ pub enum PickerAction {
 /// `wm/src/ipc/dispatch.rs`'s own `describe_wm_core_error` string for
 /// `WmCoreError::TagLimitReached`, quoted verbatim here — `dispatch.rs`'s
 /// doc comment names itself the single source of truth for this string;
-/// `tag-picker` never re-derives it, only recognizes it when `wm` sends it
+/// `buoy-tag-picker` never re-derives it, only recognizes it when `wm` sends it
 /// back in a `create-tag` error response. Same "keep these in sync"
 /// cross-crate literal-duplication convention as `socket_path.rs`'s own
 /// note, not a logic duplication.

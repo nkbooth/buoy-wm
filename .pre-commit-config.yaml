@@ -1,3 +1,20 @@
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: RPL-1.5
+#
+# Unless explicitly acquired and licensed from Licensor under another
+# license, the contents of this file are subject to the Reciprocal Public
+# License ("RPL") Version 1.5, or subsequent versions as allowed by the
+# RPL, and You may not copy or use this file in either source code or
+# executable form, except in compliance with the terms and conditions of
+# the RPL.
+#
+# All software distributed under the RPL is provided strictly on an "AS
+# IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+# LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+# LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+# language governing rights and limitations under the RPL.
+
 # Runs in-container only (pre-commit run --all-files, via
 # `devpod ssh buoy-wm`). Deliberately NOT `pre-commit install`ed: commits
 # happen on the host, where neither the pre-commit binary nor a cargo
@@ -14,22 +31,22 @@ repos:
         # need the same gate as source changes, not just *.rs. Story 2.2's
         # own comment here claimed this was already "widened workspace-wide
         # to cover either member," but the regex was still a hardcoded
-        # two-name alternation — a `status-bar`-only change (Story 2.5)
+        # two-name alternation — a `buoy-status-bar`-only change (Story 2.5)
         # would have silently skipped both hooks locally. Story 2.5 Task 7:
         # widened to all three current members. Not written as a fully
         # member-name-agnostic glob (e.g. matching any top-level directory
         # with a `src/*.rs`/`Cargo.toml`) on purpose: this project's own
-        # three-strike-DRY posture (see `status-bar/src/wire.rs`'s module
+        # three-strike-DRY posture (see `buoy-status-bar/src/wire.rs`'s module
         # doc comment) already established that this is the last story in
         # the entire currently planned project, so there is no future
         # fourth member this hardcoding could ever fall behind again — a
         # more "future-proof" glob would just be unused generality for an
         # audience of zero remaining members.
-        files: ^(wm|tag-picker|status-bar)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
+        files: ^(wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
         pass_filenames: false
       - id: cargo-clippy
         name: cargo clippy
         language: system
         entry: cargo clippy --workspace --all-targets -- -D warnings
-        files: ^(wm|tag-picker|status-bar)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
+        files: ^(wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
         pass_filenames: false

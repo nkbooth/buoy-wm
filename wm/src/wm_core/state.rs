@@ -1,5 +1,19 @@
 // SPDX-FileCopyrightText: © 2026 Nick Booth
-// SPDX-License-Identifier: 0BSD
+// SPDX-License-Identifier: RPL-1.5
+//
+// Unless explicitly acquired and licensed from Licensor under another
+// license, the contents of this file are subject to the Reciprocal Public
+// License ("RPL") Version 1.5, or subsequent versions as allowed by the
+// RPL, and You may not copy or use this file in either source code or
+// executable form, except in compliance with the terms and conditions of
+// the RPL.
+//
+// All software distributed under the RPL is provided strictly on an "AS
+// IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+// LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+// LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+// language governing rights and limitations under the RPL.
 
 //! `WmCore`: the aggregator that owns the view/tag/output registries and
 //! exposes `wm-core`'s public mutating API.
@@ -39,7 +53,7 @@ pub enum WmCoreError {
     UnknownOutput,
     /// The tag registry already holds the maximum of 64 tags (ADR-006).
     // Constructible via a live path via `create_tag`, wired into
-    // `tag-picker`'s IPC-driven tag-creation flow.
+    // `buoy-tag-picker`'s IPC-driven tag-creation flow.
     TagLimitReached,
 }
 
@@ -135,7 +149,7 @@ impl WmCore {
     /// [`TagRegistry::create_tag`](super::tag::TagRegistry::create_tag)).
     /// Fails with [`WmCoreError::TagLimitReached`] if the registry already
     /// holds 64 tags.
-    // Wired into `tag-picker`'s IPC-driven tag-creation flow (Epic 2).
+    // Wired into `buoy-tag-picker`'s IPC-driven tag-creation flow (Epic 2).
     pub fn create_tag(&mut self, name: impl Into<String>) -> Result<TagId, WmCoreError> {
         let name = name.into();
         self.tags.create_tag(&name).map_err(|err| match err {
