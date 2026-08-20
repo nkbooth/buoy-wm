@@ -108,6 +108,47 @@ rather than duplicating it. At the 64-tag registry cap the picker reopens
 with the rejection shown and your typed name restored, and nothing is
 created or switched.
 
+## Input devices
+
+Touchpads, keyboards and mice are configured with `[[input]]` blocks, each
+matching devices by libinput name:
+
+```toml
+[[input]]
+name = "*Touchpad*"           # `*` is the only wildcard
+tap = true                    # tap-to-click: 1/2/3 fingers = left/right/middle
+tap_button_map = "lrm"        # or "lmr" (1/2/3 = left/middle/right)
+click_method = "button_areas" # or "clickfinger", "none"
+natural_scroll = true
+disable_while_typing = true
+accel_speed = 0.3             # -1.0 (slowest) .. 1.0 (fastest)
+```
+
+The only built-in entry is `name = "*Touchpad*"` with `tap = true`, because
+libinput defaults tap-to-click to *off* on any device with physical buttons
+— so without it a laptop touchpad accepts motion and scrolling but ignores
+taps entirely. Matching is on the name rather than the protocol's device
+*type*, which reports only `pointer` for touchpads, mice and trackballs
+alike; forcing tap on an external mouse is not wanted.
+
+Every setting is optional, and an omitted one is **not** the same as
+`false`: an omitted setting sends no request at all and leaves libinput's
+own default alone, while `tap = false` actively turns tap off. As with the
+binding lists, declaring any `[[input]]` replaces the built-in list
+entirely, so restate `tap = true` for your touchpad if you add entries for
+other devices. Entries are matched top to bottom and the first match wins,
+which is what lets a specific device sit above a catch-all `name = "*"`.
+
+A pattern matching nothing, an entry setting nothing, a duplicate pattern,
+and an `accel_speed` outside `-1.0..=1.0` are all rejected at load —
+otherwise the section would look configured and silently do nothing.
+
+Requires river's `river_input_manager_v1` and `river_libinput_config_v1`
+globals. Both are optional: on a river without them the WM logs once and
+every device keeps libinput's defaults. For a device you have configured,
+its tap state and click method are logged at startup and again after each
+setting is applied, and any setting the device rejects is named on stderr.
+
 ## Development
 
 Build and test the full workspace (`wm`, `tag-picker`, `status-bar`):

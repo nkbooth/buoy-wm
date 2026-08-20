@@ -13,7 +13,12 @@ use wayland_client::{
 };
 
 use crate::river::{
+    river_input_device_v1::RiverInputDeviceV1,
+    river_input_manager_v1::RiverInputManagerV1,
     river_layer_shell_v1::RiverLayerShellV1,
+    river_libinput_config_v1::RiverLibinputConfigV1,
+    river_libinput_device_v1::RiverLibinputDeviceV1,
+    river_libinput_result_v1::RiverLibinputResultV1,
     river_node_v1::RiverNodeV1,
     river_output_v1::RiverOutputV1,
     river_pointer_binding_v1::RiverPointerBindingV1,
@@ -43,14 +48,34 @@ mod river {
             use super::rwm::*;
             wayland_scanner::generate_interfaces!("./protocol/river-layer-shell-v1.xml");
         }
+
+        pub(super) mod rinput {
+            // Needs `wl_output` in scope for `map_to_output`, and nothing
+            // from `rwm` — input management is a standalone tree, unlike
+            // `rxkb`/`rlayer` which both hang off `river_seat_v1`.
+            pub use wayland_client::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("./protocol/river-input-management-v1.xml");
+        }
+
+        pub(super) mod rlibinput {
+            // `river_libinput_device_v1.input_device` carries a
+            // `river_input_device_v1`, so this must be generated after (and
+            // importing) `rinput`.
+            use super::rinput::*;
+            wayland_scanner::generate_interfaces!("./protocol/river-libinput-config-v1.xml");
+        }
     }
 
+    use self::interfaces::rinput::*;
     use self::interfaces::rlayer::*;
+    use self::interfaces::rlibinput::*;
     use self::interfaces::rwm::*;
     use self::interfaces::rxkb::*;
     wayland_scanner::generate_client_code!("./protocol/river-window-management-v1.xml");
     wayland_scanner::generate_client_code!("./protocol/river-xkb-bindings-v1.xml");
     wayland_scanner::generate_client_code!("./protocol/river-layer-shell-v1.xml");
+    wayland_scanner::generate_client_code!("./protocol/river-input-management-v1.xml");
+    wayland_scanner::generate_client_code!("./protocol/river-libinput-config-v1.xml");
 }
 
 mod config;
@@ -99,6 +124,74 @@ fn spawn_tracked(command: &mut std::process::Command, what: &str) {
     match command.env_remove("WAYLAND_DEBUG").spawn() {
         Ok(child) => track_child(child),
         Err(e) => eprintln!("Failed to spawn {what}: {e}"),
+    }
+}
+
+/// Sends the one `river_libinput_device_v1` request `setting` stands for.
+///
+/// Each request allocates a `river_libinput_result_v1` whose udata is a
+/// description of what was attempted, so an `unsupported`/`invalid` reply
+/// names the device and setting it came from instead of arriving bare.
+/// Neither input protocol mentions manage sequences, so these can be sent
+/// as soon as a device is known rather than inside a transaction.
+fn apply_libinput_setting(
+    device: &RiverLibinputDeviceV1,
+    setting: config::LibinputSetting,
+    device_name: &str,
+    qh: &QueueHandle<AppData>,
+) {
+    use config::LibinputSetting;
+    use river::river_libinput_device_v1::{
+        ClickMethod as WireClickMethod, DwtState, NaturalScrollState,
+        TapButtonMap as WireTapButtonMap, TapState,
+    };
+    let label = |what: &str| format!("libinput {device_name:?}: {what}");
+    match setting {
+        LibinputSetting::Tap(enabled) => {
+            let state = if enabled {
+                TapState::Enabled
+            } else {
+                TapState::Disabled
+            };
+            device.set_tap(state, qh, label("tap"));
+        }
+        LibinputSetting::TapButtonMap(map) => {
+            let wire = match map {
+                config::TapButtonMap::Lrm => WireTapButtonMap::Lrm,
+                config::TapButtonMap::Lmr => WireTapButtonMap::Lmr,
+            };
+            device.set_tap_button_map(wire, qh, label("tap_button_map"));
+        }
+        LibinputSetting::ClickMethod(method) => {
+            let wire = match method {
+                config::ClickMethod::None => WireClickMethod::None,
+                config::ClickMethod::ButtonAreas => WireClickMethod::ButtonAreas,
+                config::ClickMethod::Clickfinger => WireClickMethod::Clickfinger,
+            };
+            device.set_click_method(wire, qh, label("click_method"));
+        }
+        LibinputSetting::NaturalScroll(enabled) => {
+            let state = if enabled {
+                NaturalScrollState::Enabled
+            } else {
+                NaturalScrollState::Disabled
+            };
+            device.set_natural_scroll(state, qh, label("natural_scroll"));
+        }
+        LibinputSetting::DisableWhileTyping(enabled) => {
+            let state = if enabled {
+                DwtState::Enabled
+            } else {
+                DwtState::Disabled
+            };
+            device.set_dwt(state, qh, label("disable_while_typing"));
+        }
+        LibinputSetting::AccelSpeed(speed) => {
+            // The protocol carries doubles as a native-endian byte array —
+            // Wayland has no float type, and this protocol's own preamble
+            // documents `type="array" summary="double"` as exactly that.
+            device.set_accel_speed(speed.to_ne_bytes().to_vec(), qh, label("accel_speed"));
+        }
     }
 }
 
@@ -152,6 +245,15 @@ struct AppData {
     /// is not fatal; it just means layer-shell surfaces can't map, same as
     /// `buoy-wm`'s behavior before this story.
     river_layer_shell: Option<RiverLayerShellV1>,
+    /// Optional, like `river_layer_shell`: without it no input device can be
+    /// named, so nothing gets configured and every device keeps libinput's
+    /// defaults — which is exactly buoy's behavior before `[[input]]`
+    /// existed, not a reason to refuse the session.
+    river_input_manager: Option<RiverInputManagerV1>,
+    /// Optional for the same reason. river only advertises this alongside
+    /// `river_input_manager_v1`, but nothing in the protocol promises that,
+    /// so the two are tracked (and degraded) independently.
+    river_libinput_config: Option<RiverLibinputConfigV1>,
     wm: WindowManager,
 }
 
@@ -178,6 +280,14 @@ struct WindowManager {
     /// a permanent negative — the event's arrival time relative to
     /// `river_output_v1::WlOutput` is not guaranteed (Technical notes).
     wl_output_names: HashMap<ObjectId, String>,
+    /// Each `river_input_device_v1`'s name, keyed by that proxy's object id,
+    /// populated when its `name` event arrives. Held separately from
+    /// `libinput_devices` because the two objects are created by two
+    /// different globals and the protocol makes no promise about which
+    /// arrives first — same ordering trap as `wl_output_names` above.
+    input_device_names: HashMap<ObjectId, String>,
+    /// Each `river_libinput_device_v1`, keyed by its own object id.
+    libinput_devices: HashMap<ObjectId, LibinputDevice>,
     /// The user's `~/.config/buoy/config.toml`, or [`Config::default`]'s
     /// built-in equivalent when there is no such file. Loaded once at
     /// startup — re-reading it on change would mean tearing down and
@@ -277,6 +387,21 @@ struct Seat {
     /// terminal is exactly that case, and left focus stranded on the
     /// outgoing tag's now-hidden terminal.
     terminal_intentionally_focused: bool,
+}
+
+/// A libinput-configurable device, and the correlation state needed before
+/// its `[[input]]` entry can be applied.
+#[derive(Debug)]
+struct LibinputDevice {
+    proxy: RiverLibinputDeviceV1,
+    /// The `river_input_device_v1` this configures, from the `input_device`
+    /// event. `None` until that arrives — the name lives on that object, so
+    /// there is nothing to match a config entry against until then.
+    input_device_id: Option<ObjectId>,
+    /// Whether the config has already been applied. The two halves of the
+    /// device's identity arrive in an unspecified order, so both arrival
+    /// paths attempt to configure and this is what keeps it to once.
+    configured: bool,
 }
 
 #[derive(Debug)]
@@ -890,6 +1015,70 @@ impl WindowManager {
             .map(String::as_str)
     }
 
+    /// The device name behind a `river_libinput_device_v1`, once both its
+    /// `input_device` event and that device's `name` event have arrived.
+    fn libinput_device_name(&self, libinput_id: &ObjectId) -> Option<&str> {
+        let input_device_id = self
+            .libinput_devices
+            .get(libinput_id)?
+            .input_device_id
+            .as_ref()?;
+        self.input_device_names
+            .get(input_device_id)
+            .map(String::as_str)
+    }
+
+    /// The name of the device behind `libinput_id`, but only when the user
+    /// actually has an `[[input]]` entry for it — the gate that keeps
+    /// device-state logging to devices the config speaks about.
+    fn configured_device_name(&self, libinput_id: &ObjectId) -> Option<&str> {
+        let name = self.libinput_device_name(libinput_id)?;
+        self.config.input_for(name).map(|_| name)
+    }
+
+    /// Applies each device's matching `[[input]]` entry, once.
+    ///
+    /// Called from both arrival paths — the device's `name` and its
+    /// `input_device` correlation — because the protocol does not order them
+    /// relative to each other. Whichever lands second is the one that finds
+    /// the device ready; `configured` keeps a device from being reconfigured
+    /// when the other path fires later for an unrelated device.
+    ///
+    /// A device with no matching entry is marked configured too: leaving
+    /// libinput's defaults alone is a decision, not unfinished work, and
+    /// re-deciding it on every later event would be pointless.
+    fn configure_libinput_devices(&mut self, qh: &QueueHandle<AppData>) {
+        let ready: Vec<(ObjectId, Option<Vec<config::LibinputSetting>>, String)> = self
+            .libinput_devices
+            .iter()
+            .filter(|(_, device)| !device.configured)
+            .filter_map(|(id, _)| {
+                let name = self.libinput_device_name(id)?.to_string();
+                let settings = self.config.input_for(&name).map(|input| input.settings());
+                Some((id.clone(), settings, name))
+            })
+            .collect();
+        for (id, settings, name) in ready {
+            // Borrowed separately from the scan above: `libinput_device_name`
+            // needs `&self` while sending the requests needs the device
+            // mutably, and the two cannot overlap.
+            let Some(device) = self.libinput_devices.get_mut(&id) else {
+                continue;
+            };
+            device.configured = true;
+            let Some(settings) = settings else {
+                continue;
+            };
+            eprintln!(
+                "libinput {name:?}: applying {} setting(s) from [[input]]",
+                settings.len()
+            );
+            for setting in settings {
+                apply_libinput_setting(&device.proxy, setting, &name, qh);
+            }
+        }
+    }
+
     fn manage_seats(&mut self, wm_proxy: &RiverWindowManagerV1, any_new_windows: bool) {
         // Computed before the `&mut self.wm_core` borrow below begins:
         // `active_output_id` is a whole-`&self` method call (it reads
@@ -911,12 +1100,30 @@ impl WindowManager {
         let mut wm_core_guard = ipc::lock_recovering(&self.wm_core);
         let wm_core = &mut *wm_core_guard;
         for seat in self.seats.values_mut() {
-            if let Some(window_proxy) = seat.interacted.take() {
-                let i = self
+            // A `window_interaction` event names a window the compositor
+            // may already have destroyed by the time this manage sequence
+            // runs: that event and the `closed` event that drops the window
+            // from `self.windows` race, and the protocol promises no
+            // ordering between them. `expect`ing this lookup took the whole
+            // session down over a click that had merely outlived its target
+            // (NFR2), so a miss now skips only the raise/reorder below and
+            // lets the rest of this pass — focus-latch expiry, `focus_top`,
+            // `do_action`, op handling — run exactly as it would have.
+            'interacted: {
+                let Some(window_proxy) = seat.interacted.take() else {
+                    break 'interacted;
+                };
+                let Some(i) = self
                     .windows
                     .iter()
                     .position(|window| window.proxy == window_proxy)
-                    .expect("Interacted window not found");
+                else {
+                    eprintln!(
+                        "Ignoring interaction with unmanaged window {:?} (already closed)",
+                        window_proxy.id()
+                    );
+                    break 'interacted;
+                };
                 let window = self.windows.remove(i).unwrap();
                 // Keep wm_core's stacking_order synchronized with the real
                 // z-order on every click-to-focus reorder, not just on
@@ -1747,6 +1954,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
             const RIVER_WINDOW_MANAGER_V1_VERSION: u32 = 4;
             const RIVER_XKB_BINDINGS_V1_VERSION: u32 = 1;
             const RIVER_LAYER_SHELL_V1_VERSION: u32 = 1;
+            const RIVER_INPUT_MANAGER_V1_VERSION: u32 = 1;
+            const RIVER_LIBINPUT_CONFIG_V1_VERSION: u32 = 1;
             match interface.as_str() {
                 "river_window_manager_v1" => {
                     if version < RIVER_WINDOW_MANAGER_V1_VERSION {
@@ -1796,6 +2005,39 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                         (),
                     );
                     state.river_layer_shell = Some(layer_shell);
+                }
+                "river_input_manager_v1" => {
+                    // Optional, same as `river_layer_shell_v1`: a river
+                    // without it just means no `[[input]]` entry can be
+                    // applied, which is the pre-`[[input]]` status quo.
+                    if version < RIVER_INPUT_MANAGER_V1_VERSION {
+                        eprintln!(
+                            "Server supports river_input_manager_v1 v{version}, but we need at least v{RIVER_INPUT_MANAGER_V1_VERSION} - [[input]] device configuration will not be applied"
+                        );
+                        return;
+                    }
+                    let input_manager = registry.bind::<RiverInputManagerV1, _, _>(
+                        name,
+                        RIVER_INPUT_MANAGER_V1_VERSION,
+                        qh,
+                        (),
+                    );
+                    state.river_input_manager = Some(input_manager);
+                }
+                "river_libinput_config_v1" => {
+                    if version < RIVER_LIBINPUT_CONFIG_V1_VERSION {
+                        eprintln!(
+                            "Server supports river_libinput_config_v1 v{version}, but we need at least v{RIVER_LIBINPUT_CONFIG_V1_VERSION} - [[input]] device configuration will not be applied"
+                        );
+                        return;
+                    }
+                    let libinput_config = registry.bind::<RiverLibinputConfigV1, _, _>(
+                        name,
+                        RIVER_LIBINPUT_CONFIG_V1_VERSION,
+                        qh,
+                        (),
+                    );
+                    state.river_libinput_config = Some(libinput_config);
                 }
                 // Story 2.9 Task 1: bind every `wl_output` global as soon
                 // as it's advertised, regardless of which `river_output_v1`
@@ -2114,6 +2356,164 @@ impl Dispatch<RiverPointerBindingV1, ObjectId> for AppData {
         match event {
             Event::Pressed => seat.pending_action = Some(binding.action.clone()),
             Event::Released => {}
+        }
+    }
+}
+
+impl Dispatch<RiverInputManagerV1, ()> for AppData {
+    fn event(
+        _state: &mut Self,
+        _proxy: &RiverInputManagerV1,
+        event: <RiverInputManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        use river::river_input_manager_v1::Event;
+        match event {
+            // The `river_input_device_v1` this carries is registered by its
+            // own `name` event rather than here: a device with no name yet
+            // cannot be matched against an `[[input]]` entry, so there is
+            // nothing useful to record at creation time.
+            Event::InputDevice { .. } => {}
+            // Only sent in response to a `stop` request, which this WM never
+            // makes - it wants input devices for the whole session.
+            Event::Finished => {}
+        }
+    }
+
+    wayland_client::event_created_child!(AppData, RiverInputManagerV1, [
+        river::river_input_manager_v1::EVT_INPUT_DEVICE_OPCODE => (RiverInputDeviceV1, ())
+    ]);
+}
+
+impl Dispatch<RiverInputDeviceV1, ()> for AppData {
+    fn event(
+        state: &mut Self,
+        proxy: &RiverInputDeviceV1,
+        event: <RiverInputDeviceV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        use river::river_input_device_v1::Event;
+        match event {
+            Event::Name { name } => {
+                state.wm.input_device_names.insert(proxy.id(), name);
+                // The libinput half may already be waiting on this name.
+                state.wm.configure_libinput_devices(qh);
+            }
+            Event::Removed => {
+                state.wm.input_device_names.remove(&proxy.id());
+                proxy.destroy();
+            }
+            Event::Type { .. } => {}
+        }
+    }
+}
+
+impl Dispatch<RiverLibinputConfigV1, ()> for AppData {
+    fn event(
+        state: &mut Self,
+        _proxy: &RiverLibinputConfigV1,
+        event: <RiverLibinputConfigV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        use river::river_libinput_config_v1::Event;
+        match event {
+            Event::LibinputDevice { id } => {
+                state.wm.libinput_devices.insert(
+                    id.id(),
+                    LibinputDevice {
+                        proxy: id,
+                        input_device_id: None,
+                        configured: false,
+                    },
+                );
+            }
+            // As with the input manager: never requested, so never sent.
+            Event::Finished => {}
+        }
+    }
+
+    wayland_client::event_created_child!(AppData, RiverLibinputConfigV1, [
+        river::river_libinput_config_v1::EVT_LIBINPUT_DEVICE_OPCODE => (RiverLibinputDeviceV1, ())
+    ]);
+}
+
+impl Dispatch<RiverLibinputDeviceV1, ()> for AppData {
+    fn event(
+        state: &mut Self,
+        proxy: &RiverLibinputDeviceV1,
+        event: <RiverLibinputDeviceV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        use river::river_libinput_device_v1::Event;
+        match event {
+            Event::InputDevice { device } => {
+                if let Some(libinput_device) = state.wm.libinput_devices.get_mut(&proxy.id()) {
+                    libinput_device.input_device_id = Some(device.id());
+                }
+                // The name may already have arrived on the other object.
+                state.wm.configure_libinput_devices(qh);
+            }
+            Event::Removed => {
+                state.wm.libinput_devices.remove(&proxy.id());
+                proxy.destroy();
+            }
+            // Of this protocol's ~40 report events, only the two that answer
+            // "why did my touchpad not do what I expected" are surfaced:
+            // what tap is actually set to, and which click method decides
+            // whether a bottom-right press is a right click. Reported only
+            // for a device the user configured — every device sends these,
+            // so logging them all would bury the one that matters under
+            // keyboards and lid switches. river re-sends `*_current` after a
+            // successful `set_*`, which makes the second line for a
+            // configured device the confirmation that it took effect.
+            Event::TapCurrent { state: tap_state } => {
+                if let Some(name) = state.wm.configured_device_name(&proxy.id()) {
+                    eprintln!("libinput {name:?}: tap-to-click is {tap_state:?}");
+                }
+            }
+            Event::ClickMethodCurrent { method } => {
+                if let Some(name) = state.wm.configured_device_name(&proxy.id()) {
+                    eprintln!("libinput {name:?}: click method is {method:?}");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every `set_*` request allocates one of these to report back on. The
+/// `String` payload is the human-readable "what was set on which device" so
+/// a rejection names itself instead of arriving as a bare `invalid`.
+impl Dispatch<RiverLibinputResultV1, String> for AppData {
+    fn event(
+        _state: &mut Self,
+        _proxy: &RiverLibinputResultV1,
+        event: <RiverLibinputResultV1 as Proxy>::Event,
+        data: &String,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        use river::river_libinput_result_v1::Event;
+        // A silently-dropped `unsupported` is how a setting that simply does
+        // not work on this device looks identical to one that was never
+        // configured, so both failure modes are named here. `success` stays
+        // quiet - one line per applied setting per startup is noise.
+        match event {
+            Event::Success => {}
+            Event::Unsupported => {
+                eprintln!("{data}: unsupported by this device, ignored");
+            }
+            Event::Invalid => {
+                eprintln!("{data}: invalid value, ignored");
+            }
         }
     }
 }

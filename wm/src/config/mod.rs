@@ -8,6 +8,7 @@
 //! behavior exactly — a missing or empty config file is not an error and
 //! changes nothing.
 
+pub mod glob;
 pub mod keysym;
 
 use serde::Deserialize;
@@ -159,12 +160,132 @@ pub struct Mousebind {
     pub action: Action,
 }
 
+/// Which button each finger count produces when tap-to-click is on.
+/// Spellings match libinput's own, so a user reading `libinput
+/// list-devices` output sees the same words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TapButtonMap {
+    /// 1/2/3-finger tap maps to left/right/middle.
+    Lrm,
+    /// 1/2/3-finger tap maps to left/middle/right.
+    Lmr,
+}
+
+/// How a physical press on a clickpad resolves to a button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickMethod {
+    /// No physical-click buttons at all.
+    None,
+    /// The bottom of the pad is split into left/right button zones.
+    ButtonAreas,
+    /// The button is decided by how many fingers rest on the pad.
+    Clickfinger,
+}
+
+/// libinput settings for every device whose name matches [`InputConfig::
+/// name`].
+///
+/// Every setting is an `Option` because `None` and `Some(false)` mean
+/// different things here: `None` sends no request at all and leaves
+/// libinput's own default alone, while `Some(false)` actively turns the
+/// feature off. Collapsing the two would make it impossible to configure
+/// one setting on a device without silently restating every other.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputConfig {
+    /// A `*`-wildcard pattern matched against the libinput device name
+    /// (see [`glob`]).
+    pub name: String,
+    /// Tap-to-click. The one setting this whole section was added for:
+    /// libinput defaults it off for any device with physical buttons, so a
+    /// laptop touchpad ignores taps until something turns it on.
+    pub tap: Option<bool>,
+    pub tap_button_map: Option<TapButtonMap>,
+    pub click_method: Option<ClickMethod>,
+    pub natural_scroll: Option<bool>,
+    /// libinput calls this `dwt`.
+    pub disable_while_typing: Option<bool>,
+    /// Pointer acceleration, `-1.0` (slowest) to `1.0` (fastest).
+    pub accel_speed: Option<f64>,
+}
+
+/// One libinput setting to apply, already resolved from an
+/// [`InputConfig`]'s `Option` fields to a concrete value.
+///
+/// Exists so the "which requests does this entry imply" decision is
+/// testable on its own, without a compositor: the WM's job is then a
+/// mechanical match from each variant to the matching protocol request.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LibinputSetting {
+    Tap(bool),
+    TapButtonMap(TapButtonMap),
+    ClickMethod(ClickMethod),
+    NaturalScroll(bool),
+    DisableWhileTyping(bool),
+    AccelSpeed(f64),
+}
+
+impl InputConfig {
+    /// Whether this entry applies to the device called `device_name`.
+    pub fn matches(&self, device_name: &str) -> bool {
+        glob::matches(&self.name, device_name)
+    }
+
+    /// The settings this entry actually asks for, in the order they must be
+    /// applied.
+    ///
+    /// An unset field contributes nothing, so libinput keeps its own
+    /// default for it — only a field the user wrote turns into a request.
+    /// `tap` deliberately precedes `tap_button_map`, which is meaningless
+    /// until tap is enabled.
+    pub fn settings(&self) -> Vec<LibinputSetting> {
+        let mut settings = Vec::new();
+        if let Some(tap) = self.tap {
+            settings.push(LibinputSetting::Tap(tap));
+        }
+        if let Some(button_map) = self.tap_button_map {
+            settings.push(LibinputSetting::TapButtonMap(button_map));
+        }
+        if let Some(method) = self.click_method {
+            settings.push(LibinputSetting::ClickMethod(method));
+        }
+        if let Some(natural) = self.natural_scroll {
+            settings.push(LibinputSetting::NaturalScroll(natural));
+        }
+        if let Some(dwt) = self.disable_while_typing {
+            settings.push(LibinputSetting::DisableWhileTyping(dwt));
+        }
+        if let Some(speed) = self.accel_speed {
+            settings.push(LibinputSetting::AccelSpeed(speed));
+        }
+        settings
+    }
+
+    /// Whether this entry sets anything at all. An entry that names a
+    /// device and configures nothing is rejected at load — it reads like it
+    /// does something.
+    fn is_empty(&self) -> bool {
+        self.tap.is_none()
+            && self.tap_button_map.is_none()
+            && self.click_method.is_none()
+            && self.natural_scroll.is_none()
+            && self.disable_while_typing.is_none()
+            && self.accel_speed.is_none()
+    }
+}
+
 /// The parsed contents of `~/.config/buoy/config.toml`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: [`InputConfig::accel_speed`] is an `f64`, and every use here
+/// is `assert_eq!` in tests rather than anything needing total equality.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub defaults: Defaults,
     pub keybinds: Vec<Keybind>,
     pub mousebinds: Vec<Mousebind>,
+    pub inputs: Vec<InputConfig>,
 }
 
 /// Why a config file was rejected. A bad config is always fatal to *that
@@ -188,6 +309,14 @@ pub enum ConfigError {
     DuplicateBinding(String),
     /// `pinned_terminal_args` without the `{app_id}` placeholder.
     MissingAppIdPlaceholder,
+    /// An `[[input]]` with `name = ""`, which matches no real device.
+    EmptyInputName,
+    /// An `[[input]]` that names a device but configures nothing.
+    InputWithoutSettings(String),
+    /// The same `[[input]]` `name` pattern listed twice.
+    DuplicateInput(String),
+    /// An `accel_speed` outside libinput's `-1.0..=1.0`.
+    AccelSpeedOutOfRange(f64),
     Io(std::io::Error),
 }
 
@@ -222,6 +351,26 @@ impl fmt::Display for ConfigError {
             ConfigError::MissingAppIdPlaceholder => write!(
                 f,
                 "[defaults] `pinned_terminal_args` must contain the `{{app_id}}` placeholder — it is how the WM recognizes a tag's pinned terminal"
+            ),
+            ConfigError::EmptyInputName => write!(
+                f,
+                "[[input]] `name` is empty, so it matches no device — use \
+                 `name = \"*\"` if matching every device was the intent"
+            ),
+            ConfigError::InputWithoutSettings(name) => write!(
+                f,
+                "[[input]] `{name}` sets nothing, so it has no effect — give \
+                 it at least one setting or remove it"
+            ),
+            ConfigError::DuplicateInput(name) => write!(
+                f,
+                "[[input]] `{name}` is listed more than once; the first match \
+                 wins, so the later entry could never apply"
+            ),
+            ConfigError::AccelSpeedOutOfRange(speed) => write!(
+                f,
+                "[[input]] `accel_speed` is {speed}, outside libinput's \
+                 -1.0..=1.0 range"
             ),
             ConfigError::Io(e) => write!(f, "{e}"),
         }
@@ -272,6 +421,29 @@ impl Default for Config {
                     action: Action::Resize,
                 },
             ],
+            // Unlike every other default in this file, this one is *not*
+            // reproducing prior hardcoded behavior — before `[[input]]`
+            // nothing configured input devices at all, so a touchpad kept
+            // libinput's own tap-to-click default of off and taps did
+            // nothing. Enabling it here is what makes a fresh session
+            // behave like any other desktop with no config file to write.
+            //
+            // Matched on the name rather than the protocol's device *type*
+            // because type is only `pointer` — the same value an external
+            // mouse or trackball reports, neither of which should have tap
+            // forced on. Every touchpad the kernel names carries
+            // "Touchpad" (this laptop's is `PIXA3854:00 093A:0274
+            // Touchpad`); a device that somehow doesn't needs its own
+            // `[[input]]` entry, which is exactly what the section is for.
+            inputs: vec![InputConfig {
+                name: "*Touchpad*".to_string(),
+                tap: Some(true),
+                tap_button_map: None,
+                click_method: None,
+                natural_scroll: None,
+                disable_while_typing: None,
+                accel_speed: None,
+            }],
         }
     }
 }
@@ -306,6 +478,8 @@ struct RawConfig {
     keybinds: Vec<Keybind>,
     #[serde(default, rename = "mousebind")]
     mousebinds: Vec<Mousebind>,
+    #[serde(default, rename = "input")]
+    inputs: Vec<InputConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -359,6 +533,31 @@ impl Config {
             }
             seen_buttons.push(label);
         }
+        // Same rule as the bindings above: an `[[input]]` that can never
+        // apply is reported now, while there is still a name to point at.
+        // A misconfigured device is invisible from the user's side — it just
+        // behaves as though the section were never written.
+        let mut seen_inputs: Vec<&str> = Vec::new();
+        for input in &raw.inputs {
+            if input.name.is_empty() {
+                return Err(ConfigError::EmptyInputName);
+            }
+            if input.is_empty() {
+                return Err(ConfigError::InputWithoutSettings(input.name.clone()));
+            }
+            if seen_inputs.contains(&input.name.as_str()) {
+                return Err(ConfigError::DuplicateInput(input.name.clone()));
+            }
+            seen_inputs.push(&input.name);
+            // libinput rejects an out-of-range speed itself, but only at
+            // the point the request is sent — one silent `invalid` result
+            // per device, long after the file was read.
+            if let Some(speed) = input.accel_speed
+                && !(-1.0..=1.0).contains(&speed)
+            {
+                return Err(ConfigError::AccelSpeedOutOfRange(speed));
+            }
+        }
         // An empty string here would reach `Command::new("")` and fail once
         // per keypress; an empty tag name would be permanent (ADR-006 has
         // no delete). Both are far better reported once, at load.
@@ -403,6 +602,11 @@ impl Config {
                 built_in.mousebinds
             } else {
                 raw.mousebinds
+            },
+            inputs: if raw.inputs.is_empty() {
+                built_in.inputs
+            } else {
+                raw.inputs
             },
         })
     }
@@ -506,6 +710,16 @@ fn binding_label(mods: &[Modifier], trigger: &str) -> String {
 }
 
 impl Config {
+    /// The `[[input]]` entry that applies to `device_name`, or `None` when
+    /// the device is not configured and should keep libinput's defaults.
+    ///
+    /// First match wins, so the order entries were written in is the order
+    /// that decides — that is what lets a specific device sit above a
+    /// catch-all `name = "*"` and still be reachable.
+    pub fn input_for(&self, device_name: &str) -> Option<&InputConfig> {
+        self.inputs.iter().find(|input| input.matches(device_name))
+    }
+
     /// The hotkey cheat-sheet, generated from the live bindings rather than
     /// hand-maintained alongside them — the previous fixed list had to be
     /// kept in sync by hand, which is exactly the drift a user-editable
@@ -1045,5 +1259,383 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.keybinds[0].keysym().unwrap(), 0xff0d);
+    }
+
+    // --- [[input]] ---------------------------------------------------------
+
+    /// The whole reason `[[input]]` exists: with no config file at all, a
+    /// laptop touchpad must have tap-to-click on. libinput defaults it to
+    /// off for any device with physical buttons, and buoy previously never
+    /// configured input devices, so tap silently did nothing.
+    #[test]
+    fn default_config_enables_tap_on_touchpads() {
+        let config = Config::default();
+        let touchpad = config
+            .input_for("PIXA3854:00 093A:0274 Touchpad")
+            .expect("a built-in [[input]] entry must match a touchpad");
+        assert_eq!(touchpad.tap, Some(true));
+    }
+
+    /// The built-in entry must be narrow enough not to reconfigure a
+    /// keyboard or an external mouse as a side effect.
+    #[test]
+    fn default_input_entry_does_not_match_non_touchpad_devices() {
+        let config = Config::default();
+        assert!(config.input_for("AT Translated Set 2 keyboard").is_none());
+        assert!(config.input_for("Logitech USB Receiver Mouse").is_none());
+    }
+
+    #[test]
+    fn parses_an_input_section_with_every_supported_setting() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            tap = true
+            tap_button_map = "lmr"
+            click_method = "clickfinger"
+            natural_scroll = true
+            disable_while_typing = false
+            accel_speed = 0.3
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.inputs.len(), 1);
+        let input = &config.inputs[0];
+        assert_eq!(input.name, "*Touchpad*");
+        assert_eq!(input.tap, Some(true));
+        assert_eq!(input.tap_button_map, Some(TapButtonMap::Lmr));
+        assert_eq!(input.click_method, Some(ClickMethod::Clickfinger));
+        assert_eq!(input.natural_scroll, Some(true));
+        assert_eq!(input.disable_while_typing, Some(false));
+        assert_eq!(input.accel_speed, Some(0.3));
+    }
+
+    /// An omitted setting must stay `None` rather than picking up the
+    /// built-in entry's value: `None` is what tells the WM to send no
+    /// request at all and leave libinput's own default in place, so
+    /// defaulting it to anything would silently override the device.
+    #[test]
+    fn omitted_input_settings_stay_unset() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            natural_scroll = true
+            "#,
+        )
+        .unwrap();
+        let input = &config.inputs[0];
+        assert_eq!(input.natural_scroll, Some(true));
+        assert_eq!(input.tap, None);
+        assert_eq!(input.tap_button_map, None);
+        assert_eq!(input.click_method, None);
+        assert_eq!(input.disable_while_typing, None);
+        assert_eq!(input.accel_speed, None);
+    }
+
+    /// Same replace-not-merge rule as `[[keybind]]`/`[[mousebind]]`: the
+    /// list is taken wholesale so an unwanted built-in entry can actually
+    /// be removed.
+    #[test]
+    fn declaring_any_input_replaces_the_built_in_input_list() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "Some Trackball"
+            natural_scroll = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.inputs.len(), 1);
+        assert_eq!(config.inputs[0].name, "Some Trackball");
+        assert!(config.input_for("PIXA3854:00 093A:0274 Touchpad").is_none());
+    }
+
+    /// `[[input]]` is its own list, independent of the binding lists —
+    /// rebinding a key must not cost you your touchpad settings.
+    #[test]
+    fn declaring_keybinds_leaves_the_built_in_inputs_alone() {
+        let config = Config::parse(
+            r#"
+            [[keybind]]
+            mod = ["Super"]
+            key = "Return"
+            action = "terminal"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.inputs, Config::default().inputs);
+    }
+
+    #[test]
+    fn input_entry_matches_device_names_by_wildcard() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            tap = true
+            "#,
+        )
+        .unwrap();
+        assert!(config.inputs[0].matches("PIXA3854:00 093A:0274 Touchpad"));
+        assert!(!config.inputs[0].matches("Some Keyboard"));
+    }
+
+    /// First match wins, so the order the user wrote is the order that
+    /// decides — a specific entry above a catch-all has to be reachable.
+    #[test]
+    fn input_for_returns_the_first_matching_entry() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            tap = true
+
+            [[input]]
+            name = "*"
+            tap = false
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .input_for("PIXA3854:00 093A:0274 Touchpad")
+                .unwrap()
+                .tap,
+            Some(true)
+        );
+        assert_eq!(config.input_for("Some Keyboard").unwrap().tap, Some(false));
+    }
+
+    /// An empty pattern matches no real device, so the entry could never
+    /// fire — the same "reject at load rather than silently do nothing"
+    /// rule the binding checks follow.
+    #[test]
+    fn input_with_an_empty_name_is_rejected() {
+        let err = Config::parse(
+            r#"
+            [[input]]
+            name = ""
+            tap = true
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::EmptyInputName));
+    }
+
+    /// An entry that names a device but sets nothing reads like it does
+    /// something and does not.
+    #[test]
+    fn input_with_no_settings_is_rejected() {
+        let err = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::InputWithoutSettings(name) if name == "*Touchpad*"));
+    }
+
+    /// Two entries for the same pattern means the second can never win
+    /// under first-match-wins.
+    #[test]
+    fn duplicate_input_name_is_rejected() {
+        let err = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            tap = true
+
+            [[input]]
+            name = "*Touchpad*"
+            natural_scroll = true
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::DuplicateInput(name) if name == "*Touchpad*"));
+    }
+
+    #[test]
+    fn accel_speed_outside_libinputs_range_is_rejected() {
+        for speed in ["1.5", "-1.5"] {
+            let contents = format!(
+                r#"
+                [[input]]
+                name = "*Touchpad*"
+                accel_speed = {speed}
+                "#
+            );
+            let err = Config::parse(&contents).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::AccelSpeedOutOfRange(_)),
+                "{speed} should have been rejected, got {err:?}"
+            );
+        }
+    }
+
+    /// libinput's range is inclusive at both ends, so the extremes must be
+    /// accepted rather than caught by an off-by-one bound.
+    #[test]
+    fn accel_speed_at_the_range_boundaries_is_accepted() {
+        for speed in ["-1.0", "0.0", "1.0"] {
+            let contents = format!(
+                r#"
+                [[input]]
+                name = "*Touchpad*"
+                accel_speed = {speed}
+                "#
+            );
+            assert!(
+                Config::parse(&contents).is_ok(),
+                "{speed} should have been accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_input_field_is_rejected_rather_than_ignored() {
+        let err = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            tap_to_click = true
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Toml(_)));
+    }
+
+    #[test]
+    fn input_enum_spellings_are_the_snake_case_libinput_names() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "a"
+            tap_button_map = "lrm"
+            click_method = "button_areas"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.inputs[0].tap_button_map, Some(TapButtonMap::Lrm));
+        assert_eq!(
+            config.inputs[0].click_method,
+            Some(ClickMethod::ButtonAreas)
+        );
+    }
+
+    #[test]
+    fn click_method_none_disables_physical_clicks_explicitly() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "a"
+            click_method = "none"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.inputs[0].click_method, Some(ClickMethod::None));
+    }
+
+    #[test]
+    fn settings_lists_only_what_the_entry_actually_sets() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            tap = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.inputs[0].settings(),
+            vec![LibinputSetting::Tap(true)]
+        );
+    }
+
+    /// The distinction the `Option` exists for: `tap = false` must produce a
+    /// request that actively disables tap, not vanish like an omitted key.
+    #[test]
+    fn an_explicit_false_still_produces_a_setting() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            tap = false
+            natural_scroll = false
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.inputs[0].settings(),
+            vec![
+                LibinputSetting::Tap(false),
+                LibinputSetting::NaturalScroll(false),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_covers_every_supported_field() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            tap = true
+            tap_button_map = "lmr"
+            click_method = "clickfinger"
+            natural_scroll = true
+            disable_while_typing = true
+            accel_speed = -0.5
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.inputs[0].settings(),
+            vec![
+                LibinputSetting::Tap(true),
+                LibinputSetting::TapButtonMap(TapButtonMap::Lmr),
+                LibinputSetting::ClickMethod(ClickMethod::Clickfinger),
+                LibinputSetting::NaturalScroll(true),
+                LibinputSetting::DisableWhileTyping(true),
+                LibinputSetting::AccelSpeed(-0.5),
+            ]
+        );
+    }
+
+    /// `tap_button_map` only means anything once tap is on, so it has to be
+    /// sent after `tap` — libinput keeps the two independently, and applying
+    /// them out of order on a device that starts with tap off is the kind of
+    /// thing that works by luck rather than by design.
+    #[test]
+    fn tap_is_applied_before_its_button_map() {
+        let config = Config::parse(
+            r#"
+            [[input]]
+            name = "*Touchpad*"
+            tap_button_map = "lmr"
+            tap = true
+            "#,
+        )
+        .unwrap();
+        let settings = config.inputs[0].settings();
+        let tap = settings
+            .iter()
+            .position(|s| matches!(s, LibinputSetting::Tap(_)))
+            .unwrap();
+        let map = settings
+            .iter()
+            .position(|s| matches!(s, LibinputSetting::TapButtonMap(_)))
+            .unwrap();
+        assert!(tap < map, "{settings:?}");
+    }
+
+    /// A built-in default that produced no settings would be a silent no-op.
+    #[test]
+    fn the_built_in_touchpad_entry_produces_the_tap_setting() {
+        let config = Config::default();
+        let touchpad = config.input_for("PIXA3854:00 093A:0274 Touchpad").unwrap();
+        assert_eq!(touchpad.settings(), vec![LibinputSetting::Tap(true)]);
     }
 }

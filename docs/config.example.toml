@@ -127,3 +127,63 @@ action = "move"
 mod = ["Super"]
 button = "Right"
 action = "resize"
+
+# --- Input devices ----------------------------------------------------------
+#
+# Each [[input]] block configures every libinput device whose name matches
+# `name`. Find the names with `libinput list-devices` (needs root), or read
+# them out of `/proc/bus/input/devices`.
+#
+#   name  = a pattern matched against the device name. `*` matches any run of
+#           characters and is the ONLY wildcard — `?` and `[...]` are literal.
+#           Case-sensitive. Matched top to bottom, first match wins, so put
+#           specific devices above a catch-all `name = "*"`.
+#
+# Every setting below is optional, and OMITTING one is not the same as setting
+# it to false: an omitted setting sends no request at all, leaving libinput's
+# own default in place, while `tap = false` actively disables tap. That is why
+# there is no way to write "leave this alone" explicitly — just don't list it.
+#
+# As with [[keybind]]/[[mousebind]], declaring ANY [[input]] replaces the
+# whole built-in list. The only built-in entry is the touchpad one below, so
+# if you add a block for some other device, restate `tap = true` here too or
+# your touchpad silently loses tap-to-click.
+#
+# Rejected at load (rather than looking configured and doing nothing):
+# an empty `name`, a block that sets nothing, a repeated `name`, and an
+# `accel_speed` outside -1.0..=1.0.
+
+# The built-in default, written out explicitly. libinput ships tap-to-click
+# DISABLED on any device that has physical buttons, which is every laptop
+# clickpad — without this, the touchpad moves the cursor and scrolls but
+# taps do nothing at all.
+[[input]]
+name = "*Touchpad*"
+# Tap-to-click. With `tap_button_map = "lrm"` (libinput's default) one finger
+# is left click, two fingers right click, three middle. Tap-and-drag and
+# double-tap come along with it — they are the same libinput feature.
+tap = true
+# "lrm" = 1/2/3 fingers -> left/right/middle. "lmr" = left/middle/right.
+# tap_button_map = "lrm"
+# How a PHYSICAL press resolves to a button, independent of tap:
+#   "button_areas" — the bottom of the pad is split into left/right zones
+#   "clickfinger"  — the finger count decides, anywhere on the pad
+#   "none"         — no physical click buttons
+# Leave unset to keep whatever the device defaults to; the WM logs the
+# current method at startup for any device configured here.
+# click_method = "button_areas"
+# natural_scroll = true
+# libinput calls this "dwt": ignore the touchpad briefly while typing.
+# disable_while_typing = true
+# Pointer acceleration, -1.0 (slowest) to 1.0 (fastest). 0.0 is the device
+# default, not "no acceleration".
+# accel_speed = 0.3
+
+# Other devices are left entirely alone unless you name them. Uncommenting
+# this would ALSO mean restating the touchpad block above, since any
+# [[input]] replaces the built-in list.
+#
+# [[input]]
+# name = "*Logitech*"
+# natural_scroll = false
+# accel_speed = 0.0
