@@ -20,7 +20,7 @@ design decided to start coding against the `tinyrwm` Rust skeleton.
   custom popup rendering (coach)
 - Combine: reuse the same fuzzel picker for both tag-switching and tag-assignment,
   distinguished only by which hotkey opens it (user)
-- Adapt: dwm's always-visible status-bar tag indicator (user)
+- Adapt: dwm's always-visible buoy-status-bar tag indicator (user)
 - Modify/scope-down: status bar only needs to show the *currently selected* tag per
   output — not a full per-window multi-tag breakdown (user)
 - Eliminate → converged concrete flow: focus window → hotkey → fuzzel selector opens

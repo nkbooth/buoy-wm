@@ -1,0 +1,8 @@
+# The river protocol definitions are vendored upstream files (MIT, see
+# NOTICE.md). Marking them keeps GitHub's language stats reporting this as
+# the Rust project it is, and keeps them out of diff review by default.
+wm/protocol/*.xml linguist-vendored
+
+# Normalise line endings for text; the Wayland protocol XML and Rust
+# sources are all LF upstream.
+* text=auto eol=lf

@@ -17,5 +17,5 @@
     - [Pinned terminal lifecycle](./features-and-acceptance-criteria.md#pinned-terminal-lifecycle)
     - [Floating placement](./features-and-acceptance-criteria.md#floating-placement)
     - [Tag-manager popup](./features-and-acceptance-criteria.md#tag-manager-popup)
-    - [Status bar](./features-and-acceptance-criteria.md#status-bar)
+    - [Status bar](./features-and-acceptance-criteria.md#buoy-status-bar)
   - [Open questions](./open-questions.md)

@@ -1,22 +1,203 @@
-# buoy-wm
+# buoy
 
-A Wayland window manager for `river` 0.4+, speaking
-`river-window-management-v1`. It owns all tag/workspace state itself (the
-compositor has none), gives every tag a persistent pinned `zellij` terminal
-backdrop, floats everything else above it, and exposes an IPC socket that
-drives a `fuzzel`-based tag-manager picker and a status bar.
+A keyboard-driven window manager for the [river](https://codeberg.org/river/river)
+Wayland compositor (0.4+), built around a terminal you never have to open.
+
+`buoy` speaks `river-window-management-v1`, which means river handles pixels
+and input while `buoy` decides window policy. It owns **all** tag state
+itself — the compositor keeps none — so the model below is entirely `buoy`'s
+to define.
+
+## The idea
+
+Two convictions shape everything here.
+
+**Terminal first.** Every tag has a permanent, fullscreen terminal running a
+[`zellij`](https://zellij.dev) session pinned behind everything else. It is
+not a window you launch, focus, or close; it is the tag's floor. Switch to
+the `email` tag and its zellij session is simply *there*, exactly as you left
+it — across tag switches, across days, across `buoy` restarts. Graphical
+applications float on top of that floor when you need them.
+
+**Keyboard primary.** Every operation has a binding, all of them rebindable
+and removable. The mouse can move and resize floating windows, and that is
+the extent of what it is required for. There is no panel to click, no menu
+bar, and no tray. `Super+Shift+?` prints the bindings actually in effect.
+
+What `buoy` deliberately does not do: automatic tiling, window decorations,
+gaps, animations, or a session/state file. Floating windows are placed once
+and then left alone.
+
+## Requirements
+
+| | |
+| --- | --- |
+| **river** | 0.4 or newer, built with `river-window-management-v1` |
+| **foot** | default terminal — swappable, see [Configuration](#configuration) |
+| **zellij** | runs inside each tag's pinned terminal |
+| **fuzzel** | drives the tag pickers and the hotkey cheat-sheet |
+| **waybar** | *optional* — renders the current-tag indicator |
+
+`river`'s `river_input_manager_v1` and `river_libinput_config_v1` globals are
+also optional: without them, `[[input]]` blocks are skipped with one log line
+and every device keeps libinput's own defaults.
+
+## Install
+
+### From a release
+
+```sh
+curl -fsSL https://github.com/nkbooth/buoy-wm/releases/latest/download/buoy-wm-x86_64-unknown-linux-gnu.tar.gz \
+  | tar -xz -C /tmp
+/tmp/buoy-wm-*/install.sh
+```
+
+### From source
+
+The Rust toolchain and `libwayland-dev` are the only build dependencies.
+
+```sh
+cargo build --workspace --release
+./scripts/install.sh
+```
+
+Both paths put all three binaries — `buoy-wm`, `buoy-tag-picker`, `buoy-status-bar` —
+into `~/.local/lib/buoy-wm` (override with `BUOY_INSTALL_DIR`) and symlink
+only `buoy-wm` onto your `PATH`. **They must stay in one directory**: the WM
+locates `buoy-tag-picker` as a sibling of its own executable.
+
+Installing outside the build tree is deliberate. A `river` session `exec`s
+the WM as its session leader, so a `cargo clean` that deleted the running
+binaries would cost you the session. For the same reason: **verify a new
+build from a TTY or a nested river before logging out.** A broken WM binary
+means a black screen and a bounce back to your display manager, with no shell
+to fix it from.
+
+## Running it
+
+`buoy-wm` is the command river runs at startup:
+
+```sh
+river -c ~/.local/lib/buoy-wm/buoy-wm
+```
+
+To start helpers alongside it, point river at a script instead and `exec` the
+WM last, so its lifetime is the session's:
+
+```sh
+#!/bin/sh
+# ~/.config/river/init
+waybar &
+exec ~/.local/lib/buoy-wm/buoy-wm
+```
+
+## Tags
+
+A tag is a named workspace. It is created the moment you first name it and
+lives until the session ends; there is no fixed set to configure up front and
+no numbered grid to memorise. Up to 64 tags exist at once.
+
+Three rules cover the whole model:
+
+- **One tag is displayed per output.** Each monitor shows exactly one tag,
+  and each tag can be displayed on at most one monitor at a time.
+- **A window can carry several tags.** It is visible whenever any tag it
+  carries is the one being displayed. This is how a chat window follows you
+  between `work` and `personal` without being duplicated.
+- **Every tag owns one pinned terminal.** Spawned on the tag's first use,
+  held fullscreen behind every other window, and not closable with the
+  ordinary close binding.
+
+"The active output" — the target of tag switches — is whichever monitor the
+pointer is currently over.
+
+## Keybindings
+
+Defaults, in effect when no config file overrides them. `Super` is `Mod4`.
+
+| Keybind | Action |
+| --- | --- |
+| `Super+Space` | Open a new floating terminal |
+| `Super+N` | Rotate focus to the next window |
+| `Super+Q` | Close the focused window (never the pinned terminal) |
+| `Super+Tab` | Cycle the active output to the next tag |
+| `Super+R` | Open the application launcher |
+| `Super+A` | Open the tag-assignment picker for the focused window |
+| `Super+S` | Open the tag-switch picker for the active output |
+| `Super+Shift+?` | Show the hotkey cheat-sheet |
+| `Super+Esc` | Exit the session |
+| `Super+Left-drag` | Move a window |
+| `Super+Right-drag` | Resize a window |
+
+The cheat-sheet is generated from the bindings actually loaded, so it always
+reflects your config rather than this table.
+
+### Switching and creating tags — `Super+S`
+
+Opens a `fuzzel` list of every tag; picking one displays it on the active
+output, spawning its pinned terminal if this is its first use.
+
+Typing a name that matches nothing and confirming **creates that tag and
+switches to it in one action**. Creating a tag is how you start working
+somewhere new, so it lives here rather than buried in the assignment picker.
+Typing the exact name of an existing tag switches to it instead of
+duplicating it. At the 64-tag cap the picker reopens with the rejection shown
+and your typed name restored — nothing is created, nothing is switched.
+
+### Assigning tags to a window — `Super+A`
+
+Opens a `fuzzel` checklist of every tag, pre-checked for the tags the focused
+window already carries. Selecting a row toggles that tag and reopens the
+list, so you can toggle several in one visit. Existing tags only.
+
+## Status bar
+
+`buoy-status-bar` is a companion binary that feeds one waybar `custom/tag` module
+per output. It takes the output's numeric id as its only argument and loops
+itself, so waybar needs neither `interval` nor `signal`:
+
+```jsonc
+// ~/.config/waybar/config.jsonc
+[
+  {
+    "layer": "top",
+    "output": "eDP-1",
+    "modules-right": ["custom/tag"],
+    "custom/tag": {
+      "exec": "~/.local/lib/buoy-wm/buoy-status-bar 0",
+      "return-type": "json"
+    }
+  },
+  {
+    "layer": "top",
+    "output": "DP-2",
+    "modules-right": ["custom/tag"],
+    "custom/tag": {
+      "exec": "~/.local/lib/buoy-wm/buoy-status-bar 1",
+      "return-type": "json"
+    }
+  }
+]
+```
+
+Output ids are `buoy`'s own, assigned in the order river announces monitors —
+they are not connector names, and nothing translates between the two. Find
+which is which by switching tags and watching which bar reacts. The module
+emits a `normal` or `disconnected` CSS class for your stylesheet to target;
+if the WM stops responding the bar degrades to the disconnected state rather
+than freezing on a stale tag name.
 
 ## Configuration
 
-Optional, at `~/.config/buoy/config.toml` (or `$XDG_CONFIG_HOME/buoy/`).
-With no config file, the defaults below apply unchanged. See
-[`docs/config.example.toml`](docs/config.example.toml) for a fully
-commented example.
+Optional, at `~/.config/buoy/config.toml` (or under `$XDG_CONFIG_HOME`). With
+no config file the built-in defaults apply unchanged.
+[`docs/config.example.toml`](docs/config.example.toml) is a fully commented
+copy of exactly those defaults — start there.
 
 ```toml
 [defaults]
 terminal = "foot"      # also used for each tag's pinned terminal
-launcher = "fuzzel"    # the `launcher` action only — see note below
+launcher = "fuzzel"    # the `launcher` action only — see below
 default_tag = "default"
 
 [[keybind]]
@@ -26,97 +207,62 @@ action = { switch_tag = "email" }   # created on first press
 
 [[keybind]]
 mod = ["Super"]
-key = "P"
+key = "p"
 action = { exec = "grim -g \"$(slurp)\" ~/shot.png" }
 ```
 
-Declaring any `[[keybind]]` replaces the entire built-in set, so list every
-binding you want — that is what makes a default rebindable *and* removable.
-`[[mousebind]]` is a separate list with the same rule. A malformed config is
-reported on stderr and the built-in defaults are used, rather than refusing
-to start a session you would then have no way to fix the file from.
+A malformed config is reported on stderr and the built-in defaults are used
+instead. Refusing to start would leave you in a session with no way to reach
+the file and fix it.
 
-Key names are keysyms: a single character (`a`, `1`, `?`), a named key
-(`Return`, `Space`, `Tab`, `Escape`, `Left`, `Page_Up`), or `F1`–`F35`.
-Named keys are case-insensitive; single characters are **not**. An
-uppercase letter is the *shifted* symbol, so `Super`+`Q` can never fire —
-write `key = "q"` for Super+q, or add `"Shift"`. The config is rejected at
-load if you get this wrong, rather than the binding silently doing nothing.
-`mod` is optional; omit it to bind an unmodified key.
+### Bindings
 
-Actions: `terminal`, `launcher`, `close`, `focus_next`, `exit`,
-`cycle_tag`, `tag_picker`, `tag_switch`, `hotkeys`,
-`{ switch_tag = "<name>" }`, `{ exec = "<command>" }`. `exec` runs through
-`sh -c`, so pipes and arguments work. `move` and `resize` drive a pointer
-drag and are mousebind-only. Binding the same trigger twice is an error.
+**Declaring any `[[keybind]]` replaces the entire built-in set**, so list
+every binding you want. That is what makes a default rebindable *and*
+removable. `[[mousebind]]` is a separate list with the same rule. Binding the
+same trigger twice is an error, not a silent race.
 
-`launcher` sets the program the `launcher` action spawns, and nothing else.
-`fuzzel` remains hardcoded where it is driven as a menu rather than as a
-launcher — the tag pickers (which spawn it from the separate `tag-picker`
-binary) and the `hotkeys` cheat-sheet — because those pass fuzzel-specific
+Keys are keysym names: a single character (`a`, `1`, `?`), a named key
+(`Return`, `Space`, `Tab`, `Escape`, `Left`, `Page_Up`), or `F1`–`F35`. Named
+keys are case-insensitive; **single characters are not**. An uppercase letter
+is the *shifted* symbol, so `Super`+`Q` can never fire — write `key = "q"`,
+or add `"Shift"`. This is rejected at load rather than silently doing
+nothing. `mod` is optional; omit it to bind an unmodified key.
+
+Actions: `terminal`, `launcher`, `close`, `focus_next`, `exit`, `cycle_tag`,
+`tag_picker`, `tag_switch`, `hotkeys`, `{ switch_tag = "<name>" }`, and
+`{ exec = "<command>" }`. `exec` runs through `sh -c`, so pipes, arguments
+and `~` work as they would in a shell. `move` and `resize` drive a pointer
+drag and are mousebind-only.
+
+### Programs
+
+`launcher` sets what the `launcher` action spawns, and nothing else. `fuzzel`
+stays hardcoded where it is driven as a *menu* rather than a launcher — the
+two tag pickers and the cheat-sheet — because those pass fuzzel-specific
 flags (`--dmenu`, `--layer`, `--prompt`).
 
-A tag's pinned terminal is spawned as `terminal` plus
-`pinned_terminal_args`, which defaults to foot's
-`["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]`. Set it
-alongside `terminal` if your terminal spells the app-id flag differently
-(most use `--class`). `{app_id}` is required — it is how the WM recognises
-that window — and its absence is rejected at load.
+A tag's pinned terminal is spawned as `terminal` plus `pinned_terminal_args`,
+defaulting to foot's spelling:
 
-## Keybindings
+```toml
+pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]
+```
 
-These are the defaults, used when no config file overrides them. All use
-`Mod4` (the "Super"/"Windows" key) as the modifier.
+Set it alongside `terminal` if your terminal spells the app-id flag
+differently — most use `--class`. `{app_id}` is **required**: it is how the
+WM recognises the pinned window, and its absence is rejected at load.
+`{session}` becomes the tag's zellij session name.
 
-| Keybind | Action |
-| --- | --- |
-| `Super+Space` | Open a new floating terminal (`foot`) |
-| `Super+N` | Rotate focus to the next window |
-| `Super+Q` | Close the focused window (the pinned terminal can't be closed this way) |
-| `Super+Tab` | Cycle the active output to the next tag |
-| `Super+R` | Open the application launcher (`fuzzel`) |
-| `Super+A` | Open the tag-assignment picker for the focused window |
-| `Super+S` | Open the tag-switch picker for the active output (also creates tags) |
-| `Super+Shift+?` | Show the hotkey cheat-sheet |
-| `Super+Esc` | Exit the session |
-| `Super+Left-click` | Move a window (drag) |
-| `Super+Right-click` | Resize a window (drag) |
+### Input devices
 
-The cheat-sheet is generated from the bindings actually in effect, so it
-reflects your config rather than this table.
-
-"The active output" is whichever monitor the pointer is currently over.
-
-### Tag-assignment picker (`Super+A`)
-
-Opens a `fuzzel` checklist of every tag, checked for the tags the focused
-window currently has. Type to filter the list; selecting a row toggles that
-tag on the window and reopens the list, so several tags can be toggled in
-one visit. Only existing tags — new tags are created from the switcher
-below.
-
-### Tag-switch picker (`Super+S`)
-
-Opens a `fuzzel` list of every tag. Selecting one switches the active
-output to display that tag (spawning its pinned terminal on first use).
-
-Typing a name that matches no existing tag and confirming it creates that
-tag and switches to it in the same action — creating a tag is how you start
-working somewhere new, so it lives here rather than in the assignment
-picker. Typing the exact name of a tag that already exists switches to it
-rather than duplicating it. At the 64-tag registry cap the picker reopens
-with the rejection shown and your typed name restored, and nothing is
-created or switched.
-
-## Input devices
-
-Touchpads, keyboards and mice are configured with `[[input]]` blocks, each
-matching devices by libinput name:
+Touchpads, keyboards and mice are configured with `[[input]]` blocks matched
+against libinput device names:
 
 ```toml
 [[input]]
 name = "*Touchpad*"           # `*` is the only wildcard
-tap = true                    # tap-to-click: 1/2/3 fingers = left/right/middle
+tap = true                    # 1/2/3 fingers = left/right/middle
 tap_button_map = "lrm"        # or "lmr" (1/2/3 = left/middle/right)
 click_method = "button_areas" # or "clickfinger", "none"
 natural_scroll = true
@@ -125,57 +271,62 @@ accel_speed = 0.3             # -1.0 (slowest) .. 1.0 (fastest)
 ```
 
 The only built-in entry is `name = "*Touchpad*"` with `tap = true`, because
-libinput defaults tap-to-click to *off* on any device with physical buttons
-— so without it a laptop touchpad accepts motion and scrolling but ignores
-taps entirely. Matching is on the name rather than the protocol's device
-*type*, which reports only `pointer` for touchpads, mice and trackballs
-alike; forcing tap on an external mouse is not wanted.
+libinput ships tap-to-click *disabled* on any device with physical buttons —
+so without it a laptop touchpad accepts motion and scrolling but ignores taps
+entirely. Matching is on name rather than the protocol's device *type*, which
+reports plain `pointer` for touchpads, mice and trackballs alike; forcing tap
+on an external mouse is not wanted.
 
-Every setting is optional, and an omitted one is **not** the same as
-`false`: an omitted setting sends no request at all and leaves libinput's
-own default alone, while `tap = false` actively turns tap off. As with the
-binding lists, declaring any `[[input]]` replaces the built-in list
-entirely, so restate `tap = true` for your touchpad if you add entries for
-other devices. Entries are matched top to bottom and the first match wins,
-which is what lets a specific device sit above a catch-all `name = "*"`.
+An omitted setting is **not** the same as `false`. Omitting one sends no
+request and leaves libinput's default alone; `tap = false` actively turns tap
+off. As with bindings, declaring any `[[input]]` replaces the built-in list,
+so restate `tap = true` for your touchpad if you add entries for other
+devices. Entries match top to bottom, first match wins — which is what lets a
+specific device sit above a catch-all `name = "*"`.
 
-A pattern matching nothing, an entry setting nothing, a duplicate pattern,
-and an `accel_speed` outside `-1.0..=1.0` are all rejected at load —
-otherwise the section would look configured and silently do nothing.
+Rejected at load, rather than looking configured and doing nothing: a pattern
+matching no device, an entry setting nothing, a duplicate pattern, and an
+`accel_speed` outside `-1.0..=1.0`. Configured devices log their tap state
+and click method at startup and after each setting is applied; anything the
+device rejects is named on stderr.
 
-Requires river's `river_input_manager_v1` and `river_libinput_config_v1`
-globals. Both are optional: on a river without them the WM logs once and
-every device keeps libinput's defaults. For a device you have configured,
-its tap state and click method are logged at startup and again after each
-setting is applied, and any setting the device rejects is named on stderr.
+Find device names with `libinput list-devices` (needs root) or read them out
+of `/proc/bus/input/devices`.
+
+## IPC
+
+The WM listens on a Unix socket at `$XDG_RUNTIME_DIR/buoy-wm.sock`, speaking
+newline-delimited JSON. `buoy-tag-picker` and `buoy-status-bar` are its only clients,
+but the protocol is plain enough to script against:
+
+```sh
+echo '{"type":"get-state"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/buoy-wm.sock
+```
 
 ## Development
-
-Build and test the full workspace (`wm`, `tag-picker`, `status-bar`):
 
 ```sh
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
-## Installing
+`.devcontainer/` carries a ready toolchain if you would rather not install
+one. `pre-commit run --all-files` runs the fmt and clippy gates; it is
+deliberately not `pre-commit install`ed, since the hooks need a toolchain the
+host may not have.
 
-The session must not run out of `target/`, which `cargo clean` wipes. Build a
-release inside the devcontainer, then install from the host:
+Design history — PRD, architecture decisions, and a spec with a Dev Agent
+Record for every story — lives under [`docs/planning/`](docs/planning/).
 
-```sh
-cargo build --workspace --release   # in the devcontainer
-./scripts/install.sh                # on the host
-```
+## License
 
-All three binaries go to `~/.local/lib/buoy-wm` (override with
-`BUOY_INSTALL_DIR`), and they must stay in one directory — the WM finds
-`tag-picker` as a sibling of its own executable. Only `buoy-wm` is symlinked
-onto `PATH`; nothing resolves the other two through it.
+[Reciprocal Public License 1.5](LICENSE.md). RPL 1.5 is a strong reciprocal
+license: if you deploy a modified `buoy`, including internally, you are
+required to publish your changes. Personal and research use carry no such
+obligation.
 
-River `exec`s the WM as the session leader, so a broken install means a black
-screen and a bounce back to GDM with no shell to recover from. Verify from a
-TTY or a nested river before logging out.
-
-Story specs and Dev Agent Records live under `docs/planning/epics/`.
+Third-party material redistributed here — river's protocol XML (MIT) and the
+[`tinyrwm`](https://codeberg.org/river/tinyrwm) scaffolding this started from
+(0BSD) — is itemised in [NOTICE.md](NOTICE.md).

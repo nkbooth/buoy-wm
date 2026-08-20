@@ -1,31 +1,77 @@
 # SPDX-FileCopyrightText: © 2026 Nick Booth
-# SPDX-License-Identifier: 0BSD
+# SPDX-License-Identifier: RPL-1.5
 #
-# Story 1.1: cargo build + cargo test on push. Verified locally via `act`
-# inside the devcontainer (no GitHub remote exists for this repo yet).
+# Unless explicitly acquired and licensed from Licensor under another
+# license, the contents of this file are subject to the Reciprocal Public
+# License ("RPL") Version 1.5, or subsequent versions as allowed by the
+# RPL, and You may not copy or use this file in either source code or
+# executable form, except in compliance with the terms and conditions of
+# the RPL.
+#
+# All software distributed under the RPL is provided strictly on an "AS
+# IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+# LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+# LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+# language governing rights and limitations under the RPL.
+#
+# Gates every push: format, lint, build, test. `--locked` throughout, so a
+# Cargo.lock that disagrees with the manifests fails here rather than
+# resolving to something nobody tested.
 name: CI
 
 on:
   push:
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings are errors in CI only; a local `cargo build` stays quiet enough
+  # to work in.
+  RUSTFLAGS: -D warnings
+
 jobs:
-  build-and-test:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       # Required to link wayland-client/wayland-backend (wm/Cargo.toml deps).
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config
 
-      # Story 2.2: workspace-wide, from the repo root, so both `wm` and
-      # `tag-picker` build/test in one pass rather than needing a
-      # per-member step each.
+      - uses: Swatinem/rust-cache@v2
+
+      # Formatting first: it needs no dependencies and fails in seconds.
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
       - name: cargo build
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  # Separate job: the MSRV declared in [workspace.package] is a promise to
+  # anyone packaging this, and an accidental use of a newer feature would
+  # otherwise only surface in a distro build.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked

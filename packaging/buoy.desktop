@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=buoy
+Comment=Keyboard-driven window manager on the river compositor
+Exec=river -c /usr/libexec/buoy-wm/buoy-wm
+Type=Application
+DesktopNames=buoy
+Keywords=tiling;wayland;river;

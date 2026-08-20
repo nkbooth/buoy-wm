@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: RPL-1.5
+#
+# Unless explicitly acquired and licensed from Licensor under another
+# license, the contents of this file are subject to the Reciprocal Public
+# License ("RPL") Version 1.5, or subsequent versions as allowed by the
+# RPL, and You may not copy or use this file in either source code or
+# executable form, except in compliance with the terms and conditions of
+# the RPL.
+#
+# All software distributed under the RPL is provided strictly on an "AS
+# IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+# LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+# LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+# language governing rights and limitations under the RPL.
+#
+# Builds the release tarball on a `v*` tag. See docs/PACKAGING.md for how
+# this feeds the Homebrew tap and the COPR RPM.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  build:
+    # Deliberately NOT ubuntu-latest. glibc is forward- but not
+    # backward-compatible, so the oldest available runner sets the lowest
+    # glibc floor these binaries impose on users. 22.04 is glibc 2.35.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # libwayland-dev provides the headers and .pc file that
+      # wayland-client/wayland-backend link against at build time. At run
+      # time only libwayland-client.so.0 is needed, which every Wayland
+      # system already has.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config
+
+      # A tag whose version disagrees with the manifest produces a release
+      # that installs as a different version than it claims to be. Fail
+      # here rather than shipping it.
+      - name: Check tag matches workspace version
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          manifest="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [[ "${tag#v}" != "$manifest" ]]; then
+            echo "::error::tag $tag does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+          echo "VERSION=$manifest" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --workspace --release --locked
+
+      - name: Test
+        run: cargo test --workspace --release --locked
+
+      # The tarball is self-contained: the same install.sh the repo ships
+      # (it detects binaries beside itself), the docs a new user needs, and
+      # the licence texts RPL 1.5 §6.4(a) requires to travel with it.
+      - name: Stage tarball
+        run: |
+          stage="buoy-wm-${VERSION}-${TARGET}"
+          mkdir -p "dist/$stage"
+          cp target/release/buoy-wm target/release/buoy-tag-picker target/release/buoy-status-bar "dist/$stage/"
+          cp scripts/install.sh "dist/$stage/"
+          cp README.md LICENSE.md NOTICE.md "dist/$stage/"
+          cp docs/config.example.toml "dist/$stage/"
+          tar -C dist -czf "dist/$stage.tar.gz" "$stage"
+          (cd dist && sha256sum "$stage.tar.gz" > "$stage.tar.gz.sha256")
+          echo "ARCHIVE=dist/$stage.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARCHIVE }}
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # Idempotent so a re-run after a transient failure replaces the
+          # assets instead of erroring on an existing release.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber "$ARCHIVE" "$ARCHIVE.sha256"
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              "$ARCHIVE" "$ARCHIVE.sha256"
+          fi

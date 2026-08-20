@@ -30,7 +30,7 @@ commands (toggle tag, create tag, switch tag) from external clients.
 **Interface:** Unix socket, JSON Lines protocol (see ADR-007).
 **Key dependencies:** `wm-core`.
 
-## tag-picker (companion client, separate binary)
+## buoy-tag-picker (companion client, separate binary)
 **Responsibility:** Hotkey-invoked; queries `ipc-server` for the focused
 view's current tags, renders a `fuzzel` checkbox list plus free-text add-new
 row, writes the toggled/created selection back over the socket. Reused
@@ -38,7 +38,7 @@ unmodified for tag-switching (different hotkey, different query).
 **Interface:** Unix socket client to `ipc-server`; spawns/talks to `fuzzel`.
 **Key dependencies:** `ipc-server`, `fuzzel` (external binary).
 
-## status-bar (companion client, separate binary)
+## buoy-status-bar (companion client, separate binary)
 **Responsibility:** Does not render its own surface — `wlr-layer-shell` is
 rejected as output-scoped, not tag-scoped (see technical-constraints.md), so
 this client instead drives a waybar custom module: it subscribes to (or
