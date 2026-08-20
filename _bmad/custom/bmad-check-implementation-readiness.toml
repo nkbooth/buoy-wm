@@ -1,8 +1,0 @@
-# Project overrides for bmad-check-implementation-readiness.
-# Committed — applies to everyone working on buoy-wm.
-
-[workflow]
-
-persistent_facts = [
-  "buoy-wm's architecture has no secrets: single-user local session, Unix domain socket IPC relying on filesystem permissions only, no external API calls, no auth layer (see docs/planning/architecture/authentication-authorization.md). The secrets-infrastructure requirement (.env.template with op:// URIs, gitleaks hook in .pre-commit-config.yaml) and the CI secret-wiring requirement are WAIVED for this project per explicit user decision on 2026-08-06. Do NOT flag BLOCKED status for a missing .env.template or missing gitleaks hook in buoy-wm. The devcontainer-present and CI-workflow-present blocking requirements are unaffected and still apply.",
-]
