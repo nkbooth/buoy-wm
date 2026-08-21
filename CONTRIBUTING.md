@@ -89,6 +89,98 @@ comments for the hidden constraint, the non-obvious invariant, or the
 workaround for specific upstream behaviour. There are a lot of those in this
 codebase already; they are the most valuable thing in it.
 
+## Naming and readability
+
+These are conventions the codebase already follows almost everywhere and
+had never written down, which is exactly why review could not catch the
+places it had drifted from them (audit finding J-10). Where a rule has an
+exception in the tree, the exception is named — an unnamed one is drift.
+
+**Casing is per boundary, not per language.** Each of these is a contract
+with something outside this repo, so the case is not a style choice:
+
+| Surface | Case | Example |
+| --- | --- | --- |
+| TOML keys | `snake_case` | `pinned_terminal_args` |
+| TOML *values* — every serde enum | `snake_case` | `action = "cycle_tag"` |
+| IPC JSON `type` | `kebab-case` | `{"type":"switch-tag"}` |
+| Window `app_id` | `kebab-case` | `pinned-term-3` |
+| waybar CSS classes | `kebab-case` | `disconnected` |
+| Rust | rustfmt's defaults | — |
+
+**Every serde enum gets `#[serde(rename_all = ...)]`.** Its absence is the
+bug: two enums in one config table without it produced `mod = ["Super"]`
+next to `action = "resize"`, PascalCase and snake_case values in a
+four-line block. A `rename_all` change silently changes the spelling a
+user's config has to use, so each one is pinned by a test.
+
+**American English**, because the protocol, `libinput` and serde all are,
+and one file switching halfway is worse than either choice.
+
+**`e` is always an error.** Beyond that, a single-character binding is
+fine for a closure whose whole scope is one expression and whose type is
+obvious from the line — `|t| t.id`. What is not fine is binding a letter
+that means something else in the same file: an `|o|` holding a `Window`,
+in a module where `o` is an output everywhere else, reads as a different
+type than it is. `clippy::min_ident_chars` exists in the toolchain but is
+not enabled: it would fire on about forty idiomatic closures to catch the
+one that misleads.
+
+**Four parameters is where you look for a struct.** Clippy fails the build
+at seven (`clippy.toml`), which is the outer limit rather than the target.
+Two adjacent parameters of the same type are the real hazard, because
+transposing them compiles: either the types have to differ, or the names
+have to make the order obvious at *every* call site, or a test has to hold
+the order down. `output_contains(position, dimensions, point)` takes three
+`(i32, i32)`s and is the third case — the transposition it cannot prevent
+is what its two tests are for.
+
+**No `bool` parameter that a call site passes as a literal.** `f(x, true)`
+tells the reader nothing; a two-variant enum does. The one `bool`
+parameter in the tree, `WindowManager::manage_seats`'s `any_new_windows`,
+is a private method whose single call site is four lines above it and
+passes a named binding — a second `bool` on it is the signal to make the
+enum.
+
+**No tuple return past two elements**, and past one only when both halves
+are the same kind of thing (`(width, height)`, `(x, y)`). Anything else
+gets a named struct; a caller writing `let (_, _, thing) = f()` is the
+symptom.
+
+**An error is typed the moment a caller might branch on it.** Every error
+that crosses out of `wm_core`, `config` or `ipc` is an enum implementing
+`Display`, because those callers do match on the variant and because a log
+line printing a Rust identifier at a user is not a diagnostic —
+`ConfigError` and `WmCoreError` are the shape to copy. `Result<_, String>`
+is for the other case, and only that one: a message whose sole consumer
+formats it into a notification or a stderr line and stops. Both satellites
+use it throughout for exactly that reason.
+
+**Model the invariant in the type before reaching for `expect`.** The
+`buoy-wm` binary contains exactly one non-test `expect`, and it carries
+its own proof: `main` exits before the first dispatch if that global is
+absent, and the alternative — returning without `manage_finish()` — would
+freeze the desktop rather than end the session. A new `expect` needs an
+argument of that shape or it needs a different design. The same standard
+covers indexing: the two `windows[i]` expressions in `compositor::seat`
+each sit directly below the `position()` that produced `i`, with no
+mutation in between, and say so.
+
+**Doc comments state the contract first, then a `# Rationale` heading for
+why.** A reader looking up what a function does should not have to read
+three paragraphs of history to find out.
+
+**Comments say why, and cite rather than narrate.** A story number or an
+audit finding id is a citation attached to a reason — *"handled gracefully
+rather than panicking (NFR2)"* — never the reason itself. Roughly a
+hundred `Story N.N Task N:` prefixes predate this rule and are being left
+alone; do not add more.
+
+**A backticked identifier is a reference.** In `///` this is enforced —
+`[`Foo::bar`]` is checked by CI's `cargo doc`, so a rename cannot leave it
+pointing at nothing. In `//` nothing checks it, so prefer `///` whenever
+the comment describes an item rather than a line inside one.
+
 ## Testing against a real compositor
 
 The Wayland half of `buoy` cannot be verified without a live river session,
