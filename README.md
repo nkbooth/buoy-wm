@@ -49,10 +49,31 @@ and every device keeps libinput's own defaults.
 ### From a release
 
 ```sh
-curl -fsSL https://github.com/nkbooth/buoy-wm/releases/latest/download/buoy-wm-x86_64-unknown-linux-gnu.tar.gz \
-  | tar -xz -C /tmp
-/tmp/buoy-wm-*/install.sh
+version=0.1.0
+archive="buoy-wm-${version}-x86_64-unknown-linux-gnu.tar.gz"
+base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"
+
+workdir="$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$archive" "$base/$archive"
+curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$archive.sha256" "$base/$archive.sha256"
+(cd "$workdir" && sha256sum -c "$archive.sha256")
+
+# Optional and stronger: proves this exact archive came out of this repo's
+# release workflow. See SECURITY.md.
+gh attestation verify "$workdir/$archive" --repo nkbooth/buoy-wm
+
+tar -xzf "$workdir/$archive" -C "$workdir"
+"$workdir/buoy-wm-${version}-x86_64-unknown-linux-gnu/install.sh"
+rm -rf "$workdir"
 ```
+
+Longer than a one-line pipe on purpose. `mktemp -d` rather than `/tmp`,
+because `/tmp` is world-writable and sticky; an exact path rather than a
+`/tmp/buoy-wm-*/install.sh` glob, because another local user can pre-create
+a directory that sorts first and have the shell run *their* `install.sh` as
+you; a pinned version rather than `releases/latest/download/...`, because
+that URL is a moving target; and the checksum is verified because CI
+publishes it and nothing was checking it.
 
 ### From source
 

@@ -1,0 +1,54 @@
+{
+  // SPDX-FileCopyrightText: © 2026 Nick Booth
+  // SPDX-License-Identifier: RPL-1.5
+  //
+  // Unless explicitly acquired and licensed from Licensor under another
+  // license, the contents of this file are subject to the Reciprocal Public
+  // License ("RPL") Version 1.5, or subsequent versions as allowed by the
+  // RPL, and You may not copy or use this file in either source code or
+  // executable form, except in compliance with the terms and conditions of
+  // the RPL.
+  //
+  // All software distributed under the RPL is provided strictly on an "AS
+  // IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+  // LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+  // LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+  // PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+  // language governing rights and limitations under the RPL.
+  //
+  // Opt-in variant for running CI locally with `act`, selected explicitly:
+  //
+  //   devpod up . --devcontainer-path .devcontainer/act/devcontainer.json
+  //
+  // The mount below is why this is not the default. `act` needs a container
+  // engine to launch runner images, and the only one available here is the
+  // host user's own rootless Podman socket (Podman speaks the Docker API on
+  // it). Anything running in this container can therefore create host
+  // containers with arbitrary bind mounts, which is equivalent to full
+  // control of the host user account — the isolation is nominal. Accept
+  // that for a deliberate `act` session; do not accept it for every
+  // `cargo build`.
+  //
+  // docker-in-docker is not an option: nested dockerd cannot get
+  // cgroup/AppArmor delegation in a user-namespaced container under this
+  // host's rootless Podman, and the devcontainers docker-outside-of-docker
+  // feature hardcodes a default source mount of /var/run/docker.sock, which
+  // on this host is a root-owned symlink to the *rootful* Podman socket and
+  // unreachable by an unprivileged user. Hence the hand-wired mount, which
+  // assumes uid 1000 on the host (true for this machine) — adjust the
+  // source for a different host or uid.
+  //
+  // Duplicates the default config's image and postCreateCommand because
+  // devcontainer.json has no inheritance mechanism; the shared setup itself
+  // lives in ../post-create.sh, so only these three lines are repeated.
+  "name": "buoy-wm (act)",
+  "image": "mcr.microsoft.com/devcontainers/rust:1",
+  "mounts": [
+    "source=/run/user/1000/podman/podman.sock,target=/var/run/docker-host.sock,type=bind"
+  ],
+  "containerEnv": {
+    "DOCKER_HOST": "unix:///var/run/docker-host.sock"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "workspaceFolder": "/workspaces/buoy-wm"
+}

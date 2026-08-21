@@ -44,33 +44,65 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    env:
+      # The one place the release tag is read from an expression. Every
+      # step below uses "$TAG", never `${{ }}` inside a `run:` block:
+      # GitHub expands `${{ }}` textually before bash parses the script, so
+      # a value containing a double quote would close the assignment and
+      # run the remainder as shell — in the one job that holds
+      # `contents: write`, `id-token: write` and `attestations: write` and
+      # mints the build-provenance attestations users are told to trust.
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      # libwayland-dev provides the headers and .pc file that
-      # wayland-client/wayland-backend link against at build time. At run
-      # time only libwayland-client.so.0 is needed, which every Wayland
-      # system already has.
-      - name: Install build dependencies
+      # First, before the tag is used as a ref, a filename or a shell word.
+      # `workflow_dispatch` input is arbitrary text; the `v*` filter on tag
+      # pushes is not a version check.
+      - name: Validate the tag
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config
-
-      # A tag whose version disagrees with the manifest produces a release
-      # that installs as a different version than it claims to be. Fail
-      # here rather than shipping it.
-      - name: Check tag matches workspace version
-        run: |
-          tag="${{ inputs.tag || github.ref_name }}"
-          manifest="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
-          if [[ "${tag#v}" != "$manifest" ]]; then
-            echo "::error::tag $tag does not match Cargo.toml version $manifest"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$TAG' is not of the form v1.2.3"
             exit 1
           fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # `gh` below authenticates with GH_TOKEN, not with the git
+          # credential this would otherwise leave in .git/config for the
+          # whole job — including for third-party build scripts.
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - uses: ./.github/actions/setup-build-deps
+
+      # A tag whose version disagrees with a manifest produces a release
+      # that installs as a different version than it claims to be. All
+      # three manifests are checked, not just Cargo.toml: only the git tag
+      # was guarded before, which left the RPM spec and the Homebrew
+      # formula free to drift.
+      - name: Check tag matches every packaged version
+        run: |
+          version="${TAG#v}"
+          manifest="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          spec="$(grep -m1 '^Version:' packaging/rpm/buoy-wm.spec | awk '{print $2}')"
+          formula="$(grep -m1 -oE 'tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' packaging/homebrew/buoy-wm.rb \
+            | sed -E 's:tags/v(.*)\.tar\.gz:\1:')"
+          mismatch=0
+          # Report every mismatch, not just the first: a version bump that
+          # missed two files should take one fix, not two failed releases.
+          check_version() {
+            if [[ "$2" != "$version" ]]; then
+              echo "::error::tag $TAG does not match $1 version '$2'"
+              mismatch=1
+            fi
+          }
+          check_version Cargo.toml "$manifest"
+          check_version packaging/rpm/buoy-wm.spec "$spec"
+          check_version packaging/homebrew/buoy-wm.rb "$formula"
+          [[ "$mismatch" -eq 0 ]] || exit 1
           echo "VERSION=$manifest" >> "$GITHUB_ENV"
 
       - name: Build
@@ -95,14 +127,13 @@ jobs:
           echo "ARCHIVE=dist/$stage.tar.gz" >> "$GITHUB_ENV"
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: ${{ env.ARCHIVE }}
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           # Idempotent so a re-run after a transient failure replaces the
           # assets instead of erroring on an existing release.

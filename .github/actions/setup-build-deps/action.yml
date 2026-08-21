@@ -14,34 +14,18 @@
 # LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
+#
+# One copy of the system-dependency install that three CI/release jobs need.
+# libwayland-dev provides the headers and the .pc file that
+# wayland-client/wayland-backend link against at build time; at run time
+# only libwayland-client.so.0 is needed, which every Wayland system has.
+name: Set up build dependencies
+description: Installs the system packages the Wayland crates link against.
 
-# --- Build output ---
-/target
-**/*.rs.bk
-
-# --- Local agent / planning tooling ---
-# BMAD and Claude Code scaffolding are developer-machine tooling, not part
-# of the shipped window manager. `_bmad/config.user.toml` in particular
-# holds per-developer install answers.
-/.claude/
-/_bmad/
-/_bmad-output/
-
-# --- Secrets ---
-# Preventive: nothing here has ever held credentials, and a `.env` picked up
-# by a future tool must not be one `git add -A` away from the history.
-.env
-.env.*
-
-# --- Editor and OS noise ---
-/.idea/
-/.vscode/
-*.swp
-*~
-.DS_Store
-
-# --- Packaging scratch ---
-/dist/
-
-# Audit reports (/audit skill output) — local analysis, not part of the product.
-/audits/
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config

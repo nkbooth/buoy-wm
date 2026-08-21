@@ -16,6 +16,8 @@ still genuinely useful.
 
 RPL 1.5 also requires (§6.4(b)) that every source file carry the license
 notice. New files need the same header block as their neighbours; copy one.
+The `licence-header` pre-commit hook and CI's `hygiene` job both fail if you
+forget.
 
 ## Building
 
@@ -29,9 +31,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-`pre-commit run --all-files` runs the last two. The hooks are deliberately
-not `pre-commit install`ed — they need a toolchain the host may not have, so
-the git shim would fail closed on every commit.
+`pre-commit run --all-files` runs the last two, plus the licence-header and
+gitleaks checks. The hooks are deliberately not `pre-commit install`ed —
+they need a toolchain the host may not have, so the git shim would fail
+closed on every commit.
+
+Running CI locally with `act` needs a container engine, which the default
+devcontainer deliberately does not expose. Select the opt-in variant for
+that session only:
+
+```sh
+devpod up . --devcontainer-path .devcontainer/act/devcontainer.json
+```
 
 ## What patches are expected to include
 

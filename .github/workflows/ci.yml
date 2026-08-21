@@ -24,6 +24,13 @@ on:
   push:
   pull_request:
 
+# Every job here only reads the repository. Without this block they inherit
+# the repository-default GITHUB_TOKEN scope (write-all under older
+# settings) while running `cargo build`/`test` over third-party crates and
+# their build scripts. `release.yml` already scopes itself this way.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Warnings are errors in CI only; a local `cargo build` stays quiet enough
@@ -34,19 +41,28 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
+      # Every third-party action is pinned to a full commit SHA with the
+      # version in a trailing comment: a mutable ref (and `@stable`, a
+      # branch, most of all) means what runs in CI can change with no
+      # commit to this repo. The `github-actions` Dependabot entry keeps
+      # these pins moving.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # Nothing in this job pushes, so leaving the token in
+          # .git/config for later steps only widens what a compromised
+          # dependency's build script can reach.
+          persist-credentials: false
+
+      # Pinned to a SHA, so the toolchain has to be named explicitly —
+      # `@stable` used to carry that meaning in the ref itself.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      # Required to link wayland-client/wayland-backend (wm/Cargo.toml deps).
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config
+      - uses: ./.github/actions/setup-build-deps
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Formatting first: it needs no dependencies and fails in seconds.
       - name: cargo fmt
@@ -67,7 +83,9 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       # Read the floor out of the manifest rather than hardcoding it here.
       # This job exists specifically to guard the manifest's MSRV promise,
       # so a pinned duplicate meant bumping Cargo.toml alone left CI
@@ -82,12 +100,57 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwayland-dev pkg-config
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-build-deps
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --workspace --locked
+
+  # `--locked` guarantees a reproducible build and, in exactly the same
+  # breath, guarantees a pinned version with a published advisory against
+  # it stays pinned and silent. Nothing else in this repo fails a build on
+  # an advisory; this job does. See deny.toml.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories bans licenses sources
+
+  # Static analysis for the things `cargo` cannot see: the workflows
+  # themselves, the install script users are told to pipe a tarball into,
+  # and the repository's history.
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # gitleaks scans history, not just the working tree.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install analysers
+        run: |
+          # pipx, not `pip install --user`: the runner's Python is
+          # externally managed (PEP 668) and refuses the latter.
+          pipx install 'zizmor==1.29.0'
+          pipx install 'pre-commit==4.6.2'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      # `--offline`: no online audits, so this needs no token and cannot
+      # be made to fail by a rate limit.
+      - name: zizmor
+        run: zizmor --offline .github/workflows .github/actions
+
+      - name: shellcheck
+        run: shellcheck scripts/install.sh .devcontainer/post-create.sh
+
+      # Runs the same pinned gitleaks revision the pre-commit config uses,
+      # so there is one version of this check rather than two that drift.
+      - name: gitleaks
+        run: pre-commit run --all-files gitleaks

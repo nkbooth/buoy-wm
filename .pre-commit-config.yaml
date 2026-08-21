@@ -50,3 +50,21 @@ repos:
         entry: cargo clippy --workspace --all-targets -- -D warnings
         files: ^(wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
         pass_filenames: false
+      # RPL 1.5 §6.4(a) requires the notice in every source file, so the
+      # 16-line block is replicated deliberately and must not be
+      # deduplicated. A new file that forgot it is the failure mode a hook
+      # can actually catch. `wm/protocol/*.xml` is excluded: vendored MIT
+      # third-party, see NOTICE.md.
+      - id: licence-header
+        name: RPL-1.5 licence header present
+        language: system
+        entry: scripts/check-licence-header.sh
+        files: \.(rs|toml|ya?ml|sh|json|rb|spec)$
+        exclude: ^wm/protocol/
+  # Purely preventive — nothing is leaking today. CI's `hygiene` job runs
+  # this same pinned revision so there is one version of the check rather
+  # than two that drift.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

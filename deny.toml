@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: RPL-1.5
+#
+# Unless explicitly acquired and licensed from Licensor under another
+# license, the contents of this file are subject to the Reciprocal Public
+# License ("RPL") Version 1.5, or subsequent versions as allowed by the
+# RPL, and You may not copy or use this file in either source code or
+# executable form, except in compliance with the terms and conditions of
+# the RPL.
+#
+# All software distributed under the RPL is provided strictly on an "AS
+# IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+# LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+# LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+# language governing rights and limitations under the RPL.
+
+# `cargo deny check` config, run by CI's `audit` job.
+#
+# Why this exists: `Cargo.lock` is committed and CI passes `--locked`
+# everywhere, which guarantees a reproducible build — and equally
+# guarantees that a pinned version with a published advisory against it
+# stays pinned and silent until a human reads a Dependabot PR title.
+# Nothing else in this repo fails a build on an advisory.
+#
+# `cargo-deny` rather than `cargo-audit` because it also checks licences,
+# which is a live packaging concern here and not a hypothetical one: this
+# project ships an RPM and a Homebrew formula under RPL-1.5, and RPL 1.5
+# §6.4(a) obliges the licence texts to travel with the artifact, so an
+# incompatible transitive licence is a release-blocking problem best found
+# in CI.
+
+[graph]
+# The only target that is built or released. Skipping the rest keeps
+# Windows- and macOS-only crates (`find-msvc-tools`, `windows-sys`) out of
+# every check.
+targets = ["x86_64-unknown-linux-gnu"]
+
+[advisories]
+# A yanked version is a maintainer telling us not to use it.
+yanked = "deny"
+# Deliberately empty: an advisory that has to be accepted belongs here with
+# a comment saying who accepted it and why, not silenced by lowering the
+# severity of the whole check.
+ignore = []
+
+[licenses]
+# Every licence present in the current tree, and nothing else — a new
+# transitive dependency under something unexpected should fail rather than
+# be discovered at packaging time.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "RPL-1.5",
+  "Unicode-3.0",
+  "Unlicense",
+]
+
+[bans]
+# `warn`, not `deny`: two versions of the same crate is a size and
+# build-time annoyance, not a correctness or licence problem, and the
+# transitive graph is not ours to flatten.
+multiple-versions = "warn"
+# A wildcard version requirement defeats the point of committing a lockfile.
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

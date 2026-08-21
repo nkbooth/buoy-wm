@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # SPDX-FileCopyrightText: © 2026 Nick Booth
 # SPDX-License-Identifier: RPL-1.5
 #
@@ -14,34 +15,26 @@
 # LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
+#
+# Fails if any file named on the command line lacks the RPL-1.5 SPDX
+# identifier near its top. RPL 1.5 §6.4(a) requires the notice to travel
+# with every source file, which is why the 16-line block is replicated
+# across the tree rather than deduplicated — the only part of that which
+# can be automated is noticing a new file that forgot it.
+#
+# Scanned window rather than a fixed line: wm/src/main.rs carries a
+# third-party attribution notice above its SPDX line (see NOTICE.md).
+set -euo pipefail
 
-# --- Build output ---
-/target
-**/*.rs.bk
+readonly HEADER_WINDOW_LINES=20
+status=0
 
-# --- Local agent / planning tooling ---
-# BMAD and Claude Code scaffolding are developer-machine tooling, not part
-# of the shipped window manager. `_bmad/config.user.toml` in particular
-# holds per-developer install answers.
-/.claude/
-/_bmad/
-/_bmad-output/
+for file in "$@"; do
+    if ! head -n "$HEADER_WINDOW_LINES" "$file" |
+        grep -q 'SPDX-License-Identifier: RPL-1.5'; then
+        echo "$file: missing the RPL-1.5 SPDX licence header" >&2
+        status=1
+    fi
+done
 
-# --- Secrets ---
-# Preventive: nothing here has ever held credentials, and a `.env` picked up
-# by a future tool must not be one `git add -A` away from the history.
-.env
-.env.*
-
-# --- Editor and OS noise ---
-/.idea/
-/.vscode/
-*.swp
-*~
-.DS_Store
-
-# --- Packaging scratch ---
-/dist/
-
-# Audit reports (/audit skill output) — local analysis, not part of the product.
-/audits/
+exit "$status"
