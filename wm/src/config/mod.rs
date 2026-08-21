@@ -796,7 +796,8 @@ pub fn config_path() -> Option<PathBuf> {
 
 /// Resolves the config file's path from explicit, injectable parameters —
 /// the same "test the decision, not the I/O" split
-/// [`resolve_socket_path`](crate::ipc::server::resolve_socket_path) uses.
+/// [`resolve_socket_path`](buoy_common::socket_path::resolve_socket_path)
+/// uses.
 ///
 /// `None` when neither directory is usable, rather than a relative path.
 /// Audit finding C-01: an earlier fix closed only the both-variables-unset

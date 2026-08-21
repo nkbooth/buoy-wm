@@ -29,5 +29,6 @@ categories.workspace = true
 description = "buoy-wm companion: fuzzel-driven tag assignment and tag switching pickers."
 
 [dependencies]
+buoy-common = { path = "../buoy-common" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

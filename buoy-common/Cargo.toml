@@ -1,6 +1,4 @@
 # SPDX-FileCopyrightText: © 2026 Nick Booth
-# Portions © 2026 Julian Andrews, originally distributed under 0BSD as
-# part of tinyrwm <https://codeberg.org/river/tinyrwm>.
 # SPDX-License-Identifier: RPL-1.5
 #
 # Unless explicitly acquired and licensed from Licensor under another
@@ -18,7 +16,7 @@
 # language governing rights and limitations under the RPL.
 
 [package]
-name = "buoy-wm"
+name = "buoy-common"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -28,15 +26,6 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "The window manager itself: owns all tag state and speaks river-window-management-v1."
-readme = "README.md"
+description = "Invariants all three buoy-wm binaries must agree on: where the IPC socket lives, who may speak on it, and how a log line is framed."
 
 [dependencies]
-buoy-common = { path = "../buoy-common" }
-bitflags = "2.11.0"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = { version = "1.1.4", default-features = false, features = ["parse", "serde"] }
-wayland-backend = "0.3.14"
-wayland-client = "0.31.13"
-wayland-scanner = "0.31.9"

@@ -17,11 +17,9 @@
 
 //! `buoy-tag-picker`'s own minimal mirror of the wire shapes it needs from
 //! `wm/src/ipc/protocol.rs` (ADR-007). This is a deliberate, accepted
-//! duplication, not an oversight: this project's own three-strike DRY rule
-//! extracts shared code after ~3 independent occurrences, and right now
-//! there are exactly two (`wm`'s and this one) — one below the threshold. A
-//! shared crate is deferred to whichever story first gives `buoy-status-bar`
-//! (Story 2.5) the same need, a genuine third consumer. As of Story 2.3,
+//! duplication, not an oversight — see `buoy-status-bar/src/wire.rs`'s
+//! module doc for why the wire shapes stay per-crate while the socket path
+//! moved into `buoy-common` (audit finding J-01). As of Story 2.3,
 //! `buoy-tag-picker` sends `get-state`/`toggle-tag`/`create-tag`/`switch-tag` and
 //! understands the `state`/`ok`/`tag-created`/`error` responses those
 //! produce (Story 2.4 adds `switch-tag`, the switch-mode picker's sole

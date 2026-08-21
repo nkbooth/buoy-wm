@@ -2654,7 +2654,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // convention rather than `std::process::exit`, which this file
     // otherwise reserves for unrecoverable Wayland-protocol-level
     // failures only.
-    let socket_path = ipc::server::default_socket_path();
+    let socket_path = buoy_common::socket_path::default_socket_path();
     if let Err(e) = ipc::server::spawn(
         Arc::clone(&app_data.wm.wm_core),
         &socket_path,

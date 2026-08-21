@@ -41,7 +41,6 @@
 
 mod mode;
 mod picker;
-mod socket_path;
 mod wire;
 
 use std::io::{BufRead, BufReader, Write};
@@ -276,7 +275,7 @@ fn connect_and_get_state() -> (
     Vec<wire::ViewDto>,
     Option<u64>,
 ) {
-    let socket_path = socket_path::default_socket_path();
+    let socket_path = buoy_common::socket_path::default_socket_path();
     let stream = match UnixStream::connect(&socket_path) {
         Ok(stream) => stream,
         Err(e) => {

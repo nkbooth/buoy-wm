@@ -19,25 +19,19 @@
 //! `wm/src/ipc/protocol.rs` (ADR-007), following `buoy-tag-picker/src/wire.rs`'s
 //! exact existing shape and doc-comment convention (Story 2.5 Task 1.3).
 //!
-//! **Why this is a third copy, not a shared crate (the three-strike-DRY
-//! decision, recorded here in full so a future reader hits the same
-//! reasoning at the same place as the story file).** `buoy-tag-picker/src/
-//! wire.rs`'s own doc comment already named this exact moment: "A shared
-//! crate is deferred to whichever story first gives `buoy-status-bar` (Story
-//! 2.5) the same need, a genuine third consumer." `buoy-status-bar` is that
-//! third independent occurrence (`wm/src/ipc/protocol.rs`,
-//! `buoy-tag-picker/src/wire.rs`, and this module). The three-strike rule
-//! exists to bound *future* maintenance drift across call sites that keep
-//! evolving independently — but this is the last story in Epic 2 and in
-//! the entire currently planned project, so there is no fourth consumer
-//! this rule is protecting against, ever, under the current plan.
-//! Extracting a shared `buoy-wm-protocol`/`buoy-wm-ipc-client` crate now,
-//! purely to satisfy the letter of a rule whose entire purpose is
-//! amortizing future drift, with no future call site left to drift, would
-//! be premature-generality YAGNI — abstracting for an audience of zero
-//! remaining callers. If a fourth consumer is ever added to this project
-//! in the future, that is the correct point to finally extract a shared
-//! crate; this story explicitly does not do so.
+//! **Why this is a third copy while the socket path is not (audit finding
+//! J-01, recorded here in full so a future reader hits the reasoning at
+//! the same place as the code).** The line is behavioural versus
+//! structural. Where the socket lives is behavioural: if the three
+//! binaries disagree, they cannot find each other, so that rule now lives
+//! once in `buoy-common`. The wire *shapes* are structural, and the
+//! satellites' narrower ones are a property worth keeping rather than
+//! debt: this client's `Request` has exactly one variant, so it
+//! structurally cannot send a mutation. Merging to `wm`'s superset would
+//! trade that away for consistency. The triggers for revisiting are a
+//! fourth consumer or the first rename of a `Response` field — and the
+//! cheap insurance until then is a byte-compatibility test per message
+//! shape, not an extraction.
 //!
 //! This client only ever sends `get-state` — it never mutates, so
 //! `Request` has exactly one variant (no `ToggleTag`/`CreateTag`/

@@ -26,14 +26,14 @@
 //! `interval`/`signal` needed on the waybar side) whenever the rendered
 //! state actually changes. This module is live-socket and stdout I/O glue
 //! only — every decision it composes (`parse_output_id`, `resolve_bar_line`,
-//! `format_waybar_line`, `changed`, `resolve_socket_path`) is unit-tested
-//! in `bar_line`/`wire`/`socket_path` and this module's own `tests`;
+//! `format_waybar_line`, `changed`) is unit-tested in `bar_line`/`wire`
+//! and this module's own `tests` (the socket path's own resolution rule
+//! is tested in `buoy-common`);
 //! nothing in `try_get_state`/the poll loop has its own RED/GREEN tests
 //! (same carve-out class as `buoy-tag-picker/src/main.rs`'s own connection
 //! glue).
 
 mod bar_line;
-mod socket_path;
 mod wire;
 
 use std::io::{BufRead, BufReader, Write};
@@ -128,7 +128,7 @@ fn main() {
         }
     };
 
-    let socket_path = socket_path::default_socket_path();
+    let socket_path = buoy_common::socket_path::default_socket_path();
     let mut last_printed: Option<String> = None;
 
     // Loops for the lifetime of the process — deliberately never calls

@@ -23,7 +23,7 @@
 
 [workspace]
 resolver = "2"
-members = ["wm", "buoy-tag-picker", "buoy-status-bar"]
+members = ["buoy-common", "wm", "buoy-tag-picker", "buoy-status-bar"]
 
 # Shared package metadata. Every member inherits these with
 # `field.workspace = true`, so the license, MSRV and repository URL can

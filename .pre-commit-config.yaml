@@ -28,27 +28,21 @@ repos:
         entry: cargo fmt --all -- --check
         # Manifest/lockfile changes (e.g. a dependency bump) can change what
         # clippy lints or how fmt formats generated-adjacent code, so they
-        # need the same gate as source changes, not just *.rs. Story 2.2's
-        # own comment here claimed this was already "widened workspace-wide
-        # to cover either member," but the regex was still a hardcoded
-        # two-name alternation — a `buoy-status-bar`-only change (Story 2.5)
-        # would have silently skipped both hooks locally. Story 2.5 Task 7:
-        # widened to all three current members. Not written as a fully
-        # member-name-agnostic glob (e.g. matching any top-level directory
-        # with a `src/*.rs`/`Cargo.toml`) on purpose: this project's own
-        # three-strike-DRY posture (see `buoy-status-bar/src/wire.rs`'s module
-        # doc comment) already established that this is the last story in
-        # the entire currently planned project, so there is no future
-        # fourth member this hardcoding could ever fall behind again — a
-        # more "future-proof" glob would just be unused generality for an
-        # audience of zero remaining members.
-        files: ^(wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
+        # need the same gate as source changes, not just *.rs.
+        #
+        # This alternation must name every workspace member: a change
+        # confined to a member missing from it skips both hooks locally and
+        # is only caught in CI, which runs `--workspace` unconditionally.
+        # It has already fallen behind twice — once at `buoy-status-bar`,
+        # once at `buoy-common` — so treat adding a member here as part of
+        # adding a member at all.
+        files: ^(buoy-common|wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
         pass_filenames: false
       - id: cargo-clippy
         name: cargo clippy
         language: system
         entry: cargo clippy --workspace --all-targets -- -D warnings
-        files: ^(wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
+        files: ^(buoy-common|wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^Cargo\.(toml|lock)$
         pass_filenames: false
       # RPL 1.5 §6.4(a) requires the notice in every source file, so the
       # 16-line block is replicated deliberately and must not be
