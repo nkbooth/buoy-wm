@@ -199,6 +199,11 @@ impl WmCore {
     /// `WmCore::default()`. `#[cfg(test)]` rather than
     /// `#[allow(dead_code)]` so that stays compiler-enforced (audit finding
     /// J-09).
+    ///
+    /// `#[cfg(test)]` is per-crate, so this exists only for this crate's own
+    /// unit tests — the binary's tests and anything under `tests/` see the
+    /// library compiled without `cfg(test)` and want `WmCore::default()`,
+    /// which is the same constructor without the carve-out.
     #[cfg(test)]
     pub fn new() -> Self {
         WmCore::default()

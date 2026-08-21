@@ -33,8 +33,7 @@
 //! (same carve-out class as `buoy-tag-picker/src/main.rs`'s own connection
 //! glue).
 
-mod bar_line;
-mod wire;
+use buoy_status_bar::{bar_line, wire};
 
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;

@@ -28,6 +28,20 @@ keywords.workspace = true
 categories.workspace = true
 description = "buoy-wm companion: fuzzel-driven tag assignment and tag switching pickers."
 
+# A library plus a thin binary rather than a bin-only target — see
+# `src/lib.rs` for why (audit finding T-04). Spelled out rather than left to
+# auto-discovery because the *binary* name is enumerated outside this repo:
+# `scripts/install.sh`, `release.yml`, `packaging/rpm/buoy-wm.spec` and
+# `packaging/homebrew/buoy-wm.rb` all name it, and `buoy-wm` resolves
+# `buoy-tag-picker` as a sibling of its own `current_exe()`.
+[lib]
+name = "buoy_tag_picker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buoy-tag-picker"
+path = "src/main.rs"
+
 [dependencies]
 buoy-common.workspace = true
 serde = { version = "1", features = ["derive"] }

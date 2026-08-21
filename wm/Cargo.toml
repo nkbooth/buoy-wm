@@ -31,6 +31,24 @@ categories.workspace = true
 description = "The window manager itself: owns all tag state and speaks river-window-management-v1."
 readme = "README.md"
 
+# A library plus a thin binary rather than a bin-only target. Cargo
+# collects doctests only from library targets and a `tests/` crate can only
+# `use` a library, so with no `[lib]` here every `///` example in the tree
+# was uncompiled prose and no test could cross a process boundary (audit
+# finding T-04). The names are spelled out rather than left to
+# auto-discovery because the *binary* name is load-bearing outside this
+# repo: `scripts/install.sh`, `release.yml`, the RPM spec, the Homebrew
+# formula and the WM's own sibling-of-`current_exe()` lookup for
+# `buoy-tag-picker` all name it, and a login session that cannot find
+# `buoy-wm` is a black screen.
+[lib]
+name = "buoy_wm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buoy-wm"
+path = "src/main.rs"
+
 [dependencies]
 buoy-common.workspace = true
 bitflags = "2.11.0"

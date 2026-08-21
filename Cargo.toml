@@ -79,6 +79,16 @@ type_complexity = "warn"
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
 redundant_explicit_links = "deny"
+# `cargo doc` here is always `--document-private-items` (see `ci.yml`),
+# because almost every decision in these crates is made by a private
+# function and the default would check nearly none of the doc comments.
+# Under that flag a link from a public item to a private one resolves and is
+# checked — which is the whole point — so rustdoc's advisory that it "will
+# break without `--document-private-items`" is describing a build this
+# project does not do. Allowed workspace-wide rather than per site: seven
+# such links existed the moment the `[lib]` targets made anything public at
+# all (audit finding T-04), and they are all the same intended shape.
+private_intra_doc_links = "allow"
 
 
 [profile.release]

@@ -33,18 +33,21 @@ repos:
         # complexity thresholds live.
         #
         # This alternation must name every workspace member: a change
-        # confined to a member missing from it skips both hooks locally and
-        # is only caught in CI, which runs `--workspace` unconditionally.
-        # It has already fallen behind twice — once at `buoy-status-bar`,
-        # once at `buoy-common` — so treat adding a member here as part of
-        # adding a member at all.
-        files: ^(buoy-common|wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^(Cargo\.(toml|lock)|clippy\.toml)$
+        # confined to a member missing from it skips all three hooks locally
+        # and is only caught in CI, which runs `--workspace`
+        # unconditionally. It has already fallen behind twice — once at
+        # `buoy-status-bar`, once at `buoy-common` — so treat adding a
+        # member here as part of adding a member at all. `tests/` is in the
+        # path alternation for the same reason: the integration tier added
+        # by audit finding T-04 lives there, not under `src/`, so a change
+        # confined to it would otherwise run no gate at all locally.
+        files: ^(buoy-common|wm|buoy-tag-picker|buoy-status-bar)/((src|tests)/.*\.rs|Cargo\.toml)$|^(Cargo\.(toml|lock)|clippy\.toml)$
         pass_filenames: false
       - id: cargo-clippy
         name: cargo clippy
         language: system
         entry: cargo clippy --workspace --all-targets -- -D warnings
-        files: ^(buoy-common|wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^(Cargo\.(toml|lock)|clippy\.toml)$
+        files: ^(buoy-common|wm|buoy-tag-picker|buoy-status-bar)/((src|tests)/.*\.rs|Cargo\.toml)$|^(Cargo\.(toml|lock)|clippy\.toml)$
         pass_filenames: false
       # The whole suite runs in well under a second, and this is a
       # test-first project whose gate for "done" is that the tests pass —
@@ -54,7 +57,7 @@ repos:
         name: cargo test
         language: system
         entry: cargo test --workspace --locked
-        files: ^(buoy-common|wm|buoy-tag-picker|buoy-status-bar)/(src/.*\.rs|Cargo\.toml)$|^(Cargo\.(toml|lock)|clippy\.toml)$
+        files: ^(buoy-common|wm|buoy-tag-picker|buoy-status-bar)/((src|tests)/.*\.rs|Cargo\.toml)$|^(Cargo\.(toml|lock)|clippy\.toml)$
         pass_filenames: false
       # RPL 1.5 §6.4(a) requires the notice in every source file, so the
       # 16-line block is replicated deliberately and must not be

@@ -39,9 +39,7 @@
 //! `picker`/`wire`/`mode`; nothing here has its own RED/GREEN tests
 //! (same carve-out class as `wm/src/main.rs`'s Wayland-`Dispatch` glue).
 
-mod mode;
-mod picker;
-mod wire;
+use buoy_tag_picker::{mode, picker, wire};
 
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;

@@ -96,9 +96,7 @@ mod river {
     wayland_scanner::generate_client_code!("./protocol/river-libinput-config-v1.xml");
 }
 
-mod config;
-mod ipc;
-mod wm_core;
+use buoy_wm::{config, ipc, wm_core};
 
 use config::{Action, Config};
 use wm_core::ids::{OutputId, TagId, ViewId};
@@ -3418,7 +3416,7 @@ mod tests {
     /// created.
     #[test]
     fn a_failed_pinned_terminal_spawn_releases_the_claim() {
-        let wm_core = Mutex::new(WmCore::new());
+        let wm_core = Mutex::new(WmCore::default());
         let tag_id = ipc::lock_recovering(&wm_core).create_tag("web").unwrap();
         let session_name = ipc::lock_recovering(&wm_core)
             .claim_pinned_terminal_spawn(tag_id)
@@ -3446,7 +3444,7 @@ mod tests {
     /// until they restart.
     #[test]
     fn pinned_terminals_turned_off_releases_the_claim_instead_of_spawning() {
-        let wm_core = Mutex::new(WmCore::new());
+        let wm_core = Mutex::new(WmCore::default());
         let tag_id = ipc::lock_recovering(&wm_core).create_tag("web").unwrap();
         let session_name = ipc::lock_recovering(&wm_core)
             .claim_pinned_terminal_spawn(tag_id)
