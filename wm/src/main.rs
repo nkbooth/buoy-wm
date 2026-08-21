@@ -1365,6 +1365,13 @@ impl WindowManager {
         let active_output_name = active_output_id
             .and_then(|id| self.output_name(id))
             .map(str::to_owned);
+        // Paired into one value here rather than threaded through
+        // `do_action` as two `Option`s that cannot actually disagree — see
+        // [`ActiveOutput`] (audit finding J-04).
+        let active_output = active_output_id.map(|id| ActiveOutput {
+            id,
+            name: active_output_name.as_deref(),
+        });
         let mut pending_terminal_spawns: Vec<TagId> = Vec::new();
         let mut wm_core_guard = ipc::lock_recovering(&self.wm_core);
         let wm_core = &mut *wm_core_guard;
@@ -1485,8 +1492,7 @@ impl WindowManager {
                 &mut self.windows,
                 wm_proxy,
                 wm_core,
-                active_output_id,
-                active_output_name.as_deref(),
+                active_output,
                 &self.config,
             ) {
                 pending_terminal_spawns.push(tag_id);
@@ -1603,6 +1609,267 @@ fn tag_picker_path(wm_exe: &Path) -> PathBuf {
     match wm_exe.parent() {
         Some(dir) => dir.join("buoy-tag-picker"),
         None => PathBuf::from("buoy-tag-picker"),
+    }
+}
+
+/// The output an action acts on: the id
+/// [`WindowManager::active_output_id`] resolved, plus that output's real
+/// Wayland connector name (e.g. `"eDP-1"`) when it is known.
+///
+/// One parameter rather than two because `name` is derived *from* `id` (via
+/// [`WindowManager::output_name`]), so "a name but no id" is a state that
+/// cannot occur — yet every arm of [`Seat::do_action`] used to receive two
+/// independent `Option`s and defend against it separately (audit finding
+/// J-04). `name` stays optional: it is genuinely unknown during the startup
+/// window before the connector name has arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveOutput<'a> {
+    id: OutputId,
+    name: Option<&'a str>,
+}
+
+/// Appends the `fuzzel` flags that put a menu on the right layer and the
+/// right monitor.
+///
+/// # Rationale
+///
+/// `--layer=overlay`, not the default `top`, renders above a fullscreen
+/// window too (`fuzzel.ini(5)`) — kept as defense-in-depth even though the
+/// pinned terminal no longer uses real protocol fullscreen (see
+/// [`WindowManager::recompute_pinned_terminal_geometry`]).
+///
+/// `--output=<name>` names the connector this WM resolved as the active
+/// output. Without it `fuzzel` falls back to "let the compositor choose",
+/// which can land on a disabled output when docked (kanshi disables the
+/// laptop panel): the menu maps with real keyboard focus and accepts input
+/// while painting to a screen nothing shows on.
+///
+/// The flag is omitted entirely — never passed empty — when the name is
+/// unknown *or* empty. A bare `--output=` is the malformed flag every call
+/// site here was written to avoid, and only `buoy-tag-picker` had actually
+/// guarded the empty case; the two arms in this file checked `None` alone
+/// (audit finding J-09).
+fn fuzzel_overlay_args(command: &mut std::process::Command, output_name: Option<&str>) {
+    command.arg("--layer=overlay");
+    if let Some(name) = output_name.filter(|name| !name.is_empty()) {
+        command.arg(format!("--output={name}"));
+    }
+}
+
+/// `buoy-tag-picker`'s leading argument in switch mode. Assign mode passes
+/// no mode argument at all, which is what makes the rest of the argv
+/// positionally identical between the two.
+const TAG_PICKER_SWITCH_MODE: &str = "switch";
+
+/// `buoy-tag-picker`'s argv: `[<mode>] [<output id> [<connector name>]]`.
+///
+/// This WM resolves "the active output" and hands the answer across the
+/// process boundary; `buoy-tag-picker` never re-derives it. Each argument is
+/// appended only once the one before it is known, so assign mode with no
+/// registered output spawns with no arguments at all and an unknown
+/// connector name leaves the one-argument shape untouched — both are
+/// startup-race edge cases whose established behavior is "fewer arguments",
+/// never a bogus one.
+fn tag_picker_args(mode: Option<&str>, active_output: Option<ActiveOutput<'_>>) -> Vec<String> {
+    let mut args: Vec<String> = mode.map(str::to_owned).into_iter().collect();
+    if let Some(active) = active_output {
+        args.push(active.id.0.to_string());
+        if let Some(name) = active.name {
+            args.push(name.to_owned());
+        }
+    }
+    args
+}
+
+/// Spawns `buoy-tag-picker` with [`tag_picker_args`]' argv.
+///
+/// Fire-and-forget, and deliberately so: the picker resolves the focused
+/// view itself over IPC and performs any tag switch through the same
+/// socket, so this never touches [`WmCore`] and never produces a
+/// pinned-terminal spawn signal — the switch and its pinned-terminal
+/// follow-up happen later, once the user has picked something.
+///
+/// The binary is resolved as a sibling of this process' own executable
+/// ([`tag_picker_path`]) rather than by bare name: nothing in this repo
+/// installs it onto `$PATH`, so a bare name silently `ENOENT`s in a real
+/// session. A `current_exe()` that fails is logged and skipped rather than
+/// guessed at.
+fn spawn_tag_picker(mode: Option<&str>, active_output: Option<ActiveOutput<'_>>) {
+    let what = match mode {
+        None => "buoy-tag-picker".to_string(),
+        Some(mode) => format!("buoy-tag-picker in {mode} mode"),
+    };
+    match std::env::current_exe() {
+        Ok(wm_exe) => {
+            spawn_tracked(
+                std::process::Command::new(tag_picker_path(&wm_exe))
+                    .args(tag_picker_args(mode, active_output)),
+                &what,
+            );
+        }
+        Err(e) => log_err!("Failed to resolve wm's own executable path: {e}"),
+    }
+}
+
+/// Opens the tag-switch picker for `active_output`.
+///
+/// The guard is here rather than inside [`spawn_tag_picker`] because the
+/// asymmetry is real: assign mode has something to do with no output
+/// registered (it resolves the focused view over IPC), switch mode has
+/// nothing to switch.
+fn spawn_switch_picker(active_output: Option<ActiveOutput<'_>>) {
+    let Some(active) = active_output else {
+        notify_user("The tag-switch keybind did nothing: no output is registered yet.");
+        return;
+    };
+    spawn_tag_picker(Some(TAG_PICKER_SWITCH_MODE), Some(active));
+}
+
+/// Spawns `defaults.terminal`.
+///
+/// `WAYLAND_DEBUG` is stripped from every child by [`spawn_tracked`]: the
+/// added noise makes debugging the window manager itself impractical.
+fn spawn_terminal(config: &Config) {
+    spawn_tracked(
+        &mut std::process::Command::new(&config.defaults.terminal),
+        &format!("terminal `{}`", config.defaults.terminal),
+    );
+}
+
+/// Runs `command_line` through `sh -c`, so one binding can carry a whole
+/// command line — arguments, pipes, `~` expansion — instead of just a bare
+/// program name.
+///
+/// The string comes from the user's own config file, so shell
+/// interpretation is the intent here and not an injection vector: anyone
+/// who can edit that file can already run anything as this user.
+fn spawn_exec(command_line: &str) {
+    spawn_tracked(
+        std::process::Command::new("sh").arg("-c").arg(command_line),
+        &format!("`{command_line}`"),
+    );
+}
+
+/// Spawns the user's configured launcher as an overlay on `active_output`.
+///
+/// Bare `fuzzel` with no `--dmenu` runs its own built-in desktop-entry
+/// launcher, so there is nothing to wire to its stdin. This is the one
+/// `fuzzel`-shaped spawn that honors `defaults.launcher`: the others drive
+/// it as a dmenu-style pager with fuzzel-specific flags, which is a
+/// different program role.
+fn spawn_launcher(config: &Config, active_output: Option<ActiveOutput<'_>>) {
+    let mut command = std::process::Command::new(&config.defaults.launcher);
+    fuzzel_overlay_args(&mut command, active_output.and_then(|active| active.name));
+    spawn_tracked(
+        &mut command,
+        &format!("launcher `{}`", config.defaults.launcher),
+    );
+}
+
+/// Shows the generated hotkey cheat-sheet in a `fuzzel` pager.
+///
+/// # Rationale
+///
+/// `fuzzel` is deliberately not `config.defaults.launcher`: it is driven
+/// here as a dmenu-style pager with fuzzel-specific flags, not as the
+/// user's chosen launcher (audit finding J-09 records the cost — a user
+/// without `fuzzel` gets a silent no-op).
+///
+/// stdin is written from its own thread. The cheat-sheet used to be a fixed
+/// 11-entry constant, comfortably under the ~64KiB default pipe buffer,
+/// which is what made a synchronous write safe; it is now generated from
+/// the user's own bindings and has no bound at all, so a large enough
+/// config could fill the pipe and block this — the WM's only thread — until
+/// `fuzzel` drained it, freezing all window management.
+fn spawn_hotkey_sheet(config: &Config, active_output: Option<ActiveOutput<'_>>) {
+    let mut command = std::process::Command::new("fuzzel");
+    command.arg("--dmenu");
+    fuzzel_overlay_args(&mut command, active_output.and_then(|active| active.name));
+    command.arg("--prompt").arg("Hotkeys: ");
+    match command
+        .stdin(std::process::Stdio::piped())
+        .env_remove("WAYLAND_DEBUG")
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                let help = config.hotkey_help().join("\n");
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    if let Err(e) = writeln!(stdin, "{help}") {
+                        log_err!("Failed to write hotkey list to fuzzel: {e}");
+                    }
+                });
+            }
+            track_child(child);
+        }
+        Err(e) => log_err!("Failed to spawn fuzzel for hotkey list: {e}"),
+    }
+}
+
+/// Switches `active_output` onto the tag named `name`, creating it if it
+/// does not exist yet. Returns the tag actually switched to, which is
+/// [`Seat::do_action`]'s pinned-terminal spawn signal.
+///
+/// # Rationale
+///
+/// Create-on-demand because a named-tag bind is meant to be pressed before
+/// the tag exists (`Super+1` = "email" on a fresh session), so a missing
+/// tag is created rather than treated as an error.
+///
+/// The name is resolved before [`WmCore::create_tag`] is reached, but not to
+/// prevent duplicates — `create_tag` is already idempotent by name and
+/// returns the existing id. It is so that the overwhelmingly common case,
+/// pressing a bind for a tag that already exists, never calls a
+/// `&mut WmCore` mutator at all: this project's retrospective identifies new
+/// call sites onto shared-state mutators as its highest-risk change shape,
+/// so a read stays a read.
+fn switch_to_named_tag(
+    wm_core: &mut WmCore,
+    active_output: Option<ActiveOutput<'_>>,
+    name: &str,
+) -> Option<TagId> {
+    let Some(active) = active_output else {
+        notify_user(&format!(
+            "The keybind for tag `{name}` did nothing: no output is registered yet."
+        ));
+        return None;
+    };
+    let tag_id = match wm_core.tag_id_by_name(name) {
+        Some(tag_id) => tag_id,
+        None => match wm_core.create_tag(name.to_owned()) {
+            Ok(tag_id) => tag_id,
+            Err(e) => {
+                log_err!("Failed to create tag `{name}`: {e}");
+                return None;
+            }
+        },
+    };
+    match wm_core.switch_tag(active.id, tag_id) {
+        Ok(()) => Some(tag_id),
+        Err(e) => {
+            log_err!("Failed to switch to tag `{name}`: {e}");
+            None
+        }
+    }
+}
+
+/// Advances `active_output` to its next tag, returning the tag switched to —
+/// [`Seat::do_action`]'s pinned-terminal spawn signal.
+fn cycle_active_tag(
+    wm_core: &mut WmCore,
+    active_output: Option<ActiveOutput<'_>>,
+) -> Option<TagId> {
+    let Some(active) = active_output else {
+        notify_user("The tag-cycle keybind did nothing: no output is registered yet.");
+        return None;
+    };
+    match wm_core.cycle_tag(active.id) {
+        Ok(tag_id) => tag_id,
+        Err(e) => {
+            log_err!("Failed to cycle tag on output {:?}: {e}", active.id);
+            None
+        }
     }
 }
 
@@ -1724,393 +1991,157 @@ impl Seat {
     }
 
     /// Executes `self.pending_action`, returning `Some(tag_id)` when the
-    /// action just switched the active output onto `tag_id` — the signal
-    /// `manage_seats` uses, after this seat loop ends, to ensure that tag's
-    /// pinned terminal is spawned (`WindowManager::ensure_pinned_terminal_spawned`).
-    /// Every other arm returns `None`. `active_output_id` is the
-    /// deterministic "active output" `Action::CycleTag` acts on (see
-    /// `WindowManager::active_output_id`).
+    /// action just switched `active_output` onto `tag_id` — the signal
+    /// [`WindowManager::manage_seats`] uses, after this seat loop ends, to
+    /// ensure that tag's pinned terminal is spawned
+    /// ([`WindowManager::ensure_pinned_terminal_spawned`]).
+    ///
+    /// Exactly two of the thirteen actions can produce that signal, which is
+    /// why they are the only two arms below that return a value; every other
+    /// arm is a side effect and falls through to `None`. Before audit
+    /// finding J-04 that fact was buried in a 365-line body where each arm
+    /// spelled out its own `None`.
     fn do_action(
         &mut self,
         windows: &mut VecDeque<Window>,
         wm_proxy: &RiverWindowManagerV1,
         wm_core: &mut WmCore,
-        active_output_id: Option<OutputId>,
-        // Story 2.9 Task 3: the active output's real Wayland connector name
-        // (e.g. `"eDP-1"`), resolved by `manage_seats` alongside
-        // `active_output_id` above via `WindowManager::output_name`. `None`
-        // whenever that name isn't yet known (Technical notes) — both
-        // `buoy-tag-picker` spawn arms below treat that the same as
-        // `active_output_id` being `None`: append no extra argument at all,
-        // rather than a bogus/empty one (AC 2).
-        active_output_name: Option<&str>,
+        active_output: Option<ActiveOutput<'_>>,
         config: &Config,
     ) -> Option<TagId> {
         let pending_action = self.pending_action.take()?;
         match pending_action {
-            // Don't pass WAYLAND_DEBUG on to children, the added noise makes
-            // debugging the window manager itself impractical.
-            Action::Terminal => {
-                spawn_tracked(
-                    &mut std::process::Command::new(&config.defaults.terminal),
-                    &format!("terminal `{}`", config.defaults.terminal),
-                );
-                None
-            }
-            // Runs through `sh -c` so a bind can carry a whole command line —
-            // arguments, pipes, `~` expansion — instead of just a bare
-            // program name. The string comes from the user's own config
-            // file, so shell interpretation is the intent here, not an
-            // injection vector: anyone who can edit it can already run
-            // anything as this user.
-            Action::Exec(command_line) => {
-                spawn_tracked(
-                    std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&command_line),
-                    &format!("`{command_line}`"),
-                );
-                None
-            }
-            // Create-on-demand: a named-tag bind is meant to be pressed
-            // before the tag exists (`Super+1` = "email" on a fresh
-            // session), so a missing tag is created rather than treated as
-            // an error.
-            //
-            // The name is resolved before `create_tag` is reached, but not
-            // to prevent duplicates — `TagRegistry::create_tag` is already
-            // idempotent by name and returns the existing id (code-review
-            // follow-up corrected an earlier comment claiming otherwise).
-            // It is so that the overwhelmingly common case, pressing a bind
-            // for a tag that already exists, never calls a `&mut WmCore`
-            // mutator at all: this project's retrospective identifies new
-            // call sites onto shared-state mutators as its highest-risk
-            // change shape, so a read stays a read.
+            Action::CycleTag => return cycle_active_tag(wm_core, active_output),
             Action::SwitchTag(name) => {
-                let Some(output_id) = active_output_id else {
-                    notify_user(&format!(
-                        "The keybind for tag `{name}` did nothing: no output is \
-                         registered yet."
-                    ));
-                    return None;
-                };
-                let tag_id = match wm_core.tag_id_by_name(&name) {
-                    Some(tag_id) => tag_id,
-                    None => match wm_core.create_tag(name.clone()) {
-                        Ok(tag_id) => tag_id,
-                        Err(e) => {
-                            log_err!("Failed to create tag `{name}`: {e}");
-                            return None;
-                        }
-                    },
-                };
-                match wm_core.switch_tag(output_id, tag_id) {
-                    // Mirrors `Action::CycleTag`: the returned tag id is the
-                    // signal `manage_seats` uses to spawn this tag's pinned
-                    // terminal on first use.
-                    Ok(()) => Some(tag_id),
-                    Err(e) => {
-                        log_err!("Failed to switch to tag `{name}`: {e}");
-                        None
-                    }
-                }
+                return switch_to_named_tag(wm_core, active_output, &name);
             }
-            // `Mod4+R`: same fire-and-forget spawn shape as `Action::Terminal`
-            // above. Bare `fuzzel` (no `--dmenu`) runs its own built-in
-            // desktop-entry launcher, so no argument wiring is needed.
-            Action::Launcher => {
-                // "overlay" (not the default "top") renders above a
-                // fullscreen window too (fuzzel.ini(5)) - kept as
-                // defense-in-depth even though the pinned terminal no
-                // longer uses real protocol fullscreen (see
-                // `recompute_pinned_terminal_geometry`'s doc comment).
-                //
-                // Code review follow-up: also pass `--output=<name>`, the
-                // same real connector name `Action::OpenAssignPicker`/
-                // `OpenSwitchPicker` already pass to `buoy-tag-picker` (Story 2.9) -
-                // this arm spawns `fuzzel` directly, bypassing `buoy-tag-picker`
-                // entirely, so it never got that fix. Without it, `fuzzel`
-                // fell back to "let the compositor choose", which could
-                // pick a disabled/off output when docked (kanshi disables
-                // the laptop panel) - the launcher would map with real
-                // keyboard focus and accept input, but paint to a screen
-                // nothing shows on. No flag at all when the name isn't yet
-                // known, same as every other `--output=` call site.
-                let mut command = std::process::Command::new(&config.defaults.launcher);
-                command.arg("--layer=overlay");
-                if let Some(name) = active_output_name {
-                    command.arg(format!("--output={name}"));
-                }
-                spawn_tracked(
-                    &mut command,
-                    &format!("launcher `{}`", config.defaults.launcher),
-                );
-                None
-            }
-            Action::Hotkeys => {
-                // The cheat-sheet used to be a fixed 11-entry constant,
-                // comfortably under the ~64KiB default pipe buffer, which
-                // is what made a synchronous write safe here. It is now
-                // generated from the user's own bindings and has no bound
-                // at all, so a large enough config could fill the pipe and
-                // block this — the WM's only thread — until fuzzel drained
-                // it, freezing all window management. Hand the write to a
-                // thread, exactly as `buoy-tag-picker`'s `run_fuzzel` already
-                // does for its arbitrarily-long checklist (code-review
-                // follow-up).
-                //
-                // `fuzzel` is deliberately not `config.defaults.launcher`:
-                // it is driven as a dmenu-style pager here, with
-                // fuzzel-specific flags, not as the user's chosen launcher.
-                // See `Action::Launcher`'s comments above for `--layer=
-                // overlay` and `--output=<name>`.
-                let mut command = std::process::Command::new("fuzzel");
-                command
-                    .arg("--dmenu")
-                    .arg("--layer=overlay")
-                    .arg("--prompt")
-                    .arg("Hotkeys: ");
-                if let Some(name) = active_output_name {
-                    command.arg(format!("--output={name}"));
-                }
-                match command
-                    .stdin(std::process::Stdio::piped())
-                    .env_remove("WAYLAND_DEBUG")
-                    .spawn()
-                {
-                    Ok(mut child) => {
-                        if let Some(mut stdin) = child.stdin.take() {
-                            let help = config.hotkey_help().join("\n");
-                            std::thread::spawn(move || {
-                                use std::io::Write;
-                                if let Err(e) = writeln!(stdin, "{help}") {
-                                    log_err!("Failed to write hotkey list to fuzzel: {e}");
-                                }
-                            });
-                        }
-                        track_child(child);
-                    }
-                    Err(e) => log_err!("Failed to spawn fuzzel for hotkey list: {e}"),
-                }
-                None
-            }
-            Action::Close => {
-                // Check the pinned-terminal exclusion against this seat's
-                // own real focus target (self.focused's Window.app_id),
-                // not wm_core.closable_focused_view()'s single, WM-wide
-                // focused_view — with multiple seats, the global field can
-                // reflect a *different* seat's focus by the time this runs
-                // (last-seat-processed-in-manage_seats wins), which could
-                // let the pinned terminal be closed via this seat's own
-                // request even though it isn't this seat's real focus, or
-                // could spuriously block a legitimate close. Looking the
-                // window up in `windows` and reading its own `app_id`
-                // keeps the decision local and per-seat-correct regardless
-                // of seat count or wm_core's global focus state (Story 1.4
-                // code-review follow-up).
-                if let Some(window_proxy) = self.focused.as_ref() {
-                    let is_pinned_terminal = windows
-                        .iter()
-                        .find(|window| &window.proxy == window_proxy)
-                        .is_some_and(|window| is_pinned_term_app_id(&window.app_id));
-                    if !is_pinned_terminal {
-                        window_proxy.close();
-                    }
-                }
-                None
-            }
-            Action::FocusNext => {
-                // wm_core.cycle_focus()'s returned ViewId is the source of
-                // truth for which window to focus next — look it up in
-                // `windows` and move it to the back (real z-order) rather
-                // than independently rotating `windows` and letting the
-                // two mechanisms diverge (Story 1.4 code-review
-                // follow-up). `focus_top` then issues the real
-                // focus_window/place_top proxy calls against the top of
-                // `wm_core`'s stacking order — which `cycle_focus`' own
-                // `raise_view` just set to this same window — and this
-                // reorder keeps `windows` agreeing with it.
-                if let Some(next_view_id) = wm_core.cycle_focus()
-                    && let Some(i) = windows
-                        .iter()
-                        .position(|window| window.view_id == Some(next_view_id))
-                {
-                    // Defensive guard (Story 1.5 code review follow-up,
-                    // finding #2): `wm_core::state::cycle_focus` already
-                    // excludes the pinned terminal from its candidates, so
-                    // `next_view_id` should never actually resolve to it —
-                    // but check the real `Window`'s own `app_id` here too,
-                    // so this arm is correct on its own terms rather than
-                    // correct only by accident of `cycle_focus`'s behavior
-                    // elsewhere. If it somehow did resolve to the pinned
-                    // terminal, skip the `windows.remove`/`push_back`/
-                    // `place_top()` reorder (FR4: always bottom) but still
-                    // give it real keyboard focus, same direct-focus
-                    // pattern click-to-focus uses in `manage_seats`.
-                    if is_pinned_term_app_id(&windows[i].app_id) {
-                        let window = &windows[i];
-                        self.proxy.focus_window(&window.proxy);
-                        self.focused = Some(window.proxy.clone());
-                        if let Err(e) = wm_core.set_focus(next_view_id) {
-                            log_err!(
-                                "Failed to set focus for view {next_view_id:?} in wm_core: {e}"
-                            );
-                        }
-                    } else if let Some(window) = windows.remove(i) {
-                        // `i` came from a `position()` on this same deque
-                        // with no intervening mutation, so `None` is
-                        // unreachable; written fallibly so no panic site
-                        // remains on this thread (audit finding F-01).
-                        windows.push_back(window);
-                        // Unscoped: `cycle_focus` has already chosen the
-                        // target and only considers visible views, so this
-                        // call is re-affirming that choice, not searching.
-                        self.focus_top(windows, wm_core, None);
-                    }
-                }
-                None
-            }
-            // `self.hovered` was captured by a `PointerEnter` event that
-            // races the `closed` event dropping the window from `windows`,
-            // with no ordering promised between them — the same
-            // outlived-target hazard the `'interacted` block in
-            // `manage_seats` documents. A miss loses this drag rather than
-            // the session (audit finding F-01).
-            Action::Move => {
-                if let (Some(window_proxy), SeatOp::None) = (self.hovered.as_ref(), &self.op) {
-                    match windows.iter().find(|window| &window.proxy == window_proxy) {
-                        Some(window) => self.pointer_move(window),
-                        None => log_err!(
-                            "Ignoring a move of the hovered window, which is \
-                             no longer managed (already closed)"
-                        ),
-                    }
-                }
-                None
-            }
-            Action::Resize => {
-                if let (Some(window_proxy), SeatOp::None) = (self.hovered.as_ref(), &self.op) {
-                    match windows.iter().find(|window| &window.proxy == window_proxy) {
-                        Some(window) => {
-                            self.pointer_resize(window, Edges::Bottom.union(Edges::Right))
-                        }
-                        None => log_err!(
-                            "Ignoring a resize of the hovered window, which is \
-                             no longer managed (already closed)"
-                        ),
-                    }
-                }
-                None
-            }
-            Action::Exit => {
-                wm_proxy.exit_session();
-                None
-            }
-            Action::CycleTag => match active_output_id {
-                Some(output_id) => match wm_core.cycle_tag(output_id) {
-                    Ok(Some(tag_id)) => Some(tag_id),
-                    Ok(None) => None,
-                    Err(e) => {
-                        log_err!("Failed to cycle tag on output {output_id:?}: {e}");
-                        None
-                    }
-                },
-                None => {
-                    notify_user("The tag-cycle keybind did nothing: no output is registered yet.");
-                    None
-                }
-            },
-            // Story 2.2: fire-and-forget process spawn, no `wm_core` access.
-            // `buoy-tag-picker` resolves the focused view itself via its own
-            // `get-state` IPC call, so this arm never switches an output's
-            // active tag and thus never triggers `manage_seats`'
-            // pinned-terminal-spawn signal.
-            //
-            // Code review follow-up (finding #1): spawning `"buoy-tag-picker"` by
-            // bare name relied on `$PATH`, but nothing in this repo installs
-            // the built binary there — in a real session this silently
-            // ENOENTs and `Mod4+A` does nothing. Resolve the sibling
-            // binary's path relative to the WM's own running executable
-            // instead (`tag_picker_path`); if `current_exe()` itself fails,
-            // log and skip spawning rather than guessing a path or
-            // panicking (NFR2). Once resolved, the spawn/error-handling
-            // shape is otherwise byte-for-byte the same as
-            // `Action::Terminal`'s above.
-            Action::OpenAssignPicker => {
-                match std::env::current_exe() {
-                    Ok(wm_exe) => {
-                        let mut command = std::process::Command::new(tag_picker_path(&wm_exe));
-                        // Story 2.10 Task 3: the active output's id,
-                        // threaded across the process boundary so
-                        // assign-mode can switch the active output to a
-                        // picked/created tag when no window is focused
-                        // (Tasks 4/5) — mirrors `Action::OpenSwitchPicker`'s own
-                        // `<output_id> [<output_name>]` argument order
-                        // below. Only appended when an output is actually
-                        // registered; `None` (a startup-race edge case
-                        // Task 2 makes rare but doesn't eliminate) spawns
-                        // with zero args, same as today's behavior.
-                        if let Some(output_id) = active_output_id {
-                            command.arg(output_id.0.to_string());
-                            // Story 2.9 Task 3.3: the active output's real
-                            // connector name, so `buoy-tag-picker` can in turn
-                            // tell `fuzzel --output=<name>` which monitor
-                            // to render on (Task 5) — never appended when
-                            // unknown, preserving today's argument shape
-                            // exactly (AC 2).
-                            if let Some(name) = active_output_name {
-                                command.arg(name);
-                            }
-                        }
-                        spawn_tracked(&mut command, "buoy-tag-picker");
-                    }
-                    Err(e) => {
-                        log_err!("Failed to resolve wm's own executable path: {e}")
-                    }
-                }
-                None
-            }
-            // Story 2.4: `Mod4+S` ("Switch") spawns the same `buoy-tag-picker`
-            // binary in switch mode, passing the WM's own deterministic
-            // `active_output_id` resolution across the process boundary as
-            // a CLI argument — `buoy-tag-picker` never re-derives "the active
-            // output" itself (Task 1.2). Same fire-and-forget spawn shape
-            // as `Action::OpenAssignPicker` above, plus the same
-            // `None`-output defensive no-op shape as `Action::CycleTag`.
-            // Always returns `None`: this arm never itself mutates
-            // `wm_core` or triggers `manage_seats`' pinned-terminal-spawn
-            // signal — the eventual `switch-tag` IPC call and its
-            // pinned-terminal follow-up (Task 2) both happen later,
-            // asynchronously, once the user picks a tag in the spawned
-            // process.
-            Action::OpenSwitchPicker => {
-                match active_output_id {
-                    Some(output_id) => match std::env::current_exe() {
-                        Ok(wm_exe) => {
-                            let mut command = std::process::Command::new(tag_picker_path(&wm_exe));
-                            command.arg("switch").arg(output_id.0.to_string());
-                            // Story 2.9 Task 3.4: same trailing-name
-                            // convention as `Action::OpenAssignPicker` above —
-                            // appended after the existing two args, only
-                            // when known, preserving today's two-arg
-                            // `switch <id>` shape exactly when it isn't (AC
-                            // 2).
-                            if let Some(name) = active_output_name {
-                                command.arg(name);
-                            }
-                            spawn_tracked(&mut command, "buoy-tag-picker in switch mode");
-                        }
-                        Err(e) => {
-                            log_err!("Failed to resolve wm's own executable path: {e}")
-                        }
-                    },
-                    None => notify_user(
-                        "The tag-switch keybind did nothing: no output is registered yet.",
-                    ),
-                }
-                None
-            }
+            Action::Terminal => spawn_terminal(config),
+            Action::Exec(command_line) => spawn_exec(&command_line),
+            Action::Launcher => spawn_launcher(config, active_output),
+            Action::Hotkeys => spawn_hotkey_sheet(config, active_output),
+            Action::OpenAssignPicker => spawn_tag_picker(None, active_output),
+            Action::OpenSwitchPicker => spawn_switch_picker(active_output),
+            Action::Close => self.close_focused(windows),
+            Action::FocusNext => self.focus_next_window(windows, wm_core),
+            Action::Move => self.move_hovered_window(windows),
+            Action::Resize => self.resize_hovered_window(windows),
+            Action::Exit => wm_proxy.exit_session(),
         }
+        None
+    }
+
+    /// Closes this seat's focused window, unless it is a pinned terminal.
+    ///
+    /// # Rationale
+    ///
+    /// The exclusion is checked against this seat's *own* real focus target
+    /// (`self.focused`'s [`Window::app_id`]) rather than
+    /// `WmCore::closable_focused_view`'s single WM-wide focused view: with
+    /// multiple seats the global field can reflect a different seat's focus
+    /// by the time this runs (last seat processed in
+    /// [`WindowManager::manage_seats`] wins), which could let the pinned
+    /// terminal be closed via this seat's request even though it isn't this
+    /// seat's real focus, or spuriously block a legitimate close.
+    fn close_focused(&self, windows: &VecDeque<Window>) {
+        let Some(window_proxy) = self.focused.as_ref() else {
+            return;
+        };
+        let is_pinned_terminal = windows
+            .iter()
+            .find(|window| &window.proxy == window_proxy)
+            .is_some_and(|window| is_pinned_term_app_id(&window.app_id));
+        if !is_pinned_terminal {
+            window_proxy.close();
+        }
+    }
+
+    /// Moves focus to the next window in `wm_core`'s cycle order and brings
+    /// it to the top of the real z-order.
+    ///
+    /// # Rationale
+    ///
+    /// [`WmCore::cycle_focus`]' returned view is the single source of truth
+    /// for which window is next: it is looked up in `windows` and moved to
+    /// the back rather than rotating `windows` independently and letting the
+    /// two mechanisms diverge.
+    ///
+    /// The pinned-terminal check is defensive — `cycle_focus` already
+    /// excludes it from its candidates — so that this function is correct on
+    /// its own terms rather than only by accident of behavior elsewhere. If
+    /// the pinned terminal ever were returned it gets real keyboard focus
+    /// but not the reorder, because FR4 keeps it at the bottom.
+    fn focus_next_window(&mut self, windows: &mut VecDeque<Window>, wm_core: &mut WmCore) {
+        let Some(next_view_id) = wm_core.cycle_focus() else {
+            return;
+        };
+        let Some(i) = windows
+            .iter()
+            .position(|window| window.view_id == Some(next_view_id))
+        else {
+            return;
+        };
+        if is_pinned_term_app_id(&windows[i].app_id) {
+            let window = &windows[i];
+            self.proxy.focus_window(&window.proxy);
+            self.focused = Some(window.proxy.clone());
+            if let Err(e) = wm_core.set_focus(next_view_id) {
+                log_err!("Failed to set focus for view {next_view_id:?} in wm_core: {e}");
+            }
+        } else if let Some(window) = windows.remove(i) {
+            // `i` came from a `position()` on this same deque with no
+            // intervening mutation, so `None` is unreachable; written
+            // fallibly so no panic site remains on this thread (audit
+            // finding F-01).
+            windows.push_back(window);
+            // Unscoped: `cycle_focus` has already chosen the target and only
+            // considers visible views, so this call is re-affirming that
+            // choice, not searching.
+            self.focus_top(windows, wm_core, None);
+        }
+    }
+
+    /// Starts a pointer move of the hovered window.
+    fn move_hovered_window(&mut self, windows: &VecDeque<Window>) {
+        if let Some(window) = self.hovered_idle_window(windows, "move") {
+            self.pointer_move(window);
+        }
+    }
+
+    /// Starts a pointer resize of the hovered window from its bottom-right
+    /// corner.
+    fn resize_hovered_window(&mut self, windows: &VecDeque<Window>) {
+        if let Some(window) = self.hovered_idle_window(windows, "resize") {
+            self.pointer_resize(window, Edges::Bottom.union(Edges::Right));
+        }
+    }
+
+    /// The hovered window, when this seat has one, it is still managed, and
+    /// no drag is already in progress. `what` names the operation being
+    /// declined, for the log line.
+    ///
+    /// # Rationale
+    ///
+    /// `self.hovered` was captured by a `PointerEnter` event that races the
+    /// `closed` event dropping the window from `windows`, with no ordering
+    /// promised between them — the same outlived-target hazard the
+    /// `'interacted` block in [`WindowManager::manage_seats`] documents. A
+    /// miss loses this drag rather than the session (audit finding F-01).
+    fn hovered_idle_window<'w>(
+        &self,
+        windows: &'w VecDeque<Window>,
+        what: &str,
+    ) -> Option<&'w Window> {
+        let (Some(window_proxy), SeatOp::None) = (self.hovered.as_ref(), &self.op) else {
+            return None;
+        };
+        let hovered = windows.iter().find(|window| &window.proxy == window_proxy);
+        if hovered.is_none() {
+            log_err!(
+                "Ignoring a {what} of the hovered window, which is no longer \
+                 managed (already closed)"
+            );
+        }
+        hovered
     }
 
     fn op_end(&mut self) {
@@ -3121,6 +3152,79 @@ mod tests {
     // handler so it's testable without actually calling `current_exe()`.
     // The `current_exe()`/`Command::spawn()` call site itself stays
     // untested I/O glue, same carve-out as the rest of this file.
+
+    /// Audit finding J-09: the `--output=` guard had drifted three ways —
+    /// `buoy-tag-picker` checked for an empty name, `Action::Launcher` and
+    /// `Action::Hotkeys` only for `None`. An empty connector name produced
+    /// a bare `--output=`, which is the malformed flag every one of those
+    /// call sites was written to avoid.
+    #[test]
+    fn fuzzel_overlay_args_omit_output_for_an_empty_connector_name() {
+        let mut command = std::process::Command::new("fuzzel");
+        fuzzel_overlay_args(&mut command, Some(""));
+        assert_eq!(args_of(&command), ["--layer=overlay"]);
+    }
+
+    #[test]
+    fn fuzzel_overlay_args_omit_output_when_the_connector_name_is_unknown() {
+        let mut command = std::process::Command::new("fuzzel");
+        fuzzel_overlay_args(&mut command, None);
+        assert_eq!(args_of(&command), ["--layer=overlay"]);
+    }
+
+    #[test]
+    fn fuzzel_overlay_args_target_a_real_connector_name() {
+        let mut command = std::process::Command::new("fuzzel");
+        fuzzel_overlay_args(&mut command, Some("eDP-1"));
+        assert_eq!(args_of(&command), ["--layer=overlay", "--output=eDP-1"]);
+    }
+
+    fn args_of(command: &std::process::Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Audit finding J-04: the assign-picker and switch-picker arms built
+    /// this argv twice, byte for byte apart from the leading `switch`. The
+    /// asymmetry the extraction has to preserve is below: assign mode
+    /// spawns with zero arguments when no output is registered, switch mode
+    /// refuses to spawn at all.
+    #[test]
+    fn assign_mode_argv_is_empty_when_no_output_is_registered() {
+        assert!(tag_picker_args(None, None).is_empty());
+    }
+
+    #[test]
+    fn picker_argv_omits_the_connector_name_when_it_is_unknown() {
+        let active = ActiveOutput {
+            id: OutputId(3),
+            name: None,
+        };
+        assert_eq!(tag_picker_args(None, Some(active)), ["3"]);
+    }
+
+    #[test]
+    fn assign_mode_argv_is_the_output_id_then_its_connector_name() {
+        let active = ActiveOutput {
+            id: OutputId(3),
+            name: Some("eDP-1"),
+        };
+        assert_eq!(tag_picker_args(None, Some(active)), ["3", "eDP-1"]);
+    }
+
+    #[test]
+    fn switch_mode_argv_leads_with_the_mode_then_matches_assign_mode() {
+        let active = ActiveOutput {
+            id: OutputId(3),
+            name: Some("eDP-1"),
+        };
+        assert_eq!(
+            tag_picker_args(Some(TAG_PICKER_SWITCH_MODE), Some(active)),
+            ["switch", "3", "eDP-1"]
+        );
+    }
 
     /// Audit finding K-01: the slot holds one action and
     /// `blocking_dispatch` dispatches every queued event before the manage
