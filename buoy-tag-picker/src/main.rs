@@ -336,10 +336,20 @@ fn run_dmenu(
         .map_err(|e| format!("cannot wait for `{program}`: {e}"));
 
     // `wait_with_output` already implies the write side is done or moot
-    // (the child exited), but join anyway so a stdin-write error above is
-    // never silently dropped before this function returns.
+    // (the child exited). Joined anyway to catch the one thing the closure
+    // can do that nothing else would report: panic. A *write* error is
+    // already surfaced by the closure's own `log_err!` above — the comment
+    // that used to sit here claimed the join was what kept it from being
+    // silently dropped, which `let _ = handle.join()` was never doing
+    // (audit finding F-05).
     if let Some(handle) = stdin_writer {
-        let _ = handle.join();
+        if handle.join().is_err() {
+            // The payload is not decoded here: this process installs no
+            // panic hook, so the default one has already written the
+            // message and its `file:line` to stderr. What was missing was
+            // any statement that the *input* is therefore incomplete.
+            log_err!("the thread feeding `{program}` its input panicked; its input is incomplete");
+        }
     }
 
     result

@@ -233,13 +233,17 @@ fn panic_report(location: &str, message: &str) -> String {
 /// `panic!("literal")` yields a `&'static str` and `panic!("{x}")` yields a
 /// `String`; a reporter that reads only one of them is blank for half the
 /// panics this codebase can raise.
+///
+/// `ipc::server::describe_panic` is the same decode for the `catch_unwind`
+/// around each IPC connection — see its doc comment for why the two are
+/// deliberately not one.
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
     if let Some(literal) = payload.downcast_ref::<&'static str>() {
         literal
     } else if let Some(owned) = payload.downcast_ref::<String>() {
         owned
     } else {
-        "panicked with a payload of an unrecognised type"
+        "a non-string panic payload"
     }
 }
 
@@ -282,8 +286,55 @@ fn track_child(child: std::process::Child) {
     let mut children = SPAWNED_CHILDREN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    children.retain_mut(|tracked| !matches!(tracked.try_wait(), Ok(Some(_))));
+    children.retain_mut(child_is_still_running);
     children.push(child);
+}
+
+/// Reaps whatever has exited since the last call.
+///
+/// Called once per manage sequence as well as on every spawn, because
+/// reaping only on spawn meant a session that launched thirty pickers and
+/// then idled held thirty zombies until the next keypress (audit finding
+/// F-05). Recovers from a poisoned lock for the same reason
+/// [`track_child`] does.
+fn reap_finished_children() {
+    let mut children = SPAWNED_CHILDREN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    children.retain_mut(child_is_still_running);
+}
+
+/// Whether `tracked` is still running, reporting anything its exit had to
+/// say on the way past.
+///
+/// The status used to be matched and thrown away. `Command::spawn` succeeds
+/// for anything on `$PATH`, so a misconfigured `defaults.terminal` that
+/// starts and immediately fails was indistinguishable from one that worked,
+/// and nothing said so (audit finding F-05). The reaping design is right;
+/// the observation is free.
+fn child_is_still_running(tracked: &mut std::process::Child) -> bool {
+    match tracked.try_wait() {
+        Ok(Some(status)) => {
+            if let Some(complaint) = child_exit_complaint(status) {
+                log_err!("A child of this WM {complaint}");
+            }
+            false
+        }
+        Ok(None) => true,
+        Err(e) => {
+            // Keep it in the list: an unreadable status is not evidence the
+            // process is gone, and dropping the handle would leak the zombie
+            // permanently instead of retrying next pass.
+            log_err!("Could not check on child process {}: {e}", tracked.id());
+            true
+        }
+    }
+}
+
+/// What a finished child's exit status is worth saying, or `None` when it
+/// exited cleanly.
+fn child_exit_complaint(status: std::process::ExitStatus) -> Option<String> {
+    (!status.success()).then(|| format!("exited unsuccessfully ({status})"))
 }
 
 /// Spawns `command` fire-and-forget, logging a failure as `"Failed to spawn
@@ -633,6 +684,10 @@ impl WindowManager {
         river_xkb: &RiverXkbBindingsV1,
         qh: &QueueHandle<AppData>,
     ) {
+        // This is already the "reclaim things that died" phase, and it runs
+        // whether or not anything was spawned — unlike `track_child`, which
+        // is the only other reaper (audit finding F-05).
+        reap_finished_children();
         self.remove_outputs();
         self.remove_windows();
         self.remove_seats();
@@ -2813,6 +2868,13 @@ impl Dispatch<RiverLibinputResultV1, String> for AppData {
         _qh: &QueueHandle<Self>,
     ) {
         use river::river_libinput_result_v1::Event;
+        // Nothing destroys this proxy here and nothing should: all three
+        // events are `type="destructor"` in
+        // `river-libinput-config-v1.xml`, so river disposes of the object as
+        // it sends one and the interface has no `destroy` request to call.
+        // Audit finding F-05 read this as a leaked protocol object per
+        // setting per device; it is not.
+        //
         // A silently-dropped `unsupported` is how a setting that simply does
         // not work on this device looks identical to one that was never
         // configured, so both failure modes are named here. `success` stays
@@ -3009,6 +3071,26 @@ mod tests {
     // handler so it's testable without actually calling `current_exe()`.
     // The `current_exe()`/`Command::spawn()` call site itself stays
     // untested I/O glue, same carve-out as the rest of this file.
+
+    /// Audit finding F-05: `Command::spawn` succeeds for anything on
+    /// `$PATH`, so a misconfigured `defaults.terminal` that starts and
+    /// immediately fails was indistinguishable from one that worked — the
+    /// exit status was matched and discarded.
+    #[test]
+    fn a_child_that_exited_badly_has_something_to_report() {
+        let failed = std::process::Command::new("/bin/false")
+            .status()
+            .expect("/bin/false ran");
+        assert!(child_exit_complaint(failed).is_some());
+    }
+
+    #[test]
+    fn a_child_that_exited_cleanly_has_nothing_to_report() {
+        let succeeded = std::process::Command::new("/bin/true")
+            .status()
+            .expect("/bin/true ran");
+        assert_eq!(child_exit_complaint(succeeded), None);
+    }
 
     /// Audit finding F-03: `dx`/`dy` arrive over the wire, `[profile
     /// .release]` sets no `overflow-checks`, and the `MIN_WINDOW_EXTENT`

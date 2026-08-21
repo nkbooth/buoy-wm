@@ -377,10 +377,18 @@ fn handle_connection(
 /// payload directly produced a contentless line at the one point in this
 /// code that deliberately reaches for crash telemetry (audit finding
 /// G-05); the real message and its `file:line` arrived separately from the
-/// default panic hook, unlinked and interleavable across concurrent
-/// connection threads. `panic!` payloads are `&'static str` when the
-/// message has no arguments and `String` when it does, which is why both
-/// are checked.
+/// panic hook, unlinked and interleavable across concurrent connection
+/// threads.
+///
+/// `panic!` payloads are `&'static str` when the message has no arguments
+/// and `String` when it does, which is why both are checked.
+///
+/// Deliberately a second copy of `crate::panic_message`, which the
+/// process-wide panic hook uses. Collapsing them would mean a fourth
+/// `crate::` reach-up from this module into the composition root, and
+/// audit finding J-02 is about removing the three that are already here so
+/// this module can move to a library crate. Two occurrences is inside this
+/// project's own three-strike DRY threshold; a third is where they merge.
 fn describe_panic(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         return (*message).to_string();
@@ -393,13 +401,44 @@ fn describe_panic(payload: &Box<dyn std::any::Any + Send>) -> String {
 
 /// Writes `response` as one JSON line followed by `\n`, flushing
 /// afterward. Returns `false` (caller should close the connection) if the
-/// write itself fails — a write failure means the peer is already gone,
-/// nothing more to do on this connection.
+/// write itself fails.
+///
+/// A failure that is not a hangup is logged. The three `is_ok()` calls this
+/// replaced threw away *why*, on the strength of a doc comment asserting
+/// that a write failure always means the peer is gone — true for
+/// `BrokenPipe`, false for `ENOBUFS`, `EINTR` and an expired write
+/// deadline, each of which says something about this server rather than
+/// about the peer (audit finding F-05). The read side at
+/// `handle_connection_inner` already logs; this makes the two consistent.
 fn write_response(stream: &mut UnixStream, response: &Response) -> bool {
     let line = serialize_response(response);
-    stream.write_all(line.as_bytes()).is_ok()
-        && stream.write_all(b"\n").is_ok()
-        && stream.flush().is_ok()
+    for chunk in [line.as_bytes(), b"\n"] {
+        if let Err(e) = stream.write_all(chunk) {
+            report_write_failure(&e);
+            return false;
+        }
+    }
+    if let Err(e) = stream.flush() {
+        report_write_failure(&e);
+        return false;
+    }
+    true
+}
+
+/// Logs a failed response write unless it is just the peer having hung up.
+fn report_write_failure(error: &std::io::Error) {
+    if !is_peer_hangup(error) {
+        log_err!("could not write a response: {error}");
+    }
+}
+
+/// Whether a failed write says nothing more than "the peer is gone".
+///
+/// Only `BrokenPipe` does. Everything else — a full socket buffer, an
+/// interrupted syscall, the write deadline expiring — is a condition worth
+/// a log line (audit finding F-05).
+fn is_peer_hangup(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::BrokenPipe
 }
 
 /// Whether `error` is a read/write deadline expiring rather than a real
@@ -829,6 +868,24 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Audit finding F-05: `write_response` threw away the `io::Error` it
+    /// acted on, on the strength of a doc comment claiming a write failure
+    /// always means the peer is gone. True for `BrokenPipe`, false for
+    /// `ENOBUFS`, `EINTR` and a write deadline — which is a server-side
+    /// problem worth a line.
+    #[test]
+    fn only_a_hangup_is_an_unremarkable_write_failure() {
+        assert!(is_peer_hangup(&std::io::Error::from(
+            std::io::ErrorKind::BrokenPipe
+        )));
+        assert!(!is_peer_hangup(&std::io::Error::from(
+            std::io::ErrorKind::Interrupted
+        )));
+        assert!(!is_peer_hangup(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
     }
 
     #[test]
