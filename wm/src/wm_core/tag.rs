@@ -137,11 +137,27 @@ impl TagRegistry {
         tag.terminal_spawned = true;
         Ok(())
     }
+
+    /// Clears `terminal_spawned` for the tag with the given id, so the
+    /// lazy-spawn-once slot can be claimed again. Exists for exactly one
+    /// caller — [`WmCore::release_pinned_terminal_claim`](super::state::
+    /// WmCore::release_pinned_terminal_claim), rolling back a claim whose
+    /// spawn failed — because the claim is committed before the process it
+    /// claims for exists (audit finding D-01). Idempotent; fails with
+    /// [`TagRegistryError::UnknownTag`] for an unregistered id.
+    pub fn unmark_terminal_spawned(&mut self, id: TagId) -> Result<(), TagRegistryError> {
+        let tag = self
+            .tags
+            .get_mut(id.0 as usize)
+            .ok_or(TagRegistryError::UnknownTag)?;
+        tag.terminal_spawned = false;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TagRegistry, TagRegistryError};
+    use super::{TagId, TagRegistry, TagRegistryError};
 
     #[test]
     fn create_tag_assigns_increasing_ids_starting_at_zero() {
@@ -186,6 +202,35 @@ mod tests {
     fn ids_returns_empty_vec_when_registry_is_empty() {
         let registry = TagRegistry::new();
         assert_eq!(registry.ids(), Vec::new());
+    }
+
+    #[test]
+    fn unmark_terminal_spawned_clears_the_flag_so_a_failed_spawn_can_retry() {
+        let mut registry = TagRegistry::new();
+        let id = registry.create_tag("web").unwrap();
+        registry.mark_terminal_spawned(id).unwrap();
+        registry.unmark_terminal_spawned(id).unwrap();
+        assert!(!registry.get(id).unwrap().terminal_spawned);
+    }
+
+    #[test]
+    fn unmark_terminal_spawned_is_idempotent() {
+        let mut registry = TagRegistry::new();
+        let id = registry.create_tag("web").unwrap();
+        registry.unmark_terminal_spawned(id).unwrap();
+        assert_eq!(registry.unmark_terminal_spawned(id), Ok(()));
+        assert!(!registry.get(id).unwrap().terminal_spawned);
+    }
+
+    #[test]
+    fn unmark_terminal_spawned_unknown_tag_returns_error() {
+        let mut registry = TagRegistry::new();
+        let id = registry.create_tag("web").unwrap();
+        let bogus = TagId(id.0 + 1);
+        assert_eq!(
+            registry.unmark_terminal_spawned(bogus),
+            Err(TagRegistryError::UnknownTag)
+        );
     }
 
     #[test]

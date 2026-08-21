@@ -154,10 +154,21 @@ fn track_child(child: std::process::Child) {
 /// Spawns `command` fire-and-forget, logging a failure as `"Failed to spawn
 /// {what}: {e}"`. `WAYLAND_DEBUG` is removed from every child's environment
 /// — the added noise makes debugging the window manager itself impractical.
-fn spawn_tracked(command: &mut std::process::Command, what: &str) {
+///
+/// Returns whether the child was actually created. Most callers spawn
+/// something whose failure costs the user one keypress and ignore this; the
+/// pinned terminal is the exception, because its spawn has already been
+/// recorded as having happened (audit finding D-01).
+fn spawn_tracked(command: &mut std::process::Command, what: &str) -> bool {
     match command.env_remove("WAYLAND_DEBUG").spawn() {
-        Ok(child) => track_child(child),
-        Err(e) => eprintln!("Failed to spawn {what}: {e}"),
+        Ok(child) => {
+            track_child(child);
+            true
+        }
+        Err(e) => {
+            eprintln!("Failed to spawn {what}: {e}");
+            false
+        }
     }
 }
 
@@ -917,8 +928,14 @@ impl WindowManager {
     /// deliberately called after (not during) the seat loop that holds
     /// `wm_core`'s mutable borrow.
     fn ensure_pinned_terminal_spawned(&mut self, tag_id: TagId) {
-        match ipc::lock_recovering(&self.wm_core).claim_pinned_terminal_spawn(tag_id) {
-            Ok(Some(session_name)) => spawn_pinned_terminal(
+        // Bound to a `let` rather than matched inline: the arm below
+        // re-locks the same mutex to roll the claim back, and a scrutinee
+        // temporary would still be holding the guard there.
+        let claim = ipc::lock_recovering(&self.wm_core).claim_pinned_terminal_spawn(tag_id);
+        match claim {
+            Ok(Some(session_name)) => spawn_pinned_terminal_or_release_claim(
+                &self.wm_core,
+                tag_id,
                 &self.config.defaults.terminal,
                 &self
                     .config
@@ -1385,10 +1402,35 @@ fn tag_picker_path(wm_exe: &Path) -> PathBuf {
 /// so an arbitrary tag name in the session carries no injection risk.
 // Called from `ensure_pinned_terminal_spawned`, which gained its own
 // production call site in `manage_seats` in Story 1.7.
-fn spawn_pinned_terminal(terminal: &str, argv: &[String]) {
+fn spawn_pinned_terminal(terminal: &str, argv: &[String]) -> bool {
     spawn_tracked(
         std::process::Command::new(terminal).args(argv),
         &format!("pinned terminal `{terminal}`"),
+    )
+}
+
+/// Spawns a tag's pinned terminal and, if the spawn fails, releases the
+/// claim [`WmCore::claim_pinned_terminal_spawn`] already committed for it.
+///
+/// The claim has to be committed before the spawn — it is what makes the
+/// spawn happen at most once — so rolling it back is the only thing keeping
+/// a missing terminal binary, a mid-upgrade replacement, or a transient
+/// `EMFILE` from costing that tag its pinned terminal for the whole session
+/// and mis-tagging every pinned terminal that maps after it (audit finding
+/// D-01). Both spawn sites — the Wayland thread's keybind path and the IPC
+/// thread's `switch-tag` path — go through here for that reason.
+fn spawn_pinned_terminal_or_release_claim(
+    wm_core: &Mutex<WmCore>,
+    tag_id: TagId,
+    terminal: &str,
+    argv: &[String],
+) {
+    if spawn_pinned_terminal(terminal, argv) {
+        return;
+    }
+    log_wm_core_err(
+        ipc::lock_recovering(wm_core).release_pinned_terminal_claim(tag_id),
+        "Failed to release the pinned-terminal claim after a failed spawn",
     );
 }
 
@@ -2656,6 +2698,41 @@ mod tests {
         assert_eq!(
             wenum_label::<TapState>(wayland_client::WEnum::Unknown(7)),
             "unknown (7)"
+        );
+    }
+
+    /// Audit finding D-01: `claim_pinned_terminal_spawn` commits the claim
+    /// before any process exists, so a spawn that never happens leaves the
+    /// tag marked spawned forever *and* a stale correlation entry that
+    /// mis-tags every pinned terminal mapped afterwards. Exercises the real
+    /// failure branch — the terminal path does not exist, so
+    /// `Command::spawn` returns `ENOENT` and no process is created.
+    #[test]
+    fn a_failed_pinned_terminal_spawn_releases_the_claim_and_its_queue_entry() {
+        let wm_core = Mutex::new(WmCore::new());
+        let tag_id = ipc::lock_recovering(&wm_core).create_tag("web").unwrap();
+        let session_name = ipc::lock_recovering(&wm_core)
+            .claim_pinned_terminal_spawn(tag_id)
+            .unwrap()
+            .expect("a freshly created tag has not claimed its spawn yet");
+
+        spawn_pinned_terminal_or_release_claim(
+            &wm_core,
+            tag_id,
+            "/nonexistent/buoy-wm-test-no-such-terminal",
+            &[session_name],
+        );
+
+        let mut core = ipc::lock_recovering(&wm_core);
+        assert_eq!(
+            core.pop_pending_pinned_terminal_tag(),
+            None,
+            "a failed spawn left a stale correlation entry behind"
+        );
+        assert_eq!(
+            core.claim_pinned_terminal_spawn(tag_id),
+            Ok(Some("tag-web".to_string())),
+            "a failed spawn left the tag marked spawned, so it can never retry"
         );
     }
 

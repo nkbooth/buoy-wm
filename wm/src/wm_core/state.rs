@@ -451,6 +451,35 @@ impl WmCore {
         Ok(Some(session_name))
     }
 
+    /// Rolls back a [`WmCore::claim_pinned_terminal_spawn`] whose spawn
+    /// then failed: clears the tag's `terminal_spawned` flag and removes
+    /// the correlation entry the claim queued.
+    ///
+    /// The claim is necessarily committed before the process it claims for
+    /// exists, so without this the two halves of a failed spawn are both
+    /// permanent (audit finding D-01): the tag never retries because the
+    /// claim is idempotent by design, and the stale queue entry is popped
+    /// by the next pinned terminal that maps from a *different* tag,
+    /// mis-tagging it and everything after it. Fails with
+    /// [`WmCoreError::UnknownTag`] for an unregistered id.
+    // Called from `main.rs`'s `spawn_pinned_terminal_or_release_claim`, the
+    // one place that knows whether the spawn actually happened.
+    pub fn release_pinned_terminal_claim(&mut self, tag_id: TagId) -> Result<(), WmCoreError> {
+        self.tags
+            .unmark_terminal_spawned(tag_id)
+            .map_err(|_| WmCoreError::UnknownTag)?;
+        // The claim pushed to the back, and a claim is idempotent, so at
+        // most one entry for this tag exists and it is the newest.
+        if let Some(index) = self
+            .pending_pinned_terminal_tags
+            .iter()
+            .rposition(|&queued| queued == tag_id)
+        {
+            self.pending_pinned_terminal_tags.remove(index);
+        }
+        Ok(())
+    }
+
     /// Pops the next pending pinned-terminal tag association, FIFO (Story
     /// 2.7 Task 2's other half of the correlation mechanism started by
     /// [`WmCore::claim_pinned_terminal_spawn`]). `main.rs`'s
@@ -2510,6 +2539,46 @@ mod tests {
         assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_a));
         assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_b));
         assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
+    }
+
+    /// Audit finding D-01: the claim is committed before any process
+    /// exists, so a spawn that fails has to be undone or the tag never
+    /// retries for the rest of the session.
+    #[test]
+    fn release_pinned_terminal_claim_lets_a_failed_spawn_be_retried() {
+        let mut core = WmCore::new();
+        let tag_id = core.create_tag("web").unwrap();
+        core.claim_pinned_terminal_spawn(tag_id).unwrap();
+        core.release_pinned_terminal_claim(tag_id).unwrap();
+        assert_eq!(
+            core.claim_pinned_terminal_spawn(tag_id),
+            Ok(Some("tag-web".to_string()))
+        );
+    }
+
+    /// Audit finding D-01's second half: a released claim that left its
+    /// correlation entry behind mis-tags the *next* pinned terminal that
+    /// maps, and every one after it, permanently.
+    #[test]
+    fn release_pinned_terminal_claim_removes_the_stale_correlation_entry() {
+        let mut core = WmCore::new();
+        let failed = core.create_tag("failed").unwrap();
+        let next = core.create_tag("next").unwrap();
+        core.claim_pinned_terminal_spawn(failed).unwrap();
+        core.release_pinned_terminal_claim(failed).unwrap();
+        core.claim_pinned_terminal_spawn(next).unwrap();
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(next));
+        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
+    }
+
+    #[test]
+    fn release_pinned_terminal_claim_unknown_tag_returns_error() {
+        let mut core = WmCore::new();
+        let bogus_tag = TagId(7);
+        assert_eq!(
+            core.release_pinned_terminal_claim(bogus_tag),
+            Err(WmCoreError::UnknownTag)
+        );
     }
 
     /// Audit finding D-03: tag names are entirely unvalidated, so the

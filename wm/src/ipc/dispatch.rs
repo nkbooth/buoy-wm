@@ -96,6 +96,19 @@ fn describe_wm_core_error(e: WmCoreError) -> String {
     }
 }
 
+/// A pinned-terminal spawn that [`handle_request`] has claimed but
+/// deliberately not performed: the tag whose claim it is, and the zellij
+/// session name to spawn with.
+///
+/// Carries the [`TagId`] as well as the name because the caller has to be
+/// able to release the claim if the spawn fails, and by then the request
+/// that identified the tag is gone (audit finding D-01).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPinnedSpawn {
+    pub tag_id: TagId,
+    pub session_name: String,
+}
+
 /// The single, pure, unit-tested mapping every socket connection calls
 /// into: dispatches a parsed [`Request`] to the matching `wm-core` call
 /// (the same functions Story 1.7's raw keybinds already exercise) and
@@ -107,14 +120,17 @@ fn describe_wm_core_error(e: WmCoreError) -> String {
 /// terminal spawn slot (Story 2.4 Task 2). The claim itself is a pure
 /// `wm-core` state mutation and happens right here, but this function
 /// deliberately does NOT call `crate::spawn_pinned_terminal` itself — the
-/// second tuple element carries the session name that needs spawning back
-/// to the caller instead, so this function stays free of real process
+/// second tuple element carries the [`PendingPinnedSpawn`] that needs
+/// spawning back to the caller instead, so this function stays free of real process
 /// spawns and safe to exercise from unit tests with no side effects beyond
 /// `wm_core`'s own state (see this module's doc comment for the full
 /// rationale). `None` means no spawn is needed: either the request wasn't
 /// `SwitchTag`, the switch itself failed, or this tag's pinned terminal was
 /// already spawned earlier this session.
-pub fn handle_request(wm_core: &mut WmCore, request: Request) -> (Response, Option<String>) {
+pub fn handle_request(
+    wm_core: &mut WmCore,
+    request: Request,
+) -> (Response, Option<PendingPinnedSpawn>) {
     match request {
         Request::GetState => (Response::from(wm_core.snapshot()), None),
         Request::ToggleTag { view_id, tag_id } => {
@@ -152,7 +168,10 @@ pub fn handle_request(wm_core: &mut WmCore, request: Request) -> (Response, Opti
                     // log and continue rather than turning an already-
                     // successful switch into a lie of a failure response.
                     let pending_spawn = match wm_core.claim_pinned_terminal_spawn(TagId(tag_id)) {
-                        Ok(Some(session_name)) => Some(session_name),
+                        Ok(Some(session_name)) => Some(PendingPinnedSpawn {
+                            tag_id: TagId(tag_id),
+                            session_name,
+                        }),
                         Ok(None) => None,
                         Err(e) => {
                             eprintln!(
@@ -413,7 +432,13 @@ mod tests {
         );
 
         assert_eq!(response, Response::Ok);
-        assert_eq!(pending_spawn, Some("tag-web".to_string()));
+        assert_eq!(
+            pending_spawn,
+            Some(PendingPinnedSpawn {
+                tag_id,
+                session_name: "tag-web".to_string(),
+            })
+        );
         assert_eq!(core.claim_pinned_terminal_spawn(tag_id), Ok(None));
     }
 

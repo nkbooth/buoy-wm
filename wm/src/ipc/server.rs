@@ -484,12 +484,14 @@ fn handle_connection_inner(
                 // (a descendant of the crate root) may call it directly
                 // with no visibility changes, same as `dispatch.rs`
                 // previously did.
-                if let Some(session_name) = pending_spawn {
-                    crate::spawn_pinned_terminal(
+                if let Some(pending) = pending_spawn {
+                    crate::spawn_pinned_terminal_or_release_claim(
+                        wm_core,
+                        pending.tag_id,
                         &defaults.terminal,
                         &defaults.pinned_terminal_argv(
                             crate::wm_core::state::PINNED_TERM_APP_ID,
-                            &session_name,
+                            &pending.session_name,
                         ),
                     );
                 }
