@@ -28,8 +28,16 @@
   // malicious dependency's build.rs during `cargo build` — create host
   // containers with arbitrary bind mounts, i.e. take the host user account.
   // Local CI runs that genuinely need it use .devcontainer/act instead.
+  //
+  // XDG_RUNTIME_DIR is set here because the IPC socket path resolver has no
+  // fallback: with it unset, a binary run by hand in this container reports
+  // that it has nowhere to put a socket. post-create.sh creates the
+  // directory with mode 0700, which is what the WM verifies before binding.
   "name": "buoy-wm",
   "image": "mcr.microsoft.com/devcontainers/rust:1",
+  "containerEnv": {
+    "XDG_RUNTIME_DIR": "/tmp/xdg-runtime-vscode"
+  },
   "postCreateCommand": "bash .devcontainer/post-create.sh",
   "workspaceFolder": "/workspaces/buoy-wm"
 }

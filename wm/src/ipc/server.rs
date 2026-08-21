@@ -17,7 +17,7 @@
 
 //! The Unix domain socket accept loop and per-connection handling.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -26,17 +26,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
+use buoy_common::peer::{PeerIdentity, authenticate_peer};
+
 use crate::config::Defaults;
 use crate::ipc::dispatch::handle_request;
 use crate::ipc::lock_recovering;
 use crate::ipc::protocol::{ParseError, Request, Response, parse_request, serialize_response};
 use crate::wm_core::state::WmCore;
-
-/// The maximum accepted length of one request line, per the AC's "oversized
-/// (>64 KiB in one line)" bullet. A line at or beyond this length without a
-/// terminating newline is treated as malformed input (NFR2: bounds the
-/// read buffer instead of growing it forever for a hostile/broken client).
-const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// The longest peer-supplied detail this module will put in one log line.
 /// Bounds the journal cost of a malformed request to a constant.
@@ -166,6 +163,52 @@ impl Drop for ConnectionSlot {
     }
 }
 
+/// Clears `socket_path` so `bind` can have it, refusing rather than
+/// clobbering whatever is already there.
+///
+/// This used to be `let _ = std::fs::remove_file(socket_path)` — the one
+/// production `let _ =` in the workspace that discarded a meaningful
+/// error, and load-bearing rather than defensive because nothing unlinked
+/// the socket on shutdown (audit findings C-04 and B-04). It would follow
+/// a symlink, delete an arbitrary file planted at the path, and — worst —
+/// could not tell a stale inode from **a second, still-running instance**,
+/// whose socket it would happily unlink, leaving the first WM listening on
+/// an inode nobody can reach while every picker and status bar silently
+/// attached to the second.
+///
+/// So: probe first. A path that answers `connect` belongs to a live
+/// instance and is left alone; a path whose inode is not a socket is left
+/// alone too, because a window manager has no business deleting files it
+/// was merely pointed at. Only a genuine dead socket is removed.
+fn clear_socket_path(socket_path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let metadata = match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if UnixStream::connect(socket_path).is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!(
+                "another buoy-wm instance is already listening on {}",
+                socket_path.display()
+            ),
+        ));
+    }
+    if !metadata.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} exists and is not a socket; refusing to remove it",
+                socket_path.display()
+            ),
+        ));
+    }
+    std::fs::remove_file(socket_path)
+}
+
 /// Binds a Unix domain socket at `socket_path` and spawns a dedicated
 /// accept-loop thread that hands each connection off to its own thread
 /// (thread-per-connection — see the story's Technical notes "Concurrency
@@ -206,9 +249,20 @@ fn spawn_with_limits(
     defaults: Defaults,
     limits: Limits,
 ) -> std::io::Result<JoinHandle<()>> {
-    let _ = std::fs::remove_file(socket_path);
+    clear_socket_path(socket_path)?;
     let listener = UnixListener::bind(socket_path)?;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    // Belt and braces over the private parent directory
+    // `buoy_common::socket_path::verify_private_dir` insists on: `bind`
+    // creates the inode at `0777 & ~umask`, and a chmod cannot revoke a
+    // connection already won in that window, so this mode is a second
+    // line rather than the control. On failure the inode is removed again
+    // — leaving a socket file with no accept loop behind it was how a
+    // failed chmod used to present (audit finding C-03).
+    if let Err(e) = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        let _ = std::fs::remove_file(socket_path);
+        return Err(e);
+    }
 
     // `Builder::spawn` rather than `thread::spawn`: a thread that cannot be
     // created is an `Err` the caller can log and degrade on, not a panic in
@@ -369,6 +423,12 @@ fn request_kind(request: &Request) -> &'static str {
     }
 }
 
+/// A peer's identity as one log field, so a refusal names the process that
+/// earned it rather than only the refusal (audit finding G-01).
+fn describe_peer(peer: PeerIdentity) -> String {
+    format!("pid {} uid {}", peer.pid, peer.uid)
+}
+
 /// Logs the outcome of one dispatched request.
 ///
 /// Rejections are always logged — they are the abuse signal that was
@@ -382,9 +442,12 @@ fn request_kind(request: &Request) -> &'static str {
 /// same rule as [`describe_parse_error`], applied by default rather than
 /// per-site, so a future wire error that embeds peer text cannot quietly
 /// become injectable.
-fn log_dispatch_outcome(kind: &'static str, response: &Response) {
+fn log_dispatch_outcome(peer: PeerIdentity, kind: &'static str, response: &Response) {
     match response {
-        Response::Error { message } => eprintln!("ipc: {kind} rejected: {message:?}"),
+        Response::Error { message } => eprintln!(
+            "ipc: {kind} from {} rejected: {message:?}",
+            describe_peer(peer)
+        ),
         Response::Ok | Response::TagCreated { .. } => eprintln!("ipc: {kind} applied"),
         Response::State { .. } => {}
     }
@@ -396,6 +459,21 @@ fn handle_connection_inner(
     defaults: &Defaults,
     limits: Limits,
 ) {
+    // Before anything is read, let alone dispatched: the socket's mode was
+    // the only access control on this whole surface, so whoever won a race
+    // on the path or the mode got the full request set — including the
+    // `switch-tag` that makes the WM spawn a process (audit finding C-06).
+    // `SO_PEERCRED` is stamped by the kernel at `connect(2)` and cannot be
+    // forged from userspace, which is what makes it independent of any
+    // filesystem race. Fails closed on unreadable credentials.
+    let peer = match authenticate_peer(&stream) {
+        Ok(peer) => peer,
+        Err(rejection) => {
+            eprintln!("ipc: refusing connection: {rejection}");
+            return;
+        }
+    };
+
     // Set before the `try_clone` below: these are socket-level options, so
     // one call covers the reader and the writer view of the same socket.
     if let Err(e) = stream.set_write_timeout(Some(limits.write_timeout)) {
@@ -418,14 +496,8 @@ fn handle_connection_inner(
     let mut tag_creations: usize = 0;
 
     loop {
-        let mut buf = Vec::new();
-        let read_result = reader
-            .by_ref()
-            .take(MAX_LINE_BYTES as u64 + 1)
-            .read_until(b'\n', &mut buf);
-
-        let n = match read_result {
-            Ok(n) => n,
+        let line = match read_line_bounded(&mut reader) {
+            Ok(line) => line,
             Err(e) if is_timeout(&e) => {
                 eprintln!(
                     "ipc: closing connection idle for more than {:?}",
@@ -438,38 +510,31 @@ fn handle_connection_inner(
                 return;
             }
         };
-        if n == 0 {
-            return; // EOF: client disconnected
-        }
 
-        let had_newline = buf.last() == Some(&b'\n');
-        if !had_newline && buf.len() > MAX_LINE_BYTES {
-            // Oversized line with no newline in sight: malformed input,
-            // per the AC's ">64 KiB in one line" bullet. Reject and close
-            // rather than continuing to read an unbounded amount.
-            eprintln!(
-                "ipc: rejecting request line over the {MAX_LINE_BYTES}-byte cap; closing connection"
-            );
-            write_response(
-                &mut writer,
-                &Response::Error {
-                    message: "malformed request".into(),
-                },
-            );
-            return;
-        }
-        if !had_newline {
-            // Stream ended mid-line without a newline and within the size
-            // cap: treat as EOF (nothing more the client will send).
-            return;
-        }
+        let line_bytes = match line {
+            Line::Complete(bytes) => bytes,
+            // EOF, cleanly or mid-line: nothing more the client will send.
+            Line::Eof => return,
+            Line::Oversize => {
+                eprintln!(
+                    "ipc: rejecting a request line from {} over the {MAX_LINE_BYTES}-byte cap; closing connection",
+                    describe_peer(peer)
+                );
+                write_response(
+                    &mut writer,
+                    &Response::Error {
+                        message: "malformed request".into(),
+                    },
+                );
+                return;
+            }
+        };
 
-        let line_bytes = &buf[..buf.len() - 1]; // strip the trailing '\n'
-
-        match parse_request(line_bytes) {
+        match parse_request(&line_bytes) {
             Err(e) => {
                 eprintln!(
-                    "ipc: rejecting malformed request: {}",
+                    "ipc: rejecting a malformed request from {}: {}",
+                    describe_peer(peer),
                     describe_parse_error(&e)
                 );
                 write_response(
@@ -486,8 +551,9 @@ fn handle_connection_inner(
                     tag_creations = tag_creations.saturating_add(1);
                     if tag_creations > limits.max_tag_creations_per_connection {
                         eprintln!(
-                            "ipc: create-tag quota ({}) spent on one connection; closing",
-                            limits.max_tag_creations_per_connection
+                            "ipc: create-tag quota ({}) spent on one connection by {}; closing",
+                            limits.max_tag_creations_per_connection,
+                            describe_peer(peer)
                         );
                         write_response(
                             &mut writer,
@@ -502,7 +568,7 @@ fn handle_connection_inner(
                     let mut core = lock_recovering(wm_core);
                     handle_request(&mut core, request)
                 };
-                log_dispatch_outcome(kind, &response);
+                log_dispatch_outcome(peer, kind, &response);
                 if !write_response(&mut writer, &response) {
                     return; // peer gone; nothing more to do
                 }
@@ -637,6 +703,13 @@ mod tests {
 
     fn spawn_test_server() -> (std::path::PathBuf, Arc<Mutex<WmCore>>) {
         spawn_test_server_with_core(WmCore::new())
+    }
+
+    /// [`spawn_test_server`] with the socket inode cleaned up when the test
+    /// ends — for tests that do not otherwise need the path itself.
+    fn spawn_test_server_guarded() -> (SocketGuard, Arc<Mutex<WmCore>>) {
+        let (socket_path, wm_core) = spawn_test_server();
+        (SocketGuard(socket_path), wm_core)
     }
 
     /// Removes a test server's socket inode when the test ends, including
@@ -1138,23 +1211,83 @@ mod tests {
         assert!(third_response.contains(r#""type":"state""#));
     }
 
-    #[test]
-    fn stale_socket_file_from_a_previous_run_does_not_block_startup() {
-        let socket_path = unique_socket_path();
-        std::fs::write(&socket_path, b"stale, not a socket").unwrap();
-        let wm_core = Arc::new(Mutex::new(WmCore::new()));
-        let result = spawn(
-            wm_core,
-            &socket_path,
+    /// Binds `socket_path` with a real server, for the cases where the
+    /// *outcome* of `spawn` is what is under test.
+    fn try_spawn_at(socket_path: &std::path::Path) -> std::io::Result<JoinHandle<()>> {
+        spawn(
+            Arc::new(Mutex::new(WmCore::new())),
+            socket_path,
             Defaults {
                 terminal: "/bin/true".to_string(),
                 ..Defaults::default()
             },
-        );
+        )
+    }
+
+    #[test]
+    fn a_stale_socket_inode_from_a_previous_run_does_not_block_startup() {
+        let guard = SocketGuard(unique_socket_path());
+        // A listener that is dropped leaves the inode behind with nothing
+        // accepting on it, which is exactly what a crashed WM leaves.
+        drop(UnixListener::bind(guard.path()).expect("bind the stale socket"));
+
+        let result = try_spawn_at(guard.path());
         assert!(
             result.is_ok(),
-            "a stale non-socket file must not block startup: {result:?}"
+            "a stale socket inode must not block startup: {result:?}"
         );
+    }
+
+    /// The failure mode this replaces: a blind `remove_file` unlinked a
+    /// *live* instance's socket, leaving the first WM listening on an
+    /// unreachable inode while every picker and status bar silently
+    /// attached to the second.
+    #[test]
+    fn a_second_instance_refuses_to_start_and_leaves_the_first_ones_socket_alone() {
+        let (guard, _wm_core) = spawn_test_server_guarded();
+
+        let error = try_spawn_at(guard.path())
+            .expect_err("a live instance's socket must not be taken over");
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+
+        let mut client = TestClient::connect(guard.path());
+        client.send_line(r#"{"type":"get-state"}"#);
+        assert!(
+            client
+                .read_line()
+                .expect("the first instance must still be serving")
+                .contains(r#""type":"state""#)
+        );
+    }
+
+    /// Refusing to start is the right outcome for an unexpected inode: the
+    /// alternative is a window manager that deletes whatever file it finds
+    /// at a path it was handed.
+    #[test]
+    fn a_plain_file_at_the_socket_path_is_refused_rather_than_deleted() {
+        let guard = SocketGuard(unique_socket_path());
+        std::fs::write(guard.path(), b"not a socket").expect("plant a plain file");
+
+        assert!(try_spawn_at(guard.path()).is_err());
+        assert_eq!(
+            std::fs::read(guard.path()).expect("the planted file must survive"),
+            b"not a socket"
+        );
+    }
+
+    #[test]
+    fn a_symlink_at_the_socket_path_is_refused_and_its_target_survives() {
+        let guard = SocketGuard(unique_socket_path());
+        let victim = unique_socket_path();
+        std::fs::write(&victim, b"precious").expect("write the victim file");
+        std::os::unix::fs::symlink(&victim, guard.path()).expect("plant a symlink");
+
+        assert!(try_spawn_at(guard.path()).is_err());
+        assert_eq!(
+            std::fs::read(&victim).expect("the symlink target must survive"),
+            b"precious"
+        );
+        let _ = std::fs::remove_file(&victim);
     }
 
     #[test]

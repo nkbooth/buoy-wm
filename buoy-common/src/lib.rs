@@ -25,4 +25,6 @@
 //! `Response` shapes are a real property worth keeping (a status bar that
 //! structurally cannot send a mutation) rather than debt to consolidate.
 
+pub mod framing;
+pub mod peer;
 pub mod socket_path;

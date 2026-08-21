@@ -45,6 +45,14 @@ categories = ["command-line-utilities", "gui"]
 # `~/.local/lib/buoy-wm`, where they run as a long-lived session process
 # rather than a short-lived command — extra link-time work is paid once at
 # build and recovered over the whole login session.
+# `buoy-common` is declared here rather than per member so its version
+# requirement exists in exactly one place. The version is not decoration:
+# `deny.toml` sets `wildcards = "deny"`, and a bare `{ path = ... }` with no
+# version requirement is a wildcard, which fails CI's `cargo deny` job.
+[workspace.dependencies]
+buoy-common = { path = "buoy-common", version = "0.1.0" }
+
+
 [profile.release]
 lto = "thin"
 strip = true

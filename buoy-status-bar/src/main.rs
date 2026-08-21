@@ -36,10 +36,13 @@
 mod bar_line;
 mod wire;
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
+
+use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
+use buoy_common::socket_path::NO_RUNTIME_DIR_MESSAGE;
 
 /// `buoy-status-bar`'s poll cadence (Task 1.4): comfortably under typical
 /// human just-noticeable-lag for a passive display, far below any
@@ -81,6 +84,11 @@ const SOCKET_IO_TIMEOUT: Duration = Duration::from_millis(100);
 /// a panic (NFR2).
 fn connect_with_timeout(socket_path: &Path) -> Option<UnixStream> {
     let stream = UnixStream::connect(socket_path).ok()?;
+    // The mirror of the server's own peer check: a `wm` not running as
+    // this user is not this user's `wm`, and rendering its idea of the
+    // current tag into the desktop's own chrome is exactly the spoof a
+    // squatted socket path buys.
+    buoy_common::peer::authenticate_peer(&stream).ok()?;
     stream.set_read_timeout(Some(SOCKET_IO_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT)).ok()?;
     Some(stream)
@@ -105,14 +113,20 @@ fn try_get_state(socket_path: &Path) -> Option<(Vec<wire::TagDto>, Vec<wire::Out
     stream.flush().ok()?;
 
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line).ok()?;
-    if bytes_read == 0 {
+    // Bounded, not a bare `read_line`: at 4 polls a second for the whole
+    // session, an unbounded read is an unbounded allocation every 250 ms
+    // against whatever is actually on the other end (audit finding E-04).
+    let line = match read_line_bounded(&mut reader).ok()? {
+        Line::Complete(bytes) => bytes,
+        Line::Oversize => {
+            eprintln!("buoy-status-bar: response line over the {MAX_LINE_BYTES}-byte cap");
+            return None;
+        }
         // EOF: peer closed the connection with no response.
-        return None;
-    }
+        Line::Eof => return None,
+    };
 
-    match wire::parse_response(line.trim_end_matches('\n').as_bytes()).ok()? {
+    match wire::parse_response(&line).ok()? {
         wire::Response::State { tags, outputs } => Some((tags, outputs)),
         _ => None,
     }
@@ -128,7 +142,18 @@ fn main() {
         }
     };
 
-    let socket_path = buoy_common::socket_path::default_socket_path();
+    let socket_path = match buoy_common::socket_path::default_socket_path() {
+        Some(socket_path) => socket_path,
+        None => {
+            // Nothing to poll and nothing that will make one appear, so
+            // this is the one condition that ends the process rather than
+            // rendering as the disconnected state: a bar that retries a
+            // path it does not have, four times a second forever, hides a
+            // configuration error instead of reporting it.
+            eprintln!("buoy-status-bar: {NO_RUNTIME_DIR_MESSAGE}");
+            std::process::exit(1);
+        }
+    };
     let mut last_printed: Option<String> = None;
 
     // Loops for the lifetime of the process — deliberately never calls

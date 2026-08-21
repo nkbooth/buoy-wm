@@ -2654,17 +2654,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // convention rather than `std::process::exit`, which this file
     // otherwise reserves for unrecoverable Wayland-protocol-level
     // failures only.
-    let socket_path = buoy_common::socket_path::default_socket_path();
-    if let Err(e) = ipc::server::spawn(
-        Arc::clone(&app_data.wm.wm_core),
-        &socket_path,
-        app_data.wm.config.defaults.clone(),
-    ) {
-        eprintln!("Failed to start IPC server on {socket_path:?}: {e}");
+    let ipc_socket = start_ipc_server(&app_data.wm.wm_core, &app_data.wm.config.defaults);
+
+    let outcome = run_event_loop(&mut event_queue, &mut app_data);
+
+    // Audit finding B-04: nothing used to unlink the socket, so every
+    // start found a stale inode and had to decide whether to clobber it.
+    // Guarded on `Some`, which `start_ipc_server` only returns when *this*
+    // process bound the socket — a second instance that was refused
+    // (C-04) must never remove the running instance's endpoint on its way
+    // out. Still skipped by `std::process::exit` and by signals, which
+    // this binary handles nowhere; under `$XDG_RUNTIME_DIR` (tmpfs,
+    // cleared at logout) a leftover inode is cosmetic.
+    if let Some(socket_path) = ipc_socket {
+        if let Err(e) = std::fs::remove_file(&socket_path) {
+            eprintln!("Failed to remove the IPC socket at {socket_path:?}: {e}");
+        }
     }
 
+    outcome
+}
+
+/// Resolves, checks and binds the IPC socket, returning the path bound so
+/// the caller can unlink it on the way out — `None` if IPC is not running,
+/// for any reason.
+///
+/// Every failure here degrades rather than aborts: a WM with no IPC still
+/// manages windows and still gives the user a shell to fix the problem
+/// from, and refusing to start is the one outcome `SECURITY.md` rules out
+/// for the session leader. Three keybinds and the status bar are dead
+/// until the next restart, though, so each failure says which condition
+/// caused it.
+fn start_ipc_server(
+    wm_core: &Arc<Mutex<wm_core::state::WmCore>>,
+    defaults: &config::Defaults,
+) -> Option<PathBuf> {
+    let socket_path = buoy_common::socket_path::default_socket_path()?;
+    // The socket's own `0600` mode is applied one syscall after `bind`,
+    // and Linux checks AF_UNIX permissions at `connect(2)` — so the
+    // directory, not the mode, is what actually has to be private (audit
+    // finding C-03).
+    let parent = socket_path.parent()?;
+    if let Err(e) = buoy_common::socket_path::verify_private_dir(parent) {
+        eprintln!("IPC server disabled: {e}");
+        return None;
+    }
+    match ipc::server::spawn(Arc::clone(wm_core), &socket_path, defaults.clone()) {
+        Ok(_accept_thread) => Some(socket_path),
+        Err(e) => {
+            eprintln!("Failed to start IPC server on {socket_path:?}: {e}");
+            None
+        }
+    }
+}
+
+/// Dispatches Wayland events until the connection ends.
+fn run_event_loop(
+    event_queue: &mut wayland_client::EventQueue<AppData>,
+    app_data: &mut AppData,
+) -> Result<(), Box<dyn std::error::Error>> {
     loop {
-        event_queue.blocking_dispatch(&mut app_data)?;
+        event_queue.blocking_dispatch(app_data)?;
     }
 }
 

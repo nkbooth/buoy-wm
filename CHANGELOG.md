@@ -6,7 +6,32 @@ Notable changes per release. Format follows
 
 ## [Unreleased]
 
+### Security
+
+- The IPC socket now authenticates both ends with `SO_PEERCRED`: the WM
+  refuses a connection from another user, and both companion binaries refuse
+  to talk to a server that is not running as you. Previously filesystem
+  permissions were the only control on the whole surface.
+
+### Removed
+
+- **Breaking for sandbox use:** the `/tmp/buoy-wm-<user>.sock` socket-path
+  fallback is gone. `$XDG_RUNTIME_DIR` must be an absolute path to a
+  directory you own that other users cannot reach; otherwise the WM logs the
+  reason and runs with no IPC rather than binding a squattable path in a
+  shared directory. `Super+A`, `Super+S` and the status bar are inert in that
+  case; window management is unaffected.
+
 ### Changed
+
+- A second `buoy-wm` no longer unlinks a running instance's socket. A path
+  that answers a connection means a live instance and the newcomer refuses
+  to start; a non-socket inode at that path is refused rather than deleted.
+  The socket is now removed when the WM's event loop ends.
+- Both companion binaries bound how much they will read from the socket at
+  the same 64 KiB the server has always applied to them, and
+  `buoy-tag-picker` — which had no socket deadline at all — applies a
+  five-second read and write timeout.
 
 - Tag names are validated where they enter the registry: non-empty and not
   whitespace-only, at most 64 bytes, not a bare `.` or `..`, and free of `/`,

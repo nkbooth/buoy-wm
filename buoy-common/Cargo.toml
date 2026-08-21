@@ -29,3 +29,12 @@ categories.workspace = true
 description = "Invariants all three buoy-wm binaries must agree on: where the IPC socket lives, who may speak on it, and how a log line is framed."
 
 [dependencies]
+# The only new direct dependency in the workspace, and deliberately this
+# one: `rustix` is already in the lockfile transitively (via
+# `wayland-backend`), so promoting it to direct adds no crate to the
+# supply chain, and it exposes `geteuid` safely — `libc::geteuid()` would
+# have put the first `unsafe` block in the tree for one syscall. It also
+# supplies `SO_PEERCRED`: `std`'s own `UnixStream::peer_cred` is still
+# unstable (rust-lang/rust#42839), so there is no std-only route to a
+# peer's credentials on stable.
+rustix = { version = "1.1.4", features = ["net", "process"] }

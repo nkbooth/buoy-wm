@@ -339,6 +339,13 @@ but the protocol is plain enough to script against:
 echo '{"type":"get-state"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/buoy-wm.sock
 ```
 
+There is no fallback path. If `$XDG_RUNTIME_DIR` is unset, empty, relative,
+or names a directory that is not yours or that other users can reach, the WM
+logs the reason and runs with no IPC: `Super+A`, `Super+S` and every status
+bar are inert for that session, and window management is unaffected. Every
+connection is also checked with `SO_PEERCRED` at both ends and refused unless
+both processes run as the same user.
+
 ## Development
 
 ```sh

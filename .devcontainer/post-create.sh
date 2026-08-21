@@ -66,6 +66,15 @@ install_act() {
     rm -f "$installer"
 }
 
+# The socket-path resolver has no `/tmp` fallback (it was squattable, and
+# a production fallback existed only for this container's benefit), so a
+# binary run by hand in here needs a real runtime directory. Mode 0700
+# because the WM verifies exactly that before binding.
+create_runtime_dir() {
+    install -d -m 700 "${XDG_RUNTIME_DIR:-/tmp/xdg-runtime-vscode}"
+}
+
 install_build_deps
 install_docker_cli
 install_act
+create_runtime_dir

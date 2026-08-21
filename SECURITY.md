@@ -16,11 +16,25 @@ running as you is inside it.
 
 Three surfaces are worth naming explicitly.
 
-**The IPC socket is unauthenticated by design.** `buoy-wm` listens on a Unix
-domain socket at `$XDG_RUNTIME_DIR/buoy-wm.sock`, protected only by
-filesystem permissions. Any process running as the same user can connect and
-drive it. That surface is deliberately narrow — the entire request set is
-`get-state`, `create-tag`, `toggle-tag`, and `switch-tag`.
+**The IPC socket authenticates the user, not the process.** `buoy-wm` listens
+on a Unix domain socket at `$XDG_RUNTIME_DIR/buoy-wm.sock`. Three controls
+apply, and the first is the one that matters: every connection's credentials
+are read with `SO_PEERCRED` and refused unless the peer runs as the same uid.
+The kernel stamps those credentials at `connect(2)` and userspace cannot
+forge them, so this holds independently of any filesystem race. Both clients
+apply the same check in reverse and refuse to talk to a server that is not
+running as you, so a socket squatted by another user is a failed connection
+rather than a silent capture of your tag names and selections. Second, the WM
+refuses to start its IPC server unless `$XDG_RUNTIME_DIR` is an absolute path
+to a directory you own with no group or other permission bits — there is no
+`/tmp` fallback, and a session without a usable runtime directory runs with
+no IPC at all rather than with a socket somewhere shared. Third, the socket
+itself is `0600`.
+
+Within the user account there is deliberately no further authentication: any
+process running as you can connect and drive it. That surface is narrow —
+the entire request set is `get-state`, `create-tag`, `toggle-tag`, and
+`switch-tag`.
 
 One of those does spawn a process. A `switch-tag` for a tag whose pinned
 terminal has not started yet runs the configured terminal and `zellij`
@@ -34,9 +48,14 @@ free of path separators and control characters — and one connection may
 create at most eight tags before it is closed, so the 64-slot registry cannot
 be spent in a single burst.
 
-A hostile local process could therefore read your tag names and window
-app-ids, rearrange your workspaces, and cause up to 64 terminal sessions to
-be spawned. It could not use `buoy` to run a command of its choosing, or to
+A second `buoy-wm` cannot quietly take over the endpoint either: a socket
+path that answers a connection attempt belongs to a live instance and the
+newcomer refuses to start rather than unlinking it, and an inode at that path
+that is not a socket is left alone rather than deleted.
+
+A hostile local process running as you could therefore read your tag names
+and window app-ids, rearrange your workspaces, and cause up to 64 terminal
+sessions to be spawned. It could not use `buoy` to run a command of its choosing, or to
 gain anything it did not already have as your user.
 
 **`exec` keybinds run arbitrary commands, from your own config file.** The

@@ -43,9 +43,13 @@ mod mode;
 mod picker;
 mod wire;
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
+use buoy_common::socket_path::NO_RUNTIME_DIR_MESSAGE;
 
 /// Assign mode's `fuzzel` placeholder text. Deliberately says nothing about
 /// creating: as of Story 2.13 this mode only toggles membership in tags
@@ -68,15 +72,22 @@ fn send_request(writer: &mut UnixStream, request: &wire::Request) -> bool {
 }
 
 /// Reads and parses one newline-delimited response line. `None` covers
-/// both EOF (peer closed the connection) and a response that fails to
-/// parse — both are "nothing usable came back," and every call site
-/// treats them the same way (log and stop).
+/// EOF (peer closed the connection), a line over the framing cap, a read
+/// that hit the socket deadline, and a response that fails to parse — all
+/// of them "nothing usable came back," and every call site treats them the
+/// same way (log and stop).
+///
+/// The cap is not paranoia about our own WM: against a squatted socket
+/// path this is the only thing bounding what an unrelated process can make
+/// this process allocate (audit finding E-04).
 fn read_response(reader: &mut BufReader<UnixStream>) -> Option<wire::Response> {
-    let mut buf = String::new();
-    match reader.read_line(&mut buf) {
-        Ok(0) => None,
-        Ok(_) => wire::parse_response(buf.trim_end_matches('\n').as_bytes()).ok(),
-        Err(_) => None,
+    match read_line_bounded(reader) {
+        Ok(Line::Complete(bytes)) => wire::parse_response(&bytes).ok(),
+        Ok(Line::Oversize) => {
+            eprintln!("buoy-tag-picker: response line over the {MAX_LINE_BYTES}-byte cap");
+            None
+        }
+        Ok(Line::Eof) | Err(_) => None,
     }
 }
 
@@ -262,6 +273,9 @@ fn run_fuzzel(
     result
 }
 
+/// Read/write deadline for this process's socket I/O.
+const SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Connects to `wm`'s IPC socket, sends `get-state`, and returns the
 /// writer/reader pair plus the parsed state (Task 6.1's mechanical
 /// extraction — shared boilerplate both assign and switch mode need
@@ -275,7 +289,13 @@ fn connect_and_get_state() -> (
     Vec<wire::ViewDto>,
     Option<u64>,
 ) {
-    let socket_path = buoy_common::socket_path::default_socket_path();
+    let socket_path = match buoy_common::socket_path::default_socket_path() {
+        Some(socket_path) => socket_path,
+        None => {
+            eprintln!("buoy-tag-picker: {NO_RUNTIME_DIR_MESSAGE}");
+            std::process::exit(1);
+        }
+    };
     let stream = match UnixStream::connect(&socket_path) {
         Ok(stream) => stream,
         Err(e) => {
@@ -283,6 +303,29 @@ fn connect_and_get_state() -> (
             std::process::exit(1);
         }
     };
+    // A `wm` that is not running as this user is not this user's `wm`. The
+    // mirror of the server's own check, and the reason a squatted socket
+    // path is a failed connection rather than a silent capture of every
+    // tag name, every window's app id, and every selection made here.
+    if let Err(rejection) = buoy_common::peer::authenticate_peer(&stream) {
+        eprintln!("buoy-tag-picker: refusing to talk to {socket_path:?}: {rejection}");
+        std::process::exit(1);
+    }
+    // This process had no socket deadline at all, so a wedged or squatted
+    // peer left it blocked forever while holding a `--layer=overlay`
+    // fuzzel window with keyboard focus over the whole screen (audit
+    // finding E-04). Safe to keep short, unlike the server's own read
+    // deadline: every read here immediately follows a send, and the
+    // human-time wait happens inside `run_fuzzel`, never on the socket.
+    for (label, applied) in [
+        ("read", stream.set_read_timeout(Some(SOCKET_IO_TIMEOUT))),
+        ("write", stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT))),
+    ] {
+        if let Err(e) = applied {
+            eprintln!("buoy-tag-picker: failed to set the socket {label} timeout: {e}");
+            std::process::exit(1);
+        }
+    }
     let mut writer = match stream.try_clone() {
         Ok(writer) => writer,
         Err(e) => {
