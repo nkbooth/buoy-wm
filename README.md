@@ -167,7 +167,8 @@ itself, so waybar needs neither `interval` nor `signal`:
     "modules-right": ["custom/tag"],
     "custom/tag": {
       "exec": "~/.local/lib/buoy-wm/buoy-status-bar 0",
-      "return-type": "json"
+      "return-type": "json",
+      "escape": true
     }
   },
   {
@@ -176,11 +177,18 @@ itself, so waybar needs neither `interval` nor `signal`:
     "modules-right": ["custom/tag"],
     "custom/tag": {
       "exec": "~/.local/lib/buoy-wm/buoy-status-bar 1",
-      "return-type": "json"
+      "return-type": "json",
+      "escape": true
     }
   }
 ]
 ```
+
+`"escape": true` is not optional. Tag names are arbitrary strings and waybar
+renders module text as Pango markup with `escape` defaulting to `false`, so a
+tag called `<3` produces invalid markup and blanks the label. `buoy-status-bar`
+escapes its output for *JSON*, which is a different layer and does not help
+here.
 
 Output ids are `buoy`'s own, assigned in the order river announces monitors —
 they are not connector names, and nothing translates between the two. Find
