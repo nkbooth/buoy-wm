@@ -38,4 +38,5 @@ pub mod child;
 pub mod drag;
 pub mod report;
 pub mod river;
+pub mod window;
 pub mod wire;
