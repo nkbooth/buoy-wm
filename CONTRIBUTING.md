@@ -196,6 +196,11 @@ Test from a TTY or a nested river before trusting a build as your login
 session. A `buoy-wm` that fails to start means a black screen and a bounce
 back to the display manager.
 
+## Wanted but not scheduled
+
+[`docs/ROADMAP.md`](docs/ROADMAP.md) holds work that is wanted and not
+scheduled. If you are looking for something worth doing, start there.
+
 ## Design history
 
 [`docs/adrs.md`](docs/adrs.md) records the decisions that shaped `buoy`, and
