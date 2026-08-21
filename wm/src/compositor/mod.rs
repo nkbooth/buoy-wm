@@ -39,5 +39,6 @@ pub mod drag;
 pub mod launch;
 pub mod report;
 pub mod river;
+pub mod seat;
 pub mod window;
 pub mod wire;
