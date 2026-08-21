@@ -51,6 +51,12 @@ default_tag = "default"
 # spelling; most other terminals use `--class` instead of `-a`, e.g.
 #   pinned_terminal_args = ["--class", "{app_id}", "-e", "zellij", "attach", "--create", "{session}"]
 pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]
+# Whether each tag gets a pinned terminal at all. Turn it off — this is the
+# supported way — if your terminal or zellij is broken, or if you simply do
+# not want one; tagging, the pickers and the status bar are unaffected. An
+# empty `pinned_terminal_args` is NOT the off switch and is rejected as a
+# mistake, because it would spawn a terminal that nothing could recognize.
+pinned_terminals = true
 
 # --- Keybinds ---------------------------------------------------------------
 #

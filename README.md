@@ -317,6 +317,13 @@ defaulting to foot's spelling:
 pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]
 ```
 
+`pinned_terminals = false` turns the feature off entirely — the supported
+escape hatch if your terminal or `zellij` is broken, or if you just do not
+want one. Tags, the pickers and the status bar work exactly as before; only
+the per-tag terminal and its backdrop go away. Emptying `pinned_terminal_args`
+is not the off switch and is rejected as a mistake, since it would spawn a
+terminal carrying no app id that nothing could recognise.
+
 Set it alongside `terminal` if your terminal spells the app-id flag
 differently — most use `--class`. `{app_id}` is **required**: it is how the
 WM recognises the pinned window, and its absence is rejected at load. It is

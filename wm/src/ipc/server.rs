@@ -654,11 +654,8 @@ fn handle_connection_inner(
                     crate::spawn_pinned_terminal_or_release_claim(
                         wm_core,
                         pending.tag_id,
-                        &defaults.terminal,
-                        &defaults.pinned_terminal_argv(
-                            &crate::wm_core::state::pinned_term_app_id(pending.tag_id),
-                            &pending.session_name,
-                        ),
+                        defaults,
+                        &pending.session_name,
                     );
                 }
                 // well-formed request, wm-core-level Ok/Error: connection

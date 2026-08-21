@@ -1157,11 +1157,8 @@ impl WindowManager {
             Ok(Some(session_name)) => spawn_pinned_terminal_or_release_claim(
                 &self.wm_core,
                 tag_id,
-                &self.config.defaults.terminal,
-                &self
-                    .config
-                    .defaults
-                    .pinned_terminal_argv(&pinned_term_app_id(tag_id), &session_name),
+                &self.config.defaults,
+                &session_name,
             ),
             Ok(None) => {}
             Err(e) => {
@@ -1654,8 +1651,9 @@ fn spawn_pinned_terminal(terminal: &str, argv: &[String]) -> bool {
     )
 }
 
-/// Spawns a tag's pinned terminal and, if the spawn fails, releases the
-/// claim [`WmCore::claim_pinned_terminal_spawn`] already committed for it.
+/// Spawns a tag's pinned terminal and, if the spawn does not happen,
+/// releases the claim [`WmCore::claim_pinned_terminal_spawn`] already
+/// committed for it.
 ///
 /// The claim has to be committed before the spawn — it is what makes the
 /// spawn happen at most once — so rolling it back is the only thing keeping
@@ -1664,18 +1662,33 @@ fn spawn_pinned_terminal(terminal: &str, argv: &[String]) -> bool {
 /// and mis-tagging every pinned terminal that maps after it (audit finding
 /// D-01). Both spawn sites — the Wayland thread's keybind path and the IPC
 /// thread's `switch-tag` path — go through here for that reason.
+///
+/// [`config::Defaults::pinned_terminals`] is honoured here rather than at
+/// the two claim sites because only one of them can see the config: the
+/// `switch-tag` claim happens inside `ipc::dispatch::handle_request`, which
+/// is deliberately pure. So with the feature off the claim is released
+/// exactly as a failed spawn releases it, leaving `wm-core` in the state it
+/// had before the switch (audit finding C-10).
+///
+/// Must be called with `wm_core`'s mutex *not* held: [`ipc::lock_recovering`]
+/// is not reentrant.
 fn spawn_pinned_terminal_or_release_claim(
     wm_core: &Mutex<WmCore>,
     tag_id: TagId,
-    terminal: &str,
-    argv: &[String],
+    defaults: &config::Defaults,
+    session_name: &str,
 ) {
-    if spawn_pinned_terminal(terminal, argv) {
+    if defaults.pinned_terminals
+        && spawn_pinned_terminal(
+            &defaults.terminal,
+            &defaults.pinned_terminal_argv(&pinned_term_app_id(tag_id), session_name),
+        )
+    {
         return;
     }
     log_wm_core_err(
         ipc::lock_recovering(wm_core).release_pinned_terminal_claim(tag_id),
-        "Failed to release the pinned-terminal claim after a failed spawn",
+        "Failed to release the pinned-terminal claim because nothing was spawned",
     );
 }
 
@@ -3314,18 +3327,47 @@ mod tests {
             .unwrap()
             .expect("a freshly created tag has not claimed its spawn yet");
 
-        spawn_pinned_terminal_or_release_claim(
-            &wm_core,
-            tag_id,
-            "/nonexistent/buoy-wm-test-no-such-terminal",
-            &[session_name],
-        );
+        let defaults = config::Defaults {
+            terminal: "/nonexistent/buoy-wm-test-no-such-terminal".to_string(),
+            ..config::Defaults::default()
+        };
+        spawn_pinned_terminal_or_release_claim(&wm_core, tag_id, &defaults, &session_name);
 
         let mut core = ipc::lock_recovering(&wm_core);
         assert_eq!(
             core.claim_pinned_terminal_spawn(tag_id),
             Ok(Some("tag-web".to_string())),
             "a failed spawn left the tag marked spawned, so it can never retry"
+        );
+    }
+
+    /// Audit finding C-10: with pinned terminals turned off, the claim
+    /// `handle_request`/`ensure_pinned_terminal_spawned` already committed
+    /// has to be released, or the tag stays marked spawned for the rest of
+    /// the session and a user who turns the feature back on gets nothing
+    /// until they restart.
+    #[test]
+    fn pinned_terminals_turned_off_releases_the_claim_instead_of_spawning() {
+        let wm_core = Mutex::new(WmCore::new());
+        let tag_id = ipc::lock_recovering(&wm_core).create_tag("web").unwrap();
+        let session_name = ipc::lock_recovering(&wm_core)
+            .claim_pinned_terminal_spawn(tag_id)
+            .unwrap()
+            .expect("a freshly created tag has not claimed its spawn yet");
+        // `/bin/false` would exit non-zero but still *spawn*: the point of
+        // this test is that no process is created at all, which is what
+        // the released claim below proves — a successful spawn keeps it.
+        let defaults = config::Defaults {
+            pinned_terminals: false,
+            ..config::Defaults::default()
+        };
+
+        spawn_pinned_terminal_or_release_claim(&wm_core, tag_id, &defaults, &session_name);
+
+        assert_eq!(
+            ipc::lock_recovering(&wm_core).claim_pinned_terminal_spawn(tag_id),
+            Ok(Some("tag-web".to_string())),
+            "the claim must be released when nothing is going to spawn"
         );
     }
 

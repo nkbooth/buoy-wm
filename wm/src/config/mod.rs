@@ -152,6 +152,15 @@ pub struct Defaults {
     /// setting `terminal` to anything else break every pinned terminal
     /// silently and permanently.
     pub pinned_terminal_args: Vec<String>,
+    /// Whether each tag gets a lazily-spawned pinned terminal at all.
+    ///
+    /// The one user-facing off switch in this config, and it exists because
+    /// this is the one subsystem that launches a process from the same
+    /// binary that *is* the login session: a user whose terminal or
+    /// `zellij` is broken had no supported way to stop buoy trying to
+    /// spawn it (audit finding C-10). Off means no spawn and no claim
+    /// spent; every other part of tagging is unaffected.
+    pub pinned_terminals: bool,
 }
 
 impl Defaults {
@@ -189,6 +198,8 @@ impl Default for Defaults {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+            // On, because it is what buoy did before the switch existed.
+            pinned_terminals: true,
         }
     }
 }
@@ -368,6 +379,10 @@ pub enum ConfigError {
     DuplicateBinding(String),
     /// `pinned_terminal_args` without the `{app_id}` placeholder.
     MissingAppIdPlaceholder,
+    /// `pinned_terminal_args = []` while pinned terminals are still on —
+    /// the way a user tries to turn the feature off before finding
+    /// [`Defaults::pinned_terminals`].
+    EmptyPinnedTerminalArgs,
     /// An `[[input]]` with `name = ""`, which matches no real device.
     EmptyInputName,
     /// An `[[input]]` that names a device but configures nothing.
@@ -435,6 +450,13 @@ impl fmt::Display for ConfigError {
             ConfigError::MissingAppIdPlaceholder => write!(
                 f,
                 "[defaults] `pinned_terminal_args` must contain the `{{app_id}}` placeholder — it is how the WM recognizes a tag's pinned terminal"
+            ),
+            ConfigError::EmptyPinnedTerminalArgs => write!(
+                f,
+                "[defaults] `pinned_terminal_args` is empty, so a pinned \
+                 terminal would spawn carrying no app id and never be \
+                 recognized — write `pinned_terminals = false` to turn the \
+                 feature off instead"
             ),
             ConfigError::EmptyInputName => write!(
                 f,
@@ -602,6 +624,7 @@ struct RawDefaults {
     launcher: Option<String>,
     default_tag: Option<String>,
     pinned_terminal_args: Option<Vec<String>>,
+    pinned_terminals: Option<bool>,
 }
 
 /// The most this module will read from a config file.
@@ -818,6 +841,10 @@ impl Config {
                     .defaults
                     .pinned_terminal_args
                     .unwrap_or(built_in.defaults.pinned_terminal_args),
+                pinned_terminals: raw
+                    .defaults
+                    .pinned_terminals
+                    .unwrap_or(built_in.defaults.pinned_terminals),
             },
             // An empty list after skipping lands on the same documented
             // rule as an empty list in the file: no declaration means the
@@ -985,6 +1012,9 @@ fn validate_input(input: &InputConfig, seen: &mut Vec<String>) -> Result<(), Con
 /// other part of the WM identifies a pinned terminal by, so it would map
 /// as an ordinary floating window, the tag's backdrop would never appear,
 /// and the idempotent spawn claim means it would never be retried either.
+/// An *empty* argv is the same failure wearing the face of an off switch,
+/// so it is rejected with a message naming the real one (audit finding
+/// C-10).
 fn validate_defaults(defaults: &RawDefaults) -> Result<(), ConfigError> {
     for (field, value) in [
         ("terminal", &defaults.terminal),
@@ -995,10 +1025,19 @@ fn validate_defaults(defaults: &RawDefaults) -> Result<(), ConfigError> {
             return Err(ConfigError::EmptyDefault(field));
         }
     }
-    if let Some(args) = &defaults.pinned_terminal_args
-        && !args.iter().any(|arg| arg.contains("{app_id}"))
-    {
-        return Err(ConfigError::MissingAppIdPlaceholder);
+    if let Some(args) = &defaults.pinned_terminal_args {
+        // A *non-empty* argv is judged the same way whether or not pinned
+        // terminals are on: `{app_id}` is how a mapped window says which
+        // tag it belongs to (audit finding D-02), and the off switch must
+        // not become a way past that rule for a user who later turns the
+        // feature back on.
+        if !args.is_empty() {
+            if !args.iter().any(|arg| arg.contains("{app_id}")) {
+                return Err(ConfigError::MissingAppIdPlaceholder);
+            }
+        } else if defaults.pinned_terminals != Some(false) {
+            return Err(ConfigError::EmptyPinnedTerminalArgs);
+        }
     }
     Ok(())
 }
@@ -1990,6 +2029,70 @@ action = "close"
         )
         .unwrap_err();
         assert!(err.to_string().contains("{app_id}"), "got: {err}");
+    }
+
+    /// Audit finding C-10: the riskiest subsystem in the process that *is*
+    /// the login session had no off switch, and the obvious guess —
+    /// emptying the argv — was rejected at load, which under G-04's
+    /// `[defaults]` rule threw the user's whole config away.
+    #[test]
+    fn pinned_terminals_are_on_unless_the_config_turns_them_off() {
+        assert!(Config::default().defaults.pinned_terminals);
+        let unmentioned = Config::parse("[defaults]\nterminal = \"foot\"\n").unwrap();
+        assert!(
+            unmentioned.defaults.pinned_terminals,
+            "a config that does not mention the switch must keep the old behaviour"
+        );
+        let off = Config::parse("[defaults]\npinned_terminals = false\n").unwrap();
+        assert!(!off.defaults.pinned_terminals);
+    }
+
+    /// The off switch is what makes an empty argv sayable at all, and the
+    /// error has to point at it — a user whose terminal or `zellij` is
+    /// broken reaches for the argv first.
+    #[test]
+    fn an_empty_pinned_terminal_argv_is_rejected_and_names_the_off_switch() {
+        let err = Config::parse(
+            r#"
+            [defaults]
+            pinned_terminal_args = []
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::EmptyPinnedTerminalArgs));
+        assert!(err.to_string().contains("pinned_terminals"), "got: {err}");
+    }
+
+    #[test]
+    fn an_empty_pinned_terminal_argv_is_accepted_once_the_feature_is_off() {
+        let config = Config::parse(
+            r#"
+            [defaults]
+            pinned_terminals = false
+            pinned_terminal_args = []
+            "#,
+        )
+        .expect("with nothing to spawn, the argv describes nothing");
+        assert!(!config.defaults.pinned_terminals);
+        assert!(config.defaults.pinned_terminal_args.is_empty());
+    }
+
+    /// The off switch must not become a way to smuggle an unrecognisable
+    /// pinned terminal past the `{app_id}` rule: a non-empty argv is
+    /// judged on its own terms, feature on or off, because `{app_id}` is
+    /// how a mapped window says which tag it belongs to (audit finding
+    /// D-02).
+    #[test]
+    fn a_non_empty_argv_without_the_placeholder_is_rejected_even_with_the_feature_off() {
+        let err = Config::parse(
+            r#"
+            [defaults]
+            pinned_terminals = false
+            pinned_terminal_args = ["zellij", "attach"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::MissingAppIdPlaceholder));
     }
 
     #[test]
