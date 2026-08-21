@@ -401,50 +401,26 @@ fn apply_libinput_setting(
     qh: &QueueHandle<AppData>,
 ) {
     use config::LibinputSetting;
-    use river::river_libinput_device_v1::{
-        ClickMethod as WireClickMethod, DwtState, NaturalScrollState,
-        TapButtonMap as WireTapButtonMap, TapState,
-    };
     let label = |what: &str| format!("libinput {device_name:?}: {what}");
     match setting {
         LibinputSetting::Tap(enabled) => {
-            let state = if enabled {
-                TapState::Enabled
-            } else {
-                TapState::Disabled
-            };
-            device.set_tap(state, qh, label("tap"));
+            device.set_tap(wire_tap_state(enabled), qh, label("tap"));
         }
         LibinputSetting::TapButtonMap(map) => {
-            let wire = match map {
-                config::TapButtonMap::Lrm => WireTapButtonMap::Lrm,
-                config::TapButtonMap::Lmr => WireTapButtonMap::Lmr,
-            };
-            device.set_tap_button_map(wire, qh, label("tap_button_map"));
+            device.set_tap_button_map(wire_tap_button_map(map), qh, label("tap_button_map"));
         }
         LibinputSetting::ClickMethod(method) => {
-            let wire = match method {
-                config::ClickMethod::None => WireClickMethod::None,
-                config::ClickMethod::ButtonAreas => WireClickMethod::ButtonAreas,
-                config::ClickMethod::Clickfinger => WireClickMethod::Clickfinger,
-            };
-            device.set_click_method(wire, qh, label("click_method"));
+            device.set_click_method(wire_click_method(method), qh, label("click_method"));
         }
         LibinputSetting::NaturalScroll(enabled) => {
-            let state = if enabled {
-                NaturalScrollState::Enabled
-            } else {
-                NaturalScrollState::Disabled
-            };
-            device.set_natural_scroll(state, qh, label("natural_scroll"));
+            device.set_natural_scroll(
+                wire_natural_scroll_state(enabled),
+                qh,
+                label("natural_scroll"),
+            );
         }
         LibinputSetting::DisableWhileTyping(enabled) => {
-            let state = if enabled {
-                DwtState::Enabled
-            } else {
-                DwtState::Disabled
-            };
-            device.set_dwt(state, qh, label("disable_while_typing"));
+            device.set_dwt(wire_dwt_state(enabled), qh, label("disable_while_typing"));
         }
         LibinputSetting::AccelSpeed(speed) => {
             // The protocol carries doubles as a native-endian byte array —
@@ -452,6 +428,62 @@ fn apply_libinput_setting(
             // documents `type="array" summary="double"` as exactly that.
             device.set_accel_speed(speed.to_ne_bytes().to_vec(), qh, label("accel_speed"));
         }
+    }
+}
+
+/// Translates a config `tap_button_map` into the protocol's enum.
+///
+/// Extracted from [`apply_libinput_setting`], which needs a live protocol
+/// object and so could not be tested at all: a swapped `Lrm`/`Lmr` arm here
+/// silently gives the user the other two-finger-tap button for the whole
+/// session and nothing would have failed (audit finding T-01).
+fn wire_tap_button_map(map: config::TapButtonMap) -> river::river_libinput_device_v1::TapButtonMap {
+    use river::river_libinput_device_v1::TapButtonMap as Wire;
+    match map {
+        config::TapButtonMap::Lrm => Wire::Lrm,
+        config::TapButtonMap::Lmr => Wire::Lmr,
+    }
+}
+
+/// Translates a config `click_method` into the protocol's enum. Extracted
+/// for the same reason as [`wire_tap_button_map`].
+fn wire_click_method(method: config::ClickMethod) -> river::river_libinput_device_v1::ClickMethod {
+    use river::river_libinput_device_v1::ClickMethod as Wire;
+    match method {
+        config::ClickMethod::None => Wire::None,
+        config::ClickMethod::ButtonAreas => Wire::ButtonAreas,
+        config::ClickMethod::Clickfinger => Wire::Clickfinger,
+    }
+}
+
+/// Translates a config `tap` boolean into the protocol's enum.
+fn wire_tap_state(enabled: bool) -> river::river_libinput_device_v1::TapState {
+    use river::river_libinput_device_v1::TapState as Wire;
+    if enabled {
+        Wire::Enabled
+    } else {
+        Wire::Disabled
+    }
+}
+
+/// Translates a config `natural_scroll` boolean into the protocol's enum.
+fn wire_natural_scroll_state(enabled: bool) -> river::river_libinput_device_v1::NaturalScrollState {
+    use river::river_libinput_device_v1::NaturalScrollState as Wire;
+    if enabled {
+        Wire::Enabled
+    } else {
+        Wire::Disabled
+    }
+}
+
+/// Translates a config `disable_while_typing` boolean into the protocol's
+/// enum.
+fn wire_dwt_state(enabled: bool) -> river::river_libinput_device_v1::DwtState {
+    use river::river_libinput_device_v1::DwtState as Wire;
+    if enabled {
+        Wire::Enabled
+    } else {
+        Wire::Disabled
     }
 }
 
@@ -1247,16 +1279,9 @@ impl WindowManager {
             .values()
             .filter_map(|seat| {
                 let (px, py) = seat.pointer_position?;
-                self.outputs.values().find(|output| {
-                    let (ox, oy) = output.position;
-                    let (ow, oh) = output.dimensions;
-                    // Half-open bounds: `dimensions` is a width/height
-                    // extent from `position`, so the rectangle's far edge
-                    // (`position + dimensions`) is exclusive, matching how
-                    // `river_output_v1`'s `position`/`dimensions` events
-                    // are documented.
-                    (ox..ox + ow).contains(&px) && (oy..oy + oh).contains(&py)
-                })
+                self.outputs
+                    .values()
+                    .find(|output| output_contains(output.position, output.dimensions, (px, py)))
             })
             .map(|output| output.output_id)
             .min();
@@ -1587,6 +1612,22 @@ impl Output {
 /// `position`/`dimensions` as well — see
 /// [`WindowManager::recompute_pinned_terminal_geometry`] for why that is
 /// the mechanism.
+/// Whether `point` falls inside the output rectangle at `position` with
+/// `dimensions`.
+///
+/// Half-open bounds: `dimensions` is a width/height extent from `position`,
+/// so the rectangle's far edge (`position + dimensions`) is exclusive,
+/// matching how `river_output_v1`'s `position`/`dimensions` events are
+/// documented. Extracted from `active_output_id`'s closure, which needs live
+/// `Output` proxies: the off-by-one this avoids was documented by comment
+/// and asserted by nothing (audit finding T-01).
+fn output_contains(position: (i32, i32), dimensions: (i32, i32), point: (i32, i32)) -> bool {
+    let (ox, oy) = position;
+    let (ow, oh) = dimensions;
+    let (px, py) = point;
+    (ox..ox.saturating_add(ow)).contains(&px) && (oy..oy.saturating_add(oh)).contains(&py)
+}
+
 fn output_for_id(outputs: &HashMap<ObjectId, Output>, output_id: OutputId) -> Option<&Output> {
     outputs
         .values()
@@ -3494,5 +3535,117 @@ mod tests {
             tag_picker_path(Path::new("/")),
             PathBuf::from("buoy-tag-picker")
         );
+    }
+
+    /// A swapped arm in any of these five is a setting the user configured
+    /// silently doing the other thing for the whole session, and until they
+    /// were pulled out of `apply_libinput_setting` — which needs a live
+    /// protocol object — nothing could check them (audit finding T-01).
+    #[test]
+    fn each_libinput_tap_button_map_maps_to_its_own_protocol_value() {
+        use river::river_libinput_device_v1::TapButtonMap as Wire;
+
+        assert_eq!(wire_tap_button_map(config::TapButtonMap::Lrm), Wire::Lrm);
+        assert_eq!(wire_tap_button_map(config::TapButtonMap::Lmr), Wire::Lmr);
+    }
+
+    #[test]
+    fn each_libinput_click_method_maps_to_its_own_protocol_value() {
+        use river::river_libinput_device_v1::ClickMethod as Wire;
+
+        assert_eq!(wire_click_method(config::ClickMethod::None), Wire::None);
+        assert_eq!(
+            wire_click_method(config::ClickMethod::ButtonAreas),
+            Wire::ButtonAreas
+        );
+        assert_eq!(
+            wire_click_method(config::ClickMethod::Clickfinger),
+            Wire::Clickfinger
+        );
+    }
+
+    #[test]
+    fn the_three_boolean_libinput_settings_enable_on_true_and_disable_on_false() {
+        use river::river_libinput_device_v1::{DwtState, NaturalScrollState, TapState};
+
+        assert_eq!(wire_tap_state(true), TapState::Enabled);
+        assert_eq!(wire_tap_state(false), TapState::Disabled);
+        assert_eq!(wire_natural_scroll_state(true), NaturalScrollState::Enabled);
+        assert_eq!(
+            wire_natural_scroll_state(false),
+            NaturalScrollState::Disabled
+        );
+        assert_eq!(wire_dwt_state(true), DwtState::Enabled);
+        assert_eq!(wire_dwt_state(false), DwtState::Disabled);
+    }
+
+    #[test]
+    fn each_config_modifier_maps_to_its_own_protocol_bit() {
+        assert_eq!(river_modifiers(&[]), Modifiers::empty());
+        assert_eq!(
+            river_modifiers(&[config::Modifier::Super]),
+            Modifiers::Mod4,
+            "Super is Mod4, not Mod1 — the one mapping in this table that is \
+             not its own name"
+        );
+        assert_eq!(river_modifiers(&[config::Modifier::Ctrl]), Modifiers::Ctrl);
+        assert_eq!(river_modifiers(&[config::Modifier::Alt]), Modifiers::Mod1);
+        assert_eq!(
+            river_modifiers(&[config::Modifier::Shift]),
+            Modifiers::Shift
+        );
+    }
+
+    #[test]
+    fn a_modifier_set_is_the_union_of_its_members_bits() {
+        assert_eq!(
+            river_modifiers(&[config::Modifier::Super, config::Modifier::Shift]),
+            Modifiers::Mod4 | Modifiers::Shift
+        );
+        // Repeats are a union, not a toggle: `[[keybind]] modifiers =
+        // ["super", "super"]` must not cancel itself out.
+        assert_eq!(
+            river_modifiers(&[config::Modifier::Super, config::Modifier::Super]),
+            Modifiers::Mod4
+        );
+    }
+
+    #[test]
+    fn each_pointer_button_maps_to_its_own_linux_event_code() {
+        assert_eq!(input_event_code(config::Button::Left), 0x110);
+        assert_eq!(input_event_code(config::Button::Right), 0x111);
+        assert_eq!(input_event_code(config::Button::Middle), 0x112);
+    }
+
+    /// The half-open rule `active_output_id` documents: a pointer sitting on
+    /// an output's far edge belongs to the *next* output, so two adjacent
+    /// outputs never both claim the same column.
+    #[test]
+    fn an_output_rectangle_excludes_its_far_edge_and_includes_its_origin() {
+        let position = (1920, 0);
+        let dimensions = (1920, 1080);
+
+        assert!(output_contains(position, dimensions, (1920, 0)));
+        assert!(output_contains(position, dimensions, (3839, 1079)));
+        assert!(
+            !output_contains(position, dimensions, (3840, 0)),
+            "the far edge belongs to whatever output starts there"
+        );
+        assert!(!output_contains(position, dimensions, (1920, 1080)));
+        assert!(!output_contains(position, dimensions, (1919, 0)));
+    }
+
+    #[test]
+    fn an_output_extent_at_the_i32_boundary_does_not_wrap_into_excluding_everything() {
+        // A compositor-supplied `dimensions` this large is nonsense, but
+        // `position + dimensions` overflowing would make the range empty and
+        // silently orphan every pointer position (audit finding F-03's
+        // class).
+        assert!(output_contains(
+            (i32::MAX - 1, 0),
+            (10, 10),
+            (i32::MAX - 1, 5)
+        ));
+        assert!(!output_contains((0, 0), (0, 0), (0, 0)));
     }
 }
