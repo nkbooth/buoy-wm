@@ -34,7 +34,7 @@ use std::collections::{HashMap, VecDeque};
 use buoy_common::log_err;
 use buoy_wm::config::{Action, Config};
 use buoy_wm::wm_core::ids::{OutputId, TagId};
-use buoy_wm::wm_core::state::{WmCore, is_pinned_term_app_id};
+use buoy_wm::wm_core::state::{WmCore, is_pinned_terminal_app_id};
 use buoy_wm::wm_core::view::Geometry;
 use wayland_backend::client::ObjectId;
 use wayland_client::{Proxy, QueueHandle};
@@ -337,7 +337,7 @@ impl Seat {
         let is_pinned_terminal = windows
             .iter()
             .find(|window| &window.proxy == window_proxy)
-            .is_some_and(|window| is_pinned_term_app_id(&window.app_id));
+            .is_some_and(|window| is_pinned_terminal_app_id(&window.app_id));
         if !is_pinned_terminal {
             window_proxy.close();
         }
@@ -368,7 +368,7 @@ impl Seat {
         else {
             return;
         };
-        if is_pinned_term_app_id(&windows[i].app_id) {
+        if is_pinned_terminal_app_id(&windows[i].app_id) {
             let window = &windows[i];
             self.proxy.focus_window(&window.proxy);
             self.focused = Some(window.proxy.clone());
@@ -521,7 +521,7 @@ impl Seat {
                 // path already makes, and the case this scan newly reaches:
                 // before, focus_top could only ever land on `windows.back()`,
                 // which the pinned terminal is never pushed to.
-                if !is_pinned_term_app_id(&window.app_id) {
+                if !is_pinned_terminal_app_id(&window.app_id) {
                     window.node.place_top();
                 }
                 self.focused = Some(window.proxy.clone());

@@ -37,9 +37,9 @@ use buoy_common::log_err;
 use buoy_wm::config::{self, Config};
 use buoy_wm::ipc;
 use buoy_wm::wm_core::ids::TagId;
-use buoy_wm::wm_core::state::{WmCore, pinned_term_app_id};
+use buoy_wm::wm_core::state::{WmCore, pinned_terminal_app_id};
 
-use crate::compositor::child::{spawn_tracked, track_child};
+use crate::compositor::child::{spawn_tracked, track_spawned_child};
 use crate::compositor::report::{log_wm_core_err, notify_user};
 use crate::compositor::window::ActiveOutput;
 
@@ -237,7 +237,7 @@ pub(crate) fn spawn_hotkey_sheet(config: &Config, active_output: Option<ActiveOu
                     }
                 });
             }
-            track_child(child);
+            track_spawned_child(child);
         }
         Err(e) => log_err!("Failed to spawn fuzzel for hotkey list: {e}"),
     }
@@ -255,7 +255,7 @@ pub(crate) fn spawn_hotkey_sheet(config: &Config, active_output: Option<ActiveOu
 /// terminal silently, and permanently — the spawn succeeds, the tag is
 /// marked spawned, and the claim is idempotent so it never retries).
 /// `Config::parse` requires the argv to carry `{app_id}`, since
-/// [`pinned_term_app_id`] is how the rest of this WM recognizes the window
+/// [`pinned_terminal_app_id`] is how the rest of this WM recognizes the window
 /// and recovers which tag it belongs to.
 ///
 /// Arguments are passed individually to `Command`, never through a shell,
@@ -299,7 +299,7 @@ pub(crate) fn spawn_pinned_terminal_or_release_claim(
     if defaults.pinned_terminals
         && spawn_pinned_terminal(
             &defaults.terminal,
-            &defaults.pinned_terminal_argv(&pinned_term_app_id(tag_id), session_name),
+            &defaults.pinned_terminal_argv(&pinned_terminal_app_id(tag_id), session_name),
         )
     {
         return;

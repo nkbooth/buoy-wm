@@ -64,6 +64,25 @@ use crate::compositor::river::{
 use crate::compositor::seat::{Seat, set_pending_action};
 use crate::compositor::window::{Output, Window};
 
+/// The interface names the `wl_registry` handler below matches on.
+///
+/// # Rationale
+///
+/// Named constants rather than literals in the match arms so a test can
+/// assert each one against the name `wayland-scanner` generated for the
+/// same interface. A typo in one of these strings does not fail to
+/// compile: the global is simply never bound, and the WM either exits
+/// claiming river is not running or silently drops a feature (audit
+/// finding J-10's silent-drift class).
+mod interface_name {
+    pub(super) const RIVER_WINDOW_MANAGER_V1: &str = "river_window_manager_v1";
+    pub(super) const RIVER_XKB_BINDINGS_V1: &str = "river_xkb_bindings_v1";
+    pub(super) const RIVER_LAYER_SHELL_V1: &str = "river_layer_shell_v1";
+    pub(super) const RIVER_INPUT_MANAGER_V1: &str = "river_input_manager_v1";
+    pub(super) const RIVER_LIBINPUT_CONFIG_V1: &str = "river_libinput_config_v1";
+    pub(super) const WL_OUTPUT: &str = "wl_output";
+}
+
 impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
     fn event(
         state: &mut Self,
@@ -85,7 +104,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
             const RIVER_INPUT_MANAGER_V1_VERSION: u32 = 1;
             const RIVER_LIBINPUT_CONFIG_V1_VERSION: u32 = 1;
             match interface.as_str() {
-                "river_window_manager_v1" => {
+                interface_name::RIVER_WINDOW_MANAGER_V1 => {
                     if version < RIVER_WINDOW_MANAGER_V1_VERSION {
                         log_err!(
                             "Server river_window_manager_v1 v{version}, but we need at least v{RIVER_WINDOW_MANAGER_V1_VERSION}",
@@ -100,7 +119,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                     );
                     state.river_wm = Some(wm);
                 }
-                "river_xkb_bindings_v1" => {
+                interface_name::RIVER_XKB_BINDINGS_V1 => {
                     if version < RIVER_XKB_BINDINGS_V1_VERSION {
                         log_err!(
                             "Server supports river_xkb_bindings_v1 v{version}, but we need at least v{RIVER_XKB_BINDINGS_V1_VERSION}"
@@ -115,7 +134,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                     );
                     state.river_xkb = Some(xkb);
                 }
-                "river_layer_shell_v1" => {
+                interface_name::RIVER_LAYER_SHELL_V1 => {
                     // Optional (Story 2.6): unlike the two globals above, a
                     // version mismatch here is not fatal - just skip binding
                     // and fall back to `buoy-wm`'s pre-Story-2.6 behavior
@@ -134,7 +153,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                     );
                     state.river_layer_shell = Some(layer_shell);
                 }
-                "river_input_manager_v1" => {
+                interface_name::RIVER_INPUT_MANAGER_V1 => {
                     // Optional, same as `river_layer_shell_v1`: a river
                     // without it just means no `[[input]]` entry can be
                     // applied, which is the pre-`[[input]]` status quo.
@@ -152,7 +171,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                     );
                     state.river_input_manager = Some(input_manager);
                 }
-                "river_libinput_config_v1" => {
+                interface_name::RIVER_LIBINPUT_CONFIG_V1 => {
                     if version < RIVER_LIBINPUT_CONFIG_V1_VERSION {
                         log_err!(
                             "Server supports river_libinput_config_v1 v{version}, but we need at least v{RIVER_LIBINPUT_CONFIG_V1_VERSION} - [[input]] device configuration will not be applied"
@@ -181,7 +200,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                 // `river_xkb_bindings_v1` use: this is purely best-effort
                 // cosmetic data for `fuzzel --output=`, not core WM
                 // function.
-                "wl_output" => {
+                interface_name::WL_OUTPUT => {
                     const WL_OUTPUT_NAME_VERSION: u32 = 4;
                     let wl_output = registry.bind::<wl_output::WlOutput, _, _>(
                         name,
@@ -302,9 +321,13 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
         _qh: &QueueHandle<Self>,
     ) {
         use river::river_window_v1::Event;
-        let window = match state.wm.windows.iter_mut().find(|o| &o.proxy == proxy) {
-            Some(window) => window,
-            None => return,
+        let Some(window) = state
+            .wm
+            .windows
+            .iter_mut()
+            .find(|window| &window.proxy == proxy)
+        else {
+            return;
         };
         match event {
             Event::Closed => window.closed = true,
@@ -701,3 +724,43 @@ wayland_client::delegate_noop!(AppData: ignore RiverNodeV1);
 // child objects DO have events, are out of this story's scope - see
 // story-2-6.md's Technical notes).
 wayland_client::delegate_noop!(AppData: ignore RiverLayerShellV1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wayland_client::Proxy;
+
+    /// The registry handler matches an advertised global's interface name
+    /// against a string. Nothing checks that string against the interface
+    /// it is meant to name — a typo binds nothing, and the consequence is
+    /// either "Is river running?" and `exit(1)` or a feature that silently
+    /// stops working. The generated bindings know every one of these names,
+    /// so the match can be held to them.
+    #[test]
+    fn every_matched_interface_name_is_the_one_the_bindings_generated() {
+        assert_eq!(
+            interface_name::RIVER_WINDOW_MANAGER_V1,
+            RiverWindowManagerV1::interface().name
+        );
+        assert_eq!(
+            interface_name::RIVER_XKB_BINDINGS_V1,
+            RiverXkbBindingsV1::interface().name
+        );
+        assert_eq!(
+            interface_name::RIVER_LAYER_SHELL_V1,
+            RiverLayerShellV1::interface().name
+        );
+        assert_eq!(
+            interface_name::RIVER_INPUT_MANAGER_V1,
+            RiverInputManagerV1::interface().name
+        );
+        assert_eq!(
+            interface_name::RIVER_LIBINPUT_CONFIG_V1,
+            RiverLibinputConfigV1::interface().name
+        );
+        assert_eq!(
+            interface_name::WL_OUTPUT,
+            wl_output::WlOutput::interface().name
+        );
+    }
+}

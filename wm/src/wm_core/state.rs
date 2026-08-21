@@ -29,7 +29,7 @@ use super::view::{Geometry, View};
 
 /// The `app_id` prefix reserved for the lazily-spawned pinned terminals.
 /// Each tag's terminal is spawned with `pinned-term-<tag id>` (see
-/// [`pinned_term_app_id`]), which is how a mapped window is recognised as a
+/// [`pinned_terminal_app_id`]), which is how a mapped window is recognised as a
 /// pinned terminal *and* which tag it belongs to. It is also the test the
 /// close keybind applies to the acting seat's own focused window, which is
 /// what enforces the architectural constraint that the pinned terminal is
@@ -44,7 +44,7 @@ use super::view::{Geometry, View};
 /// protocol offers nothing better to check it against:
 /// `river_window_v1.unreliable_pid` says in its own description that it
 /// "must not be used for anything security sensitive".
-pub const PINNED_TERM_APP_ID: &str = "pinned-term";
+pub const PINNED_TERMINAL_APP_ID: &str = "pinned-term";
 
 /// The `app_id` a pinned terminal for `tag_id` is spawned with.
 ///
@@ -53,27 +53,29 @@ pub const PINNED_TERM_APP_ID: &str = "pinned-term";
 /// whenever its process gets round to it — so position-based correlation
 /// silently swapped two tags' terminals whenever the later spawn won the
 /// race (audit finding D-01(b)).
-pub fn pinned_term_app_id(tag_id: TagId) -> String {
-    format!("{PINNED_TERM_APP_ID}-{}", tag_id.0)
+pub fn pinned_terminal_app_id(tag_id: TagId) -> String {
+    format!("{PINNED_TERMINAL_APP_ID}-{}", tag_id.0)
 }
 
 /// The tag a pinned terminal's `app_id` names, or `None` if `app_id` is not
 /// one this WM emits.
 ///
-/// Accepts only the exact spelling [`pinned_term_app_id`] produces for a
+/// Accepts only the exact spelling [`pinned_terminal_app_id`] produces for a
 /// registrable tag id: `+3`, `03` and `pinned-term-300` are all rejected
 /// rather than folded onto tag 3, so one tag's terminal identity has
 /// exactly one spelling.
 pub fn tag_id_from_pinned_app_id(app_id: &str) -> Option<TagId> {
-    let suffix = app_id.strip_prefix(PINNED_TERM_APP_ID)?.strip_prefix('-')?;
+    let suffix = app_id
+        .strip_prefix(PINNED_TERMINAL_APP_ID)?
+        .strip_prefix('-')?;
     let tag_id = TagId(suffix.parse::<u8>().ok()?);
-    (tag_id.0 < MAX_TAGS && pinned_term_app_id(tag_id) == app_id).then_some(tag_id)
+    (tag_id.0 < MAX_TAGS && pinned_terminal_app_id(tag_id) == app_id).then_some(tag_id)
 }
 
 /// Whether `app_id` names a pinned terminal — the replacement for the
-/// `app_id == PINNED_TERM_APP_ID` equality test every call site used while
+/// `app_id == PINNED_TERMINAL_APP_ID` equality test every call site used while
 /// every pinned terminal shared one `app_id`.
-pub fn is_pinned_term_app_id(app_id: &str) -> bool {
+pub fn is_pinned_terminal_app_id(app_id: &str) -> bool {
     tag_id_from_pinned_app_id(app_id).is_some()
 }
 
@@ -557,7 +559,7 @@ impl WmCore {
     /// not yet been spawned, marks it spawned and returns
     /// `Ok(Some("tag-<name>"))` — the zellij session name the caller
     /// should spawn the terminal with, as
-    /// `<terminal> -a <pinned_term_app_id(tag_id)> zellij attach --create
+    /// `<terminal> -a <pinned_terminal_app_id(tag_id)> zellij attach --create
     /// tag-<name>`. On every subsequent call for the same tag, returns
     /// `Ok(None)` without side effects. Deliberately bundled into one
     /// method (mirroring `cycle_focus`'s precedent of composing several
@@ -625,7 +627,7 @@ impl WmCore {
 
     /// Moves an already-registered view to the back (top) of the stacking
     /// order. A no-op success (state unchanged) for the pinned terminal
-    /// (recognised by [`is_pinned_term_app_id`]): FR4 requires it always be
+    /// (recognised by [`is_pinned_terminal_app_id`]): FR4 requires it always be
     /// rendered at the bottom of the render order, and both of `main.rs`'s
     /// reordering call sites — `cycle_focus` (via `Action::FocusNext`) and
     /// click-to-focus (`manage_seats`'s `interacted` handling) — route
@@ -638,7 +640,7 @@ impl WmCore {
     pub fn raise_view(&mut self, id: ViewId) -> Result<(), WmCoreError> {
         self.bump_generation();
         let view = self.views.get(&id).ok_or(WmCoreError::UnknownView)?;
-        if is_pinned_term_app_id(&view.app_id) {
+        if is_pinned_terminal_app_id(&view.app_id) {
             return Ok(());
         }
         self.stacking_order.retain(|&v| v != id);
@@ -663,7 +665,7 @@ impl WmCore {
     }
 
     /// Returns the currently-focused view's id, unless it is the pinned
-    /// terminal (recognised by [`is_pinned_term_app_id`]) or nothing is focused. A
+    /// terminal (recognised by [`is_pinned_terminal_app_id`]) or nothing is focused. A
     /// pure decision query, not a close operation — the actual close
     /// request and eventual `unregister_view` still happen separately,
     /// driven by the compositor's own `Closed` event. Never panics
@@ -681,7 +683,7 @@ impl WmCore {
     pub fn closable_focused_view(&self) -> Option<ViewId> {
         let id = self.focused_view?;
         let view = self.views.get(&id)?;
-        (!is_pinned_term_app_id(&view.app_id)).then_some(id)
+        (!is_pinned_terminal_app_id(&view.app_id)).then_some(id)
     }
 
     /// Cycles keyboard focus to the next view in stacking order (FR12):
@@ -725,7 +727,7 @@ impl WmCore {
         let target = self.stacking_order.iter().copied().find(|&id| {
             self.views
                 .get(&id)
-                .is_some_and(|view| !is_pinned_term_app_id(&view.app_id))
+                .is_some_and(|view| !is_pinned_terminal_app_id(&view.app_id))
                 && self.is_view_visible(id).unwrap_or(false)
         })?;
         self.raise_view(target)
@@ -1118,7 +1120,8 @@ mod tests {
 
     use super::super::ids::OutputId;
     use super::{
-        WmCore, WmCoreError, is_pinned_term_app_id, pinned_term_app_id, tag_id_from_pinned_app_id,
+        WmCore, WmCoreError, is_pinned_terminal_app_id, pinned_terminal_app_id,
+        tag_id_from_pinned_app_id,
     };
     use crate::wm_core::ids::{TagId, ViewId};
     use crate::wm_core::view::{DEFAULT_FLOATING_GEOMETRY, Geometry};
@@ -1889,7 +1892,7 @@ mod tests {
     #[test]
     fn raise_view_is_a_no_op_for_the_pinned_terminal() {
         let mut core = WmCore::new();
-        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
+        let pinned = core.register_view(&pinned_terminal_app_id(TagId(0)));
         let other = core.register_view("app-one");
         assert_eq!(core.stacking_order(), vec![pinned, other]);
         core.raise_view(pinned).unwrap();
@@ -1907,7 +1910,7 @@ mod tests {
     #[test]
     fn cycle_focus_does_not_move_pinned_terminal_from_bottom_of_stacking_order() {
         let mut core = WmCore::new();
-        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
+        let pinned = core.register_view(&pinned_terminal_app_id(TagId(0)));
         let other = core.register_view("app-one");
         core.lower_view(pinned).unwrap();
         assert_eq!(core.stacking_order(), vec![pinned, other]);
@@ -1932,7 +1935,7 @@ mod tests {
     #[test]
     fn cycle_focus_skips_pinned_terminal_and_round_robins_through_others() {
         let mut core = WmCore::new();
-        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
+        let pinned = core.register_view(&pinned_terminal_app_id(TagId(0)));
         let a = core.register_view("a");
         let b = core.register_view("b");
         core.lower_view(pinned).unwrap();
@@ -1964,7 +1967,7 @@ mod tests {
     #[test]
     fn cycle_focus_returns_none_when_only_pinned_terminal_registered() {
         let mut core = WmCore::new();
-        core.register_view(&pinned_term_app_id(TagId(0)));
+        core.register_view(&pinned_terminal_app_id(TagId(0)));
         assert_eq!(core.cycle_focus(), None);
     }
 
@@ -2010,7 +2013,7 @@ mod tests {
         let output_id = core.register_output();
         core.switch_tag(output_id, visible_tag).unwrap();
 
-        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
+        let pinned = core.register_view(&pinned_terminal_app_id(TagId(0)));
         core.toggle_view_tag(pinned, visible_tag).unwrap();
         core.lower_view(pinned).unwrap();
         let hidden = core.register_view("hidden-app");
@@ -2074,7 +2077,7 @@ mod tests {
         core.switch_tag(this_output, here).unwrap();
         core.switch_tag(other_output, elsewhere).unwrap();
 
-        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
+        let pinned = core.register_view(&pinned_terminal_app_id(TagId(0)));
         core.toggle_view_tag(pinned, here).unwrap();
         core.lower_view(pinned).unwrap();
         let other = core.register_view("app-one");
@@ -2164,7 +2167,7 @@ mod tests {
         let output_id = core.register_output();
         core.switch_tag(output_id, visible_tag).unwrap();
 
-        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
+        let pinned = core.register_view(&pinned_terminal_app_id(TagId(0)));
         core.toggle_view_tag(pinned, visible_tag).unwrap();
         core.lower_view(pinned).unwrap();
         let hidden = core.register_view("app-one");
@@ -2185,7 +2188,7 @@ mod tests {
         let output_id = core.register_output();
         core.switch_tag(output_id, shown_tag).unwrap();
 
-        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
+        let pinned = core.register_view(&pinned_terminal_app_id(TagId(0)));
         core.toggle_view_tag(pinned, hidden_tag).unwrap();
         core.lower_view(pinned).unwrap();
         let hidden = core.register_view("app-one");
@@ -2331,7 +2334,7 @@ mod tests {
     #[test]
     fn closable_focused_view_returns_none_for_pinned_terminal_app_id() {
         let mut core = WmCore::new();
-        let view_id = core.register_view(&pinned_term_app_id(TagId(0)));
+        let view_id = core.register_view(&pinned_terminal_app_id(TagId(0)));
         core.set_focus(view_id).unwrap();
         assert_eq!(core.closable_focused_view(), None);
     }
@@ -2349,7 +2352,7 @@ mod tests {
         );
 
         let mut core = WmCore::new();
-        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
+        let pinned = core.register_view(&pinned_terminal_app_id(TagId(0)));
         core.set_focus(pinned).unwrap();
         let snapshot = core.clone();
         assert_eq!(core.closable_focused_view(), None);
@@ -2800,18 +2803,21 @@ mod tests {
     /// tag in its own `app_id`, so correlation no longer depends on the
     /// order two threads' spawns happen to map in.
     #[test]
-    fn pinned_term_app_id_round_trips_through_tag_id_from_pinned_app_id() {
+    fn pinned_terminal_app_id_round_trips_through_tag_id_from_pinned_app_id() {
         for raw in [0u8, 1, 7, 63] {
             let tag_id = TagId(raw);
-            let app_id = pinned_term_app_id(tag_id);
+            let app_id = pinned_terminal_app_id(tag_id);
             assert_eq!(tag_id_from_pinned_app_id(&app_id), Some(tag_id));
-            assert!(is_pinned_term_app_id(&app_id));
+            assert!(is_pinned_terminal_app_id(&app_id));
         }
     }
 
     #[test]
-    fn pinned_term_app_ids_are_distinct_per_tag() {
-        assert_ne!(pinned_term_app_id(TagId(0)), pinned_term_app_id(TagId(1)));
+    fn pinned_terminal_app_ids_are_distinct_per_tag() {
+        assert_ne!(
+            pinned_terminal_app_id(TagId(0)),
+            pinned_terminal_app_id(TagId(1))
+        );
     }
 
     /// Only the exact form this WM emits is recognised: everything else is
@@ -2836,7 +2842,7 @@ mod tests {
                 None,
                 "{app_id:?} was accepted as a pinned terminal"
             );
-            assert!(!is_pinned_term_app_id(app_id));
+            assert!(!is_pinned_terminal_app_id(app_id));
         }
     }
 

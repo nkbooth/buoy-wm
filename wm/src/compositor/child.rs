@@ -34,7 +34,7 @@ static SPAWNED_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new()
 /// exited. Recovers from a poisoned lock the same way
 /// [`buoy_wm::ipc::lock_recovering`] does — losing track of a child leaks
 /// a zombie, which is never worth taking down the session for (NFR2).
-pub(crate) fn track_child(child: std::process::Child) {
+pub(crate) fn track_spawned_child(child: std::process::Child) {
     let mut children = SPAWNED_CHILDREN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -48,7 +48,7 @@ pub(crate) fn track_child(child: std::process::Child) {
 /// reaping only on spawn meant a session that launched thirty pickers and
 /// then idled held thirty zombies until the next keypress (audit finding
 /// F-05). Recovers from a poisoned lock for the same reason
-/// [`track_child`] does.
+/// [`track_spawned_child`] does.
 pub(crate) fn reap_finished_children() {
     let mut children = SPAWNED_CHILDREN
         .lock()
@@ -100,7 +100,7 @@ fn child_exit_complaint(status: std::process::ExitStatus) -> Option<String> {
 pub(crate) fn spawn_tracked(command: &mut std::process::Command, what: &str) -> bool {
     match command.env_remove("WAYLAND_DEBUG").spawn() {
         Ok(child) => {
-            track_child(child);
+            track_spawned_child(child);
             true
         }
         Err(e) => {

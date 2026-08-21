@@ -43,7 +43,7 @@ use buoy_common::{log_err, log_info};
 use buoy_wm::config::Config;
 use buoy_wm::ipc;
 use buoy_wm::wm_core::ids::{OutputId, TagId};
-use buoy_wm::wm_core::state::{WmCore, is_pinned_term_app_id, tag_id_from_pinned_app_id};
+use buoy_wm::wm_core::state::{WmCore, is_pinned_terminal_app_id, tag_id_from_pinned_app_id};
 use buoy_wm::wm_core::view::{DEFAULT_FLOATING_GEOMETRY, Geometry};
 use wayland_backend::client::ObjectId;
 use wayland_client::{Proxy, QueueHandle, protocol::wl_output};
@@ -126,7 +126,7 @@ impl WindowManager {
         qh: &QueueHandle<AppData>,
     ) {
         // This is already the "reclaim things that died" phase, and it runs
-        // whether or not anything was spawned — unlike `track_child`, which
+        // whether or not anything was spawned — unlike `track_spawned_child`, which
         // is the only other reaper (audit finding F-05).
         reap_finished_children();
         self.remove_outputs();
@@ -491,7 +491,7 @@ impl WindowManager {
     fn recompute_pinned_terminal_geometry(&mut self) {
         let wm_core = ipc::lock_recovering(&self.wm_core);
         for window in self.windows.iter_mut() {
-            if !is_pinned_term_app_id(&window.app_id) {
+            if !is_pinned_terminal_app_id(&window.app_id) {
                 continue;
             }
             let Some(view_id) = window.view_id else {
@@ -793,7 +793,7 @@ impl WindowManager {
                 {
                     log_err!("Failed to raise view {view_id:?} in wm_core stacking order: {e}");
                 }
-                if is_pinned_term_app_id(&window.app_id) {
+                if is_pinned_terminal_app_id(&window.app_id) {
                     // FR4: the pinned terminal must always render at the
                     // bottom of the real z-order, so — unlike every other
                     // window — it must not be pushed to the back of

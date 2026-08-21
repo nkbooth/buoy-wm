@@ -42,30 +42,32 @@
 pub fn matches(pattern: &str, name: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let name: Vec<char> = name.chars().collect();
-    let (mut p, mut n) = (0, 0);
+    let (mut at_pattern, mut at_name) = (0, 0);
     // Where to resume from when the most recent `*` turns out to have
     // swallowed too little. Without this, `*ab*c` against `xabyabc` would
     // commit the second `*` to the first `ab` it saw and then fail on `c`
     // with input still left — a wildcard has to be able to give ground.
     let mut star: Option<(usize, usize)> = None;
-    while n < name.len() {
-        if pattern.get(p) == Some(&'*') {
-            star = Some((p, n));
-            p += 1;
-        } else if pattern.get(p) == Some(&name[n]) {
-            p += 1;
-            n += 1;
-        } else if let Some((star_p, star_n)) = star {
-            p = star_p + 1;
-            n = star_n + 1;
-            star = Some((star_p, star_n + 1));
+    while at_name < name.len() {
+        if pattern.get(at_pattern) == Some(&'*') {
+            star = Some((at_pattern, at_name));
+            at_pattern += 1;
+        } else if pattern.get(at_pattern) == Some(&name[at_name]) {
+            at_pattern += 1;
+            at_name += 1;
+        } else if let Some((star_at_pattern, star_at_name)) = star {
+            at_pattern = star_at_pattern + 1;
+            at_name = star_at_name + 1;
+            star = Some((star_at_pattern, star_at_name + 1));
         } else {
             return false;
         }
     }
     // Name exhausted: whatever is left of the pattern can only still match
     // if it is nothing but wildcards.
-    pattern[p..].iter().all(|&c| c == '*')
+    pattern[at_pattern..]
+        .iter()
+        .all(|&candidate| candidate == '*')
 }
 
 #[cfg(test)]
