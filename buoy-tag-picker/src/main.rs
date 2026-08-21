@@ -407,10 +407,22 @@ fn connect_and_get_state() -> (
     };
     let mut reader = BufReader::new(stream);
 
-    if !send_request(&mut writer, &wire::Request::GetState) {
+    let (tags, views, focused_view) = request_state(&mut writer, &mut reader);
+
+    (writer, reader, tags, views, focused_view)
+}
+
+/// Sends `get-state` on an already-open connection and returns the parsed
+/// snapshot. Exits the process on any send/response failure — every caller
+/// needs the state to do anything at all.
+fn request_state(
+    writer: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
+) -> (Vec<wire::TagDto>, Vec<wire::ViewDto>, Option<u64>) {
+    if !send_request(writer, &wire::Request::GetState) {
         die_visibly("buoy-wm stopped listening before the state request was sent");
     }
-    let (tags, views, focused_view) = match read_response(&mut reader) {
+    match read_response(reader) {
         Some(wire::Response::State {
             tags,
             views,
@@ -420,9 +432,7 @@ fn connect_and_get_state() -> (
             "buoy-wm answered the state request with something unexpected: {other:?}"
         )),
         None => die_visibly("buoy-wm sent nothing usable in answer to the state request"),
-    };
-
-    (writer, reader, tags, views, focused_view)
+    }
 }
 
 /// Assign mode's toggle-and-reopen loop (Story 2.2), extracted from `main`
@@ -444,7 +454,11 @@ fn connect_and_get_state() -> (
 /// chain, the local `tags` mirror update and the "created but not applied"
 /// notice row — moved wholesale to [`run_switch_mode`], which is where
 /// creating a tag belongs: a new tag is a place you go, not a label you
-/// attach. `tags` is consequently read-only for the whole call now.
+/// attach. This mode never mutates the registry, only membership.
+///
+/// `focused_view` from each refreshed snapshot is deliberately discarded:
+/// the picker acts on the view it was spawned for, and following focus
+/// mid-pick would retarget the toggle under the user's hand.
 ///
 /// Code review follow-up (Story 2.10): `picker::should_open_picker` is
 /// checked once, up front, before any wire traffic at all. It also makes
@@ -464,14 +478,19 @@ fn run_assign_mode(
         std::process::exit(0);
     }
 
-    let mut current_tags: Vec<u8> = view_id
-        .and_then(|view_id| views.iter().find(|v| v.id == view_id))
-        .map(|v| v.tags.clone())
-        .unwrap_or_default();
-
-    let known_ids: Vec<u8> = tags.iter().map(|t| t.id).collect();
+    // Both the registry and the focused view's membership are re-read at
+    // the top of every pass rather than cached across the loop (audit
+    // finding K-03). The picker's operation is a *toggle*, not an absolute
+    // set, so a cache that has drifted from the server — a keybind or a
+    // second client having changed membership between two picks — inverts
+    // the user's next pick rather than merely losing it. The cost is one
+    // round trip per reopen on a connection that is already open, against a
+    // server that holds its mutex across a single request.
+    let (mut tags, mut views) = (tags, views);
 
     loop {
+        let current_tags = picker::view_tag_membership(&views, view_id);
+        let known_ids: Vec<u8> = tags.iter().map(|t| t.id).collect();
         let entries = picker::build_checklist_entries(&tags, &current_tags);
         let input = picker::render_fuzzel_input(&entries);
         // No `initial_search` — that mechanism exists only to restore a
@@ -493,7 +512,7 @@ fn run_assign_mode(
                     }
                     match read_response(&mut reader) {
                         Some(wire::Response::Ok) => {
-                            picker::toggle_local_membership(&mut current_tags, tag_id);
+                            (tags, views, _) = request_state(&mut writer, &mut reader);
                         }
                         Some(wire::Response::Error { message }) => {
                             report_server_error(&message);

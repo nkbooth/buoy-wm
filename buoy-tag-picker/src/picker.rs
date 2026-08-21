@@ -29,8 +29,8 @@
 //! from a `wm`-reported tag registry and a focused view's current tags,
 //! rendering that list into `fuzzel --dmenu`'s tab-delimited stdin format,
 //! parsing `fuzzel`'s exit status/stdout back into a toggle-or-cancel
-//! decision, and applying a toggle to the loop's local tag-membership
-//! copy. The create-tag branch and its 64-tag-cap rejection row belong to
+//! decision, and reading a focused view's membership back out of a
+//! freshly-requested state snapshot. The create-tag branch and its 64-tag-cap rejection row belong to
 //! *switch* mode's
 //! [`parse_switch_selection`] as of Story 2.13, not to assign mode: a new
 //! tag is a place you go, not a label you attach. None of this touches a
@@ -39,7 +39,7 @@
 //! decision here stays unit-testable without a live `fuzzel` binary, which
 //! this sandbox does not have.
 
-use crate::wire::TagDto;
+use crate::wire::{TagDto, ViewDto};
 
 /// One row of the checklist: a tag id, its display name, and whether the
 /// focused view currently has it.
@@ -177,18 +177,21 @@ pub fn render_rejection_row() -> String {
     format!("{REJECTION_MESSAGE}\t\n")
 }
 
-/// Toggles `tag_id`'s membership in `tags` in place: removes it if
-/// present, appends it if absent. Same add-if-absent/remove-if-present
-/// semantics as `wm_core`'s own `toggle_view_tag`/`TagSet`, kept
-/// independent per the story's Technical notes gap #3 duplication
-/// rationale rather than calling into `wm_core` from a different
-/// binary/crate.
-pub fn toggle_local_membership(tags: &mut Vec<u8>, tag_id: u8) {
-    if let Some(pos) = tags.iter().position(|&t| t == tag_id) {
-        tags.remove(pos);
-    } else {
-        tags.push(tag_id);
-    }
+/// `view_id`'s tag membership as `views` reports it: empty when no view is
+/// focused, and empty when the view is no longer in the snapshot.
+///
+/// Replaced a local mirror that was snapshotted once and thereafter only
+/// mutated (audit finding K-03). Because the wire operation is a *toggle*
+/// rather than an absolute set, a mirror that had drifted from the server
+/// — a keybind or a second client having changed membership meanwhile —
+/// **inverted** the user's next pick instead of merely losing it. The fix
+/// is to have no mirror: recompute from a freshly requested snapshot on
+/// every pass of the loop.
+pub fn view_tag_membership(views: &[ViewDto], view_id: Option<u64>) -> Vec<u8> {
+    view_id
+        .and_then(|view_id| views.iter().find(|view| view.id == view_id))
+        .map(|view| view.tags.clone())
+        .unwrap_or_default()
 }
 
 /// Code review follow-up (Story 2.10): whether assign mode's picker has
@@ -522,36 +525,41 @@ mod tests {
     }
 
     #[test]
-    fn toggle_local_membership_adds_tag_when_absent() {
-        let mut tags = vec![0];
-        toggle_local_membership(&mut tags, 1);
-        assert_eq!(tags, vec![0, 1]);
+    fn membership_comes_from_the_snapshot_not_a_local_mirror() {
+        let views = vec![
+            ViewDto {
+                id: 7,
+                tags: vec![1, 3],
+            },
+            ViewDto {
+                id: 8,
+                tags: vec![2],
+            },
+        ];
+        assert_eq!(view_tag_membership(&views, Some(7)), vec![1, 3]);
     }
 
     #[test]
-    fn toggle_local_membership_removes_tag_when_present() {
-        let mut tags = vec![0, 1];
-        toggle_local_membership(&mut tags, 1);
-        assert_eq!(tags, vec![0]);
+    fn membership_is_empty_when_no_view_is_focused() {
+        let views = vec![ViewDto {
+            id: 7,
+            tags: vec![1],
+        }];
+        assert_eq!(view_tag_membership(&views, None), Vec::<u8>::new());
     }
 
+    /// Audit finding K-03: the view the picker was spawned for can be gone
+    /// by the time the loop asks again — a window closing mid-pick is
+    /// ordinary. Every tag then reads unchecked, which is true, rather than
+    /// the loop toggling against a membership list for a window that no
+    /// longer exists.
     #[test]
-    fn toggle_local_membership_is_idempotent_pairwise() {
-        // Toggling an absent id twice must round-trip back to the exact
-        // original vec, including order: add-if-absent appends at the end,
-        // and remove-if-present removes that same trailing element, so the
-        // net effect after two toggles of the same id is a no-op. (Toggling
-        // an id that starts out present, and is not the last element,
-        // would instead re-append it at the end rather than its original
-        // position — membership-idempotent but not order-preserving; this
-        // test exercises the round-trip case the loop's real usage
-        // actually relies on, since each `fuzzel` reopen re-derives display
-        // order fresh from the registry, not from this vec's order.)
-        let mut tags = vec![0, 2];
-        let original = tags.clone();
-        toggle_local_membership(&mut tags, 1);
-        toggle_local_membership(&mut tags, 1);
-        assert_eq!(tags, original);
+    fn membership_is_empty_when_the_focused_view_has_gone_away() {
+        let views = vec![ViewDto {
+            id: 8,
+            tags: vec![2],
+        }];
+        assert_eq!(view_tag_membership(&views, Some(7)), Vec::<u8>::new());
     }
 
     // --- Story 2.4: switch-mode rendering and selection parsing ---
