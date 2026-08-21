@@ -60,6 +60,22 @@ buoy-common = { path = "buoy-common", version = "0.1.0" }
 # the doc-comment half of that index checkable: a `[`Foo::bar`]` link that
 # stops resolving is a CI failure, which is the only version of this rule
 # that cannot rot.
+# Size and complexity, none of which clippy enables by default:
+# `too_many_lines` and `cognitive_complexity` are pedantic/nursery, and the
+# other two only fire past a threshold `clippy.toml` tightens. Without them
+# nothing in this pipeline flagged a 365-line function at nesting depth 9
+# (audit findings J-04, T-06) — a review-only rule that had already been
+# broken once and could not detect itself.
+#
+# `warn`, not `deny`: CI and pre-commit both run clippy with `-D warnings`,
+# so these fail the build there while a local `cargo build` stays workable.
+[workspace.lints.clippy]
+too_many_lines = "warn"
+cognitive_complexity = "warn"
+too_many_arguments = "warn"
+type_complexity = "warn"
+
+
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
 redundant_explicit_links = "deny"

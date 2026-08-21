@@ -1972,6 +1972,12 @@ mod tests {
     /// behavior — it should already pass if Tasks 3-9 were implemented
     /// correctly.
     #[test]
+    // Cognitive complexity 27 against the 20 gate, and deliberately so:
+    // this test's whole value is that it walks *every* mutator in one
+    // place, so the branch count is the coverage. Splitting it per mutator
+    // would let a newly added mutator be forgotten, which is the failure
+    // it exists to catch (audit finding T-06).
+    #[allow(clippy::cognitive_complexity)]
     fn every_mutator_rejects_unknown_ids_without_mutating_state() {
         let mut core = WmCore::new();
         let valid_view = core.register_view("app-one");

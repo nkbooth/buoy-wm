@@ -523,6 +523,13 @@ fn log_dispatch_outcome(peer: PeerIdentity, kind: &'static str, response: &Respo
     }
 }
 
+// 104 code lines against the 100-line gate, and the four over are the
+// authentication preamble that has to run before anything is read. Left
+// whole rather than split for the sake of the number: the read/dispatch/
+// write sequence below is one transaction and every proposed cut so far
+// moved lines without moving the decision. Tracked as debt, not accepted
+// as a pattern (audit finding T-06).
+#[allow(clippy::too_many_lines)]
 fn handle_connection_inner(
     stream: UnixStream,
     wm_core: &Arc<Mutex<WmCore>>,

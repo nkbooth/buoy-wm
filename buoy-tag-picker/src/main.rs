@@ -464,6 +464,12 @@ fn request_state(
 /// checked once, up front, before any wire traffic at all. It also makes
 /// every `output_id.expect(...)` below safe: once past this guard, a `None`
 /// view guarantees a `Some` output for the rest of this call.
+// Seven parameters against the six-argument gate. Five of them are one
+// `get-state` snapshot pulled apart, so the fix is a parameter object, not
+// a rearrangement — the same fix `ActiveOutput` was for `Seat::do_action`,
+// deferred here because this file is not what audit finding J-04 touched
+// (finding J-10's parameter ceiling covers it).
+#[allow(clippy::too_many_arguments)]
 fn run_assign_mode(
     mut writer: UnixStream,
     mut reader: BufReader<UnixStream>,

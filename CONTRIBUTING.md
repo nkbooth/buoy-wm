@@ -31,10 +31,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-`pre-commit run --all-files` runs the last two, plus the licence-header and
-gitleaks checks. The hooks are deliberately not `pre-commit install`ed —
+`pre-commit run --all-files` runs the last three, plus the licence-header
+and gitleaks checks. The hooks are deliberately not `pre-commit install`ed —
 they need a toolchain the host may not have, so the git shim would fail
 closed on every commit.
+
+Clippy also enforces size and complexity: `too_many_lines`,
+`cognitive_complexity`, `too_many_arguments` and `type_complexity`, with the
+thresholds in `clippy.toml`. None of these are on by clippy's defaults, so
+before they were declared nothing in the pipeline could flag an oversized
+function — one had reached 365 lines. If a change trips one, split the
+function; an `#[allow]` needs a comment saying why splitting it would make
+the code worse, like the three already in the tree.
 
 Running CI locally with `act` needs a container engine, which the default
 devcontainer deliberately does not expose. Select the opt-in variant for

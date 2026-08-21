@@ -58,7 +58,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
-          components: rustfmt, clippy
+          # `llvm-tools-preview` is what `cargo llvm-cov` reads the raw
+          # profiles with. cargo-llvm-cov can `rustup component add` it
+          # itself, but naming it here keeps the toolchain this job needs
+          # declared in one place rather than acquired as a side effect.
+          components: rustfmt, clippy, llvm-tools-preview
 
       - uses: ./.github/actions/setup-build-deps
 
@@ -76,6 +80,18 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
+
+      # Reporting only, deliberately: no --fail-under-lines yet. Nothing
+      # in this pipeline would have flagged wm/src/main.rs sliding to
+      # 2.55% line coverage (audit finding T-06), so the first job is to
+      # make the number visible in every run; a floor can only be set
+      # honestly once the test seam it depends on exists (T-01).
+      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
+        with:
+          tool: cargo-llvm-cov
+
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --workspace --locked --summary-only
 
       # Enforces [workspace.lints.rustdoc]: a backticked identifier in a
       # doc comment is a checked reference, so a rename cannot leave the
