@@ -27,7 +27,9 @@ not modified, and RPL 1.5 is not applied to them.
 [tinyrwm](https://codeberg.org/river/tinyrwm) by Julian Andrews, distributed
 under 0BSD. Both files have since been substantially rewritten and extended;
 the surviving tinyrwm structure is the Wayland registry-binding and
-`Dispatch` scaffolding.
+`Dispatch` scaffolding, which now lives in `wm/src/compositor/dispatch.rs`
+alongside the records it operates on (`manager.rs`, `window.rs`,
+`seat.rs`). Those four files carry the attribution header too.
 
 0BSD places no conditions on use, modification, or redistribution, so the
 derived work is distributed under RPL 1.5. The original remains available

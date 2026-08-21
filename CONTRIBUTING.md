@@ -63,7 +63,9 @@ The one standing exception is Wayland `Dispatch` glue and the socket setup
 around it — code whose only behaviour is talking to something that does not
 exist in a test harness. Keep those layers thin and push every decision they
 make down into something testable; that is why `bar_line.rs`, `mode.rs` and
-`session.rs` exist as separate modules from their `main.rs`.
+`session.rs` exist as separate modules from their `main.rs`, and why the
+WM's own `compositor/` splits the drag arithmetic, the config-to-protocol
+tables and the argv builders out of the `Dispatch` impls that use them.
 
 The exception is narrower than it used to be. Every crate is a library plus a
 thin `[[bin]]`, so there are three tiers, and a new test belongs in the

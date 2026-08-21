@@ -32,7 +32,7 @@
 //! drag along `pending_rejected_name`, a create-then-apply retry flag and a
 //! membership vector that mean nothing here and would need defensively
 //! never touching. Two small independent functions sharing
-//! `connect_and_get_state`/`run_fuzzel` is the better shape. This
+//! `connect_and_get_state` and one launcher is the better shape.
 //! This module is now only what genuinely needs the real world: resolving
 //! and connecting to the socket, and the process's one exit. What gets sent
 //! and in what order moved to `session`, which is generic over its I/O and

@@ -26,17 +26,19 @@
 //! T-04). The `tests/` directories that now exist are the whole point of
 //! the split.
 //!
-//! What is *not* behind this boundary is as deliberate. `src/main.rs` keeps
+//! What is *not* behind this boundary is as deliberate. The binary keeps
 //! the `wayland-scanner`-generated `river` protocol bindings, the Wayland
-//! `Dispatch` impls, the proxy-carrying `Window`/`Output`/`Seat` structs and
-//! `main` itself. The bindings are the reason the rest of that list cannot
-//! follow the modules below yet: `wayland-scanner` marks every generated
-//! `Event` enum `#[non_exhaustive]`, which is exhaustive to match on inside
-//! its own crate and not across a crate boundary — so moving `river` here
-//! while the ten `Dispatch::event` matches stay in the binary would force
-//! ten `_ =>` arms and turn "the vendored protocol XML grew an event" from
-//! a compile error into a silently ignored message. They move together or
-//! not at all. Nothing in this file has to change when they do.
+//! `Dispatch` impls, the proxy-carrying `Window`/`Output`/`Seat` records
+//! and `main` itself, all under `src/compositor/`. The bindings are the
+//! reason the rest of that list cannot follow the modules below:
+//! `wayland-scanner` marks every generated `Event` enum
+//! `#[non_exhaustive]`, which is exhaustive to match on inside its own
+//! crate and not across a crate boundary — so moving `river` here while
+//! the ten `Dispatch::event` matches stay in the binary would force ten
+//! `_ =>` arms and turn "the vendored protocol XML grew an event" from a
+//! compile error into a silently ignored message. They move together or
+//! not at all, and a directory inside the binary buys the same separation
+//! for free. Nothing in this file has to change when they do.
 
 pub mod config;
 pub mod ipc;

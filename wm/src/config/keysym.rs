@@ -25,8 +25,7 @@
 //! [`from_name`].
 
 /// Keysyms that have no algorithmic relationship to their name. Values are
-/// from `xkbcommon/xkbcommon-keysyms.h`, the same header `main.rs`' own
-/// keysym constants cite.
+/// from `xkbcommon/xkbcommon-keysyms.h`.
 const NAMED: &[(&str, u32)] = &[
     ("space", 0x20),
     ("Return", 0xff0d),

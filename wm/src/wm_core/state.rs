@@ -94,7 +94,7 @@ pub enum WmCoreError {
     UnknownTag,
     /// No output with the given `OutputId` is registered.
     // Constructible via a live path since Story 1.7 wired `switch_tag`
-    // (through `cycle_tag`) into `main.rs`'s tag-cycle keybind.
+    // (through `cycle_tag`) into the tag-cycle keybind.
     UnknownOutput,
     /// The tag registry already holds the maximum of 64 tags (ADR-006).
     // Constructible via a live path via `create_tag`, wired into
@@ -188,8 +188,7 @@ pub struct WmCore {
     outputs: HashMap<OutputId, Output>,
     next_output_id: u64,
     /// Stacking/render order, front=bottom, back=top (mirrors the
-    /// vendored `main.rs` `WindowManager.windows: VecDeque<Window>`
-    /// convention).
+    /// vendored `WindowManager.windows: VecDeque<Window>` convention).
     stacking_order: VecDeque<ViewId>,
     /// Monotonic mutation counter, bumped by every `&mut self` method on
     /// this type. It is not state; it is a cheap answer to "has anything
@@ -364,7 +363,7 @@ impl WmCore {
 
     /// Sets a view's geometry. Fails with [`WmCoreError::UnknownView`] for
     /// an unregistered id, leaving state unchanged.
-    // Wired into `main.rs`'s `init_new_windows` since Story 1.6, which
+    // Wired into `init_new_windows` since Story 1.6, which
     // applies `DEFAULT_FLOATING_GEOMETRY` to every non-pinned view on
     // registration.
     pub fn set_view_geometry(&mut self, id: ViewId, geometry: Geometry) -> Result<(), WmCoreError> {
@@ -376,7 +375,7 @@ impl WmCore {
 
     /// Sets a view's floating flag. Fails with [`WmCoreError::UnknownView`]
     /// for an unregistered id, leaving state unchanged.
-    // Wired into `main.rs`'s `init_new_windows` since Story 1.5, which
+    // Wired into `init_new_windows` since Story 1.5, which
     // forces the pinned terminal non-floating on registration.
     pub fn set_view_floating(&mut self, id: ViewId, floating: bool) -> Result<(), WmCoreError> {
         self.bump_generation();
@@ -407,7 +406,8 @@ impl WmCore {
 
     /// Registers a new output, returning a fresh, unique [`OutputId`].
     /// The new output starts with `current_tag == None`.
-    // Wired into `main.rs`'s `Event::Output` handler since Story 1.7,
+    // Wired into the `river_window_manager_v1` `Event::Output` handler
+    // since Story 1.7,
     // which registers a fresh `wm-core` output the moment a real output
     // appears.
     pub fn register_output(&mut self) -> OutputId {
@@ -433,8 +433,8 @@ impl WmCore {
     /// `wm_core` stays protocol-agnostic (see this module's own
     /// [`WmCore::is_view_visible`]-style boundary): it has no way to know
     /// which *other* output should inherit the tag, since that requires
-    /// Wayland-derived, pointer-position-aware state (`main.rs`'s
-    /// `active_output_id`) that `wm_core` has no access to. It only forgets
+    /// Wayland-derived, pointer-position-aware state
+    /// (`WindowManager::active_output_id`) that `wm_core` has no access to. It only forgets
     /// the removed output and reports what it was showing, mirroring
     /// [`WmCore::unregister_view`]'s "report enough for the caller to act,
     /// don't decide for them" shape.
@@ -442,7 +442,7 @@ impl WmCore {
     // "`wm_core` has no `unregister_output` method ... A removed real
     // output leaves a stale, permanently-registered `wm_core` output
     // behind, eligible forever after to be selected by `active_output_id`."
-    // Wired into `main.rs`'s `remove_outputs` since Story 2.8.
+    // Wired into `remove_outputs` since Story 2.8.
     pub fn unregister_output(&mut self, output_id: OutputId) -> Result<Option<TagId>, WmCoreError> {
         self.bump_generation();
         let output = self
@@ -459,7 +459,7 @@ impl WmCore {
     /// Leaves state unchanged on any error. This is the raw field-level
     /// primitive only — one-tag-per-output enforcement belongs to
     /// [`WmCore::switch_tag`], layered on top.
-    // Wired into `main.rs` since Story 1.7, transitively via `switch_tag`
+    // Wired into the compositor since Story 1.7, transitively via `switch_tag`
     // (itself called from `cycle_tag`, the tag-cycle keybind's decision).
     pub fn set_output_current_tag(
         &mut self,
@@ -491,7 +491,7 @@ impl WmCore {
     /// unregistered id never has the side effect of clearing a real,
     /// unrelated output's tag: fails with [`WmCoreError::UnknownOutput`]
     /// or [`WmCoreError::UnknownTag`] and leaves all state unchanged.
-    // Wired into `main.rs`'s tag-cycle keybind since Story 1.7, via
+    // Wired into the tag-cycle keybind since Story 1.7, via
     // `cycle_tag` (which composes this rather than duplicating its
     // enforcement).
     pub fn switch_tag(&mut self, output_id: OutputId, tag_id: TagId) -> Result<(), WmCoreError> {
@@ -519,7 +519,7 @@ impl WmCore {
     /// tags. Fails with [`WmCoreError::UnknownOutput`] for an unregistered
     /// `output_id`, leaving state unchanged.
     ///
-    /// This is the pure decision `main.rs`'s tag-cycle keybind calls. It
+    /// This is the pure decision the tag-cycle keybind calls. It
     /// deliberately delegates the actual field write and ADR-005
     /// cross-output reroute enforcement to [`WmCore::switch_tag`] rather
     /// than reimplementing it — the same function the IPC `switch-tag`
@@ -571,7 +571,7 @@ impl WmCore {
     /// The claim is necessarily committed before the process it claims for
     /// exists, so a caller whose spawn fails must undo it with
     /// [`WmCore::release_pinned_terminal_claim`].
-    // Wired into `main.rs`'s tag-cycle/tag-create keybind path since Story
+    // Wired into the tag-cycle/tag-create keybind path since Story
     // 1.7, via `ensure_pinned_terminal_spawned`; and into
     // `ipc::dispatch::handle_request`'s `SwitchTag` arm since Story 2.4.
     pub fn claim_pinned_terminal_spawn(
@@ -601,7 +601,7 @@ impl WmCore {
     /// Without this a failed spawn is permanent (audit finding D-01): the
     /// tag never retries, because the claim is idempotent by design. Fails
     /// with [`WmCoreError::UnknownTag`] for an unregistered id.
-    // Called from `main.rs`'s `spawn_pinned_terminal_or_release_claim`, the
+    // Called from `spawn_pinned_terminal_or_release_claim`, the
     // one place that knows whether the spawn actually happened.
     pub fn release_pinned_terminal_claim(&mut self, tag_id: TagId) -> Result<(), WmCoreError> {
         self.bump_generation();
@@ -628,8 +628,8 @@ impl WmCore {
     /// Moves an already-registered view to the back (top) of the stacking
     /// order. A no-op success (state unchanged) for the pinned terminal
     /// (recognised by [`is_pinned_terminal_app_id`]): FR4 requires it always be
-    /// rendered at the bottom of the render order, and both of `main.rs`'s
-    /// reordering call sites — `cycle_focus` (via `Action::FocusNext`) and
+    /// rendered at the bottom of the render order, and both of the
+    /// compositor's reordering call sites — `cycle_focus` (via `Action::FocusNext`) and
     /// click-to-focus (`manage_seats`'s `interacted` handling) — route
     /// through this method, so guarding it here is the single place that
     /// covers both without duplicating an `app_id` check at each call site
@@ -670,12 +670,12 @@ impl WmCore {
     /// request and eventual `unregister_view` still happen separately,
     /// driven by the compositor's own `Closed` event. Never panics
     /// (NFR2).
-    // Story 1.4 code-review follow-up: no longer called from `main.rs`'s
+    // Story 1.4 code-review follow-up: no longer called from the
     // `Action::Close` arm. This query reflects `WmCore`'s single WM-wide
     // `focused_view`, which can diverge from a specific seat's own real
     // focus target under multiple seats (last-seat-processed-wins races
     // ahead of this call) — using it as the pinned-terminal-close gate
-    // could let the exclusion be bypassed. `main.rs` now checks the
+    // could let the exclusion be bypassed. `Seat::close_focused` now checks the
     // acting seat's own focused `Window.app_id` directly instead, leaving
     // this test-only; `#[cfg(test)]` rather than `#[allow(dead_code)]` so
     // that stays compiler-enforced (audit finding J-09).
@@ -702,7 +702,7 @@ impl WmCore {
     /// `FocusNext` could never reach any other window again. Skipping over
     /// it here — rather than merely deprioritizing it — means it is never
     /// selected as a `FocusNext` target at all; it remains directly
-    /// focusable via a click (`main.rs`'s click-to-focus path), but never
+    /// focusable via a click (the compositor's click-to-focus path), but never
     /// via cycling. Since the chosen target is still moved to the back by
     /// `raise_view` and the pinned terminal is excluded from both that
     /// reordering and this selection, repeated calls naturally round-robin
@@ -863,8 +863,9 @@ impl WmCore {
     /// (standard multi-output dwm semantics - a view can be simultaneously
     /// visible on more than one output). A view with no tags at all is
     /// visible by default (the one exception, for the bootstrap case
-    /// before any tag exists yet - see this story's ACs). `main.rs` is the
-    /// only caller that turns this into a real `river_window_v1.show()`/
+    /// before any tag exists yet - see this story's ACs).
+    /// `recompute_window_visibility` is the only caller that turns this
+    /// into a real `river_window_v1.show()`/
     /// `hide()` request; this method itself has no knowledge of the
     /// Wayland protocol (`wm-core` stays protocol-agnostic). Fails with
     /// [`WmCoreError::UnknownView`] for an unregistered id. A pure query;
@@ -884,7 +885,7 @@ impl WmCore {
     /// Returns the id of the tag (if any) currently assigned to `view_id`,
     /// in tag-registry creation order (mirrors [`WmCore::snapshot`]'s
     /// ordering convention for a `ViewSnapshot`'s `tags` field). Story 2.7
-    /// Task 5's `main.rs` fullscreen-recompute pass uses this to recover
+    /// Task 5's fullscreen-recompute pass uses this to recover
     /// which tag a pinned terminal was associated with at mapping time
     /// (Task 2), since `wm-core`'s own tag membership - not the transient
     /// spawn queue - is the durable source of truth afterward. Fails with
@@ -906,7 +907,7 @@ impl WmCore {
     /// output ever matches, so the first match found is unambiguous.
     /// Returns `None` both for a tag no output currently shows and for an
     /// unregistered `tag_id` - Story 2.7 Task 5's only caller
-    /// (`main.rs`'s pinned-terminal fullscreen resolution) treats both
+    /// (the pinned-terminal fullscreen resolution) treats both
     /// cases identically ("nowhere to fullscreen it, fall back to hidden"),
     /// so no separate error variant is needed here. A pure query; never
     /// mutates `self`.
@@ -918,8 +919,8 @@ impl WmCore {
     }
 
     /// Returns `output_id`'s current tag, or `None` if it has no current
-    /// tag or is not registered. Story 2.7 Task 4's `main.rs` auto-tag-on-
-    /// create wiring uses this to resolve the active output's current tag
+    /// tag or is not registered. Story 2.7 Task 4's auto-tag-on-create
+    /// wiring uses this to resolve the active output's current tag
     /// for a freshly registered non-pinned window; that call site only
     /// ever passes an id already known to be registered (from
     /// `active_output_id()`'s own live-output scan), so collapsing
@@ -931,7 +932,7 @@ impl WmCore {
 
     /// The number of tags currently registered. Thin delegation to
     /// [`TagRegistry::count`](super::tag::TagRegistry::count); exists so
-    /// `main.rs` can detect "completely fresh, no tags at all yet" (Story
+    /// the compositor can detect "completely fresh, no tags at all yet" (Story
     /// 2.10's login-bootstrap check) without the heavier allocation of a
     /// full [`WmCore::snapshot`]. A pure query; never mutates `self`.
     pub fn tag_count(&self) -> usize {
@@ -1885,7 +1886,7 @@ mod tests {
     }
 
     /// Task 6 RED: `raise_view` (the primitive both `cycle_focus` and
-    /// `main.rs`'s click-to-focus path use to reorder) must never move the
+    /// the click-to-focus path use to reorder) must never move the
     /// pinned terminal off the bottom of the stacking order — a real FR4
     /// violation Story 1.4's `cycle_focus`/click-to-focus code didn't
     /// account for since the pinned terminal didn't exist yet.
@@ -2408,7 +2409,7 @@ mod tests {
     }
 
     /// Regression guard for the Story 1.4 code-review follow-up
-    /// (`main.rs`'s click-to-focus path must call `raise_view` to keep
+    /// (the click-to-focus path must call `raise_view` to keep
     /// `wm_core`'s `stacking_order` synchronized with real z-order — see
     /// `manage_seats`). Exercises the same `raise_view`-then-`cycle_focus`
     /// interaction in isolation, without any Wayland glue: a prior
@@ -2575,7 +2576,8 @@ mod tests {
 
     // Story 2.7 Task 1 RED: `is_view_visible` is the pure visibility
     // DECISION this story adds to `wm-core` (no Wayland types involved) —
-    // `main.rs` reuses it to decide whether to call `river_window_v1`'s
+    // `recompute_window_visibility` reuses it to decide whether to call
+    // `river_window_v1`'s
     // `show()`/`hide()`. These tests are written before the method exists
     // (RED) and must fail to compile until Task 1.2's GREEN step adds it.
 
@@ -2695,9 +2697,10 @@ mod tests {
     }
 
     // Story 2.7 Task 2/5 RED: `output_showing_tag` is the pure query
-    // `main.rs`'s pinned-terminal fullscreen wiring (Task 5) uses to find
+    // the pinned-terminal fullscreen wiring (Task 5) uses to find
     // which real `river_output_v1` proxy a tag is currently displayed on -
-    // `main.rs` maps the returned `OutputId` to its own `Output` struct's
+    // the compositor maps the returned `OutputId` to its own `Output`
+    // struct's
     // proxy; this method itself stays protocol-agnostic.
 
     #[test]
@@ -2743,7 +2746,7 @@ mod tests {
     }
 
     // Story 2.7 Task 5 RED: `view_tags` is the pure query
-    // `main.rs`'s pinned-terminal geometry-recompute pass uses to recover
+    // the pinned-terminal geometry-recompute pass uses to recover
     // which tag a pinned terminal was associated with (the window's own
     // `app_id` carries that association only at mapping time - after that,
     // `wm-core`'s own tag membership is the source of truth).
@@ -2772,7 +2775,7 @@ mod tests {
     }
 
     // Story 2.7 Task 4 RED: `output_current_tag` is the pure lookup
-    // `main.rs`'s auto-tag-on-create wiring uses to resolve the active
+    // the auto-tag-on-create wiring uses to resolve the active
     // output's current tag before calling `toggle_view_tag` on a freshly
     // registered non-pinned window.
 

@@ -34,8 +34,8 @@
 //! *switch* mode's
 //! [`parse_switch_selection`] as of Story 2.13, not to assign mode: a new
 //! tag is a place you go, not a label you attach. None of this touches a
-//! socket or
-//! spawns a process — that's `main.rs`'s job, kept separate so every
+//! socket or spawns a process — those are `session`'s and `launcher`'s
+//! jobs, kept separate so every
 //! decision here stays unit-testable without a live `fuzzel` binary, which
 //! this sandbox does not have.
 
@@ -136,8 +136,8 @@ pub const REJECTION_MESSAGE: &str = "tag limit reached (64)";
 /// unconditionally `Cancelled`, checked before anything is parsed at all.
 ///
 /// Code review follow-up: `stdout` is the **full raw line** `fuzzel`
-/// returns (no `--accept-nth`, see `main.rs`'s `run_fuzzel` doc comment
-/// for why that flag is gone — it corrupted every created tag's name).
+/// returns (no `--accept-nth`, see [`crate::launcher::run_dmenu`]'s doc
+/// comment for why that flag is gone — it corrupted every created tag's name).
 /// Splitting the trimmed line on the *last* tab is what identifies a real
 /// pick: a rendered row (`"[ ] name\tid\n"`, always exactly one tab) comes
 /// back as the full line including that tab, so a `Some` split with an `id`

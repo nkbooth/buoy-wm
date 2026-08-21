@@ -39,5 +39,6 @@ configuration and installation.
 | `src/wm_core/` | Tag, view and output state — pure logic, no Wayland types |
 | `src/config/` | TOML schema, keysym resolution, glob matching |
 | `src/ipc/` | Unix-socket server and the JSON wire protocol |
-| `src/main.rs` | Wayland glue: registry binding, `Dispatch` impls, process spawning |
+| `src/compositor/` | Wayland glue: generated protocol bindings, `Dispatch` impls, the proxy-carrying records, keybind execution, process spawning |
+| `src/main.rs` | Composition root: connect, load config, bind the socket, dispatch until the connection ends |
 | `protocol/` | Vendored river protocol XML (MIT — see [NOTICE.md](../NOTICE.md)) |

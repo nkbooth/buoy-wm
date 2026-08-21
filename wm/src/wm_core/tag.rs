@@ -109,7 +109,8 @@ impl TagRegistry {
 
     /// Returns the number of registered tags. Reached from production via
     /// [`WmCore::tag_count`](super::state::WmCore::tag_count), which
-    /// `main.rs` uses to decide whether to bootstrap the default tag.
+    /// the first-output handler uses to decide whether to bootstrap the
+    /// default tag.
     pub fn count(&self) -> usize {
         self.tags.len()
     }

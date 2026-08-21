@@ -20,8 +20,8 @@
 //! the tag registry, stacking/render order, and terminal-spawned status.
 //!
 //! This module is pure state + logic with no I/O (see `components.md`).
-//! Every decision it makes is driven either by `main.rs`'s Wayland
-//! dispatch handlers or by `ipc::dispatch`, and it depends on neither — so
+//! Every decision it makes is driven either by the binary's Wayland
+//! dispatch handlers (`compositor::dispatch`) or by `ipc::dispatch`, and it depends on neither — so
 //! its whole public API is exercisable by unit tests with no compositor and
 //! no socket, which is why the test coverage here is what it is.
 

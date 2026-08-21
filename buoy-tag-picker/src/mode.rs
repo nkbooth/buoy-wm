@@ -38,8 +38,8 @@
 /// an opaque argument, never re-deriving "the active output" itself. Both
 /// variants' `output_name` is the real Wayland connector name (e.g.
 /// `"eDP-1"`) `wm`'s `WindowManager::output_name` resolved for that same
-/// active output (Story 2.9), threaded through to `run_fuzzel`'s
-/// `--output=` flag (Task 5) — `None` whenever `wm` didn't yet know it
+/// active output (Story 2.9), threaded through to
+/// [`crate::launcher::run_dmenu`]'s `--output=` flag (Task 5) — `None` whenever `wm` didn't yet know it
 /// (Story 2.9 AC 2), in which case no `--output` flag is passed at all.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
