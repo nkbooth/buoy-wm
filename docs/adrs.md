@@ -1,4 +1,12 @@
-# ADRs
+# Architecture decision records
+
+The decisions that shaped `buoy`, recorded when they were made. The code
+refers to several of them by number, which is why they are kept while the
+rest of the planning material was not.
+
+These are point-in-time records, amended only where a later finding settled
+something they left open. Where one disagrees with the
+[README](../README.md), the README is current.
 
 ## ADR-001: Target river 0.4+ (non-monolithic), not river-classic
 **Date:** 2026-08-06
@@ -49,10 +57,14 @@ client over the WM's IPC socket — not a custom-rendered Wayland surface.
 **Rationale:** Zero custom UI/rendering code to write and maintain; `fuzzel`
 already exists, is fast, and the WM only needs to feed it a checklist and
 read back a selection.
-**Consequences:** Tag-manager UX is bounded by what `fuzzel` can do. Flagged
-open question: whether `fuzzel` natively supports "checkbox toggle + add-new
-item in one flow" needs a quick spike before this is fully locked in — if not,
-fall back to a custom picker for that one interaction.
+**Consequences:** Tag-manager UX is bounded by what `fuzzel` can do.
+**Resolved 2026-08-08** (the spike this ADR called for, against `fuzzel(1)`
+1.14.1): `fuzzel` has neither a native checkbox toggle nor a `--multi` flag.
+Rather than fall back to a custom picker, the checklist is built from a
+sequential toggle-and-reopen loop — one single-select `fuzzel --dmenu` per
+toggle, using `--with-nth`/`--accept-nth`/`--nth-delimiter` to show a
+checkbox glyph per row and return a stable tag id. See
+`buoy-tag-picker/src/checklist.rs`.
 
 ## ADR-005: Enforce one-tag-per-output maximum
 **Date:** 2026-08-06
@@ -75,13 +87,12 @@ the picker's text-input row), each assigned a small integer ID on first
 creation. `View.tags` is stored as a bitset over those IDs (e.g. `u64`,
 capping the registry at 64 concurrent tags — well above realistic usage).
 IDs are never reused within a session; there is no tag-deletion feature in
-v1 (see `scope.md`), so no GC/reuse mechanism is built. If the registry is
+v1, so no GC/reuse mechanism is built. If the registry is
 exhausted (>64 distinct tag names created in a session), tag creation fails
 and the failure is surfaced back through the picker rather than silently
 allowed.
-**Rationale:** Reconciles DISCOVERY.md's original "bitmask, many-to-many"
-performance assumption with the brainstorm session's requirement for
-free-text, user-named tags — the name is just a label over an efficiently-
+**Rationale:** Reconciles the original "bitmask, many-to-many" performance
+assumption with the requirement for free-text, user-named tags — the name is just a label over an efficiently-
 stored bitmask slot. No reuse/GC avoids building machinery for a
 tag-deletion feature that doesn't exist yet (YAGNI) — revisit only if/when
 deletion is scoped.
@@ -102,11 +113,15 @@ ends (WM + companion clients) ship together from the same repo.
 
 ## ADR-008: WM source lives in a subdirectory of buoy-wm
 **Date:** 2026-08-06
-**Status:** Accepted
+**Status:** Accepted; rationale partly superseded (see Consequences)
 **Decision:** The WM binary's Rust source lives at `buoy-wm/wm/` (workspace
 subdirectory), not a separate repository.
 **Rationale:** Solo project — keeping planning docs and implementation in one
 repo/devcontainer avoids cross-repo coordination overhead with no current
 benefit (no separate versioning or sharing need).
 **Consequences:** `buoy-wm` stops being planning-only; `wm/` becomes a real
-Cargo project with its own build step inside the shared devcontainer.
+Cargo project with its own build step inside the shared devcontainer. The
+co-located planning documents this rationale rested on were removed before
+the first public release; the workspace-subdirectory layout stands on its
+own, and `wm/` is now one of three members alongside `buoy-tag-picker/` and
+`buoy-status-bar/`.

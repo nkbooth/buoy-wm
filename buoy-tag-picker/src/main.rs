@@ -19,12 +19,20 @@
 //! mode", Story 2.2 Task 7) and `Mod4+S` ("switch mode", Story 2.4 Task 7)
 //! keybinds. Connects to `wm`'s IPC socket and fetches state, then either
 //! drives a sequential `fuzzel --dmenu` toggle-and-reopen loop (assign
-//! mode — see `docs/planning/epics/story-2-2.md`'s Technical notes "Spike
-//! finding" for why this loop shape, not a single native multi-select, is
-//! the only interaction fuzzel's real flag surface supports) or a single-
-//! shot select-or-cancel invocation (switch mode — see
-//! `docs/planning/epics/story-2-4.md`'s Technical notes "Switch mode's
-//! single-shot shape vs. assign mode's toggle-and-reopen loop"). This
+//! mode) or a single-shot select-or-cancel invocation (switch mode).
+//!
+//! The loop shape is forced, not chosen: `fuzzel` 1.14.1 has neither a
+//! native checkbox toggle nor a `--multi` flag, so the only interaction its
+//! real flag surface supports is one single-select invocation per toggle,
+//! reopened with refreshed glyphs until the user cancels (ADR-004).
+//!
+//! Switch mode is deliberately *not* built on that loop. There is nothing
+//! to toggle — membership is not the concept, and selecting is itself the
+//! terminal action. Expressing it as "toggle then immediately break" would
+//! drag along `pending_rejected_name`, `pending_create_apply_failed` and a
+//! membership vector that mean nothing here and would need defensively
+//! never touching. Two small independent functions sharing
+//! `connect_and_get_state`/`run_fuzzel` is the better shape. This
 //! module is process-spawn and live-socket I/O glue only — every decision
 //! it makes (what to render, how to parse `fuzzel`'s output, how to
 //! detect cancel, which mode argv selects) is unit-tested in

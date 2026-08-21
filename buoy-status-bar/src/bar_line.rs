@@ -24,15 +24,15 @@
 //!   `normal`, text is the tag's name.
 //! - [`BarLine::NoTagSelected`] — the output is registered but has never
 //!   had `switch_tag` called for it (`current_tag` is `None`, the
-//!   corrected "no startup default" case — see the story's Description).
-//!   Class `normal` (this is not an error), literal text `"no tag"` — a
-//!   resolved interpretation gap, `DESIGN.md`/`EXPERIENCE.md` name only a
-//!   "normal" and a "disconnected" state, not this third one.
+//!   corrected "no startup default" case). Class `normal` (this is not an
+//!   error), literal text `"no tag"`. A third state the UX pass never
+//!   named — it specified only "normal" and "disconnected" — resolved this
+//!   way rather than being dressed up as an error.
 //! - [`BarLine::UnknownOutput`] — the requested output id does not appear
 //!   in `get-state`'s `outputs` list at all. Folded into the disconnect
-//!   family (class `disconnected`), per `DESIGN.md`'s Do's/Don'ts
-//!   restricting `accent-error`-class treatment to exactly its two named
-//!   states — this is not invented as a third `accent-error` state.
+//!   family (class `disconnected`) rather than invented as a third
+//!   error-styled state: the design reserved error treatment for exactly
+//!   two named states, and this is not one of them.
 //! - The connect/send/read-failure case (`None` passed to
 //!   [`format_waybar_line`]) is *not* part of [`BarLine`] at all: it is
 //!   purely a function of I/O outcome (Task 6.3's poll loop), never of any
@@ -96,9 +96,9 @@ struct WaybarLine<'a> {
 /// connect/send/read-failure case (Task 6.3's poll loop) — not a
 /// [`BarLine`] variant, since it is a function of I/O outcome, not of any
 /// parsed `get-state` data — and renders as the disconnected state with a
-/// diagnostic glyph in the text itself (`DESIGN.md`'s `bar-tag-
-/// disconnected`; color/dimming is the user's own `style.css`'s job
-/// against the `disconnected` class, not this binary's). Always built via
+/// diagnostic glyph in the text itself. Color and dimming are the user's
+/// own `style.css`'s job against the `disconnected` class, not this
+/// binary's. Always built via
 /// [`WaybarLine`] through `serde_json::to_string`, so a tag name
 /// containing `"`/`\` is escaped correctly rather than corrupting the
 /// line (Task 1.6). `WaybarLine` is a fully-controlled,

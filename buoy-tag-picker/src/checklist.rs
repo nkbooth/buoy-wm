@@ -15,16 +15,15 @@
 // PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 // language governing rights and limitations under the RPL.
 
-//! Pure decision logic driving the toggle-and-reopen loop (Story 2.2's
-//! spike finding — see `docs/planning/epics/story-2-2.md`'s Technical
-//! notes "Spike finding"): building the checkbox-glyph-prefixed row list
+//! Pure decision logic driving the toggle-and-reopen loop that ADR-004's
+//! resolved spike settled on (`fuzzel` 1.14.1 offers no native checkbox
+//! toggle and no `--multi`): building the checkbox-glyph-prefixed row list
 //! from a `wm`-reported tag registry and a focused view's current tags,
 //! rendering that list into `fuzzel --dmenu`'s tab-delimited stdin format,
 //! parsing `fuzzel`'s exit status/stdout back into a toggle-or-cancel
 //! decision, and applying a toggle to the loop's local tag-membership
-//! copy. The create-tag branch and its 64-tag-cap rejection row (Story
-//! 2.3 — see `docs/planning/epics/story-2-3.md`'s Technical notes
-//! "Free-text disambiguation evidence") belong to *switch* mode's
+//! copy. The create-tag branch and its 64-tag-cap rejection row belong to
+//! *switch* mode's
 //! [`parse_switch_selection`] as of Story 2.13, not to assign mode: a new
 //! tag is a place you go, not a label you attach. None of this touches a
 //! socket or

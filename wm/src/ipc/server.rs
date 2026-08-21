@@ -206,8 +206,8 @@ fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, def
 /// boundary already follows).
 ///
 /// Real-deployment case: `$XDG_RUNTIME_DIR/buoy-wm.sock`
-/// (`architecture/deployment.md` confirms the WM runs under a real `river`
-/// login session, which always sets `XDG_RUNTIME_DIR`). Devcontainer/
+/// (the WM runs under a real `river` login session, which always sets
+/// `XDG_RUNTIME_DIR`). Devcontainer/
 /// sandbox-convenience fallback: `/tmp/buoy-wm-<user>.sock`, using `user`
 /// then `logname` then the literal `"unknown"` as the disambiguating
 /// suffix — `XDG_RUNTIME_DIR` is typically unset in that environment.

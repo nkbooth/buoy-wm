@@ -68,6 +68,7 @@ back to the display manager.
 
 ## Design history
 
-`docs/planning/` holds the PRD, the architecture decisions, and a spec with a
-Dev Agent Record for every story shipped. If you are wondering why something
-is the way it is, the answer is probably written down there.
+[`docs/adrs.md`](docs/adrs.md) records the decisions that shaped `buoy`, and
+the code cites several of them by number. Beyond that, the comments are the
+documentation — if you are wondering why something is the way it is, the
+answer is usually sitting next to it.

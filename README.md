@@ -319,8 +319,9 @@ one. `pre-commit run --all-files` runs the fmt and clippy gates; it is
 deliberately not `pre-commit install`ed, since the hooks need a toolchain the
 host may not have.
 
-Design history — PRD, architecture decisions, and a spec with a Dev Agent
-Record for every story — lives under [`docs/planning/`](docs/planning/).
+The decisions behind the tag model, the river-over-Hyprland choice and the
+fuzzel-driven picker are recorded in [`docs/adrs.md`](docs/adrs.md). Several
+are cited by number from the code.
 
 ## License
 
