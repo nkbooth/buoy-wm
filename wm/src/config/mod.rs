@@ -102,9 +102,23 @@ pub enum Action {
     Exit,
     CycleTag,
     /// Open the tag-assignment picker for the focused window.
-    TagPicker,
+    ///
+    /// `tag_picker` remains an alias for the same reason [`Modifier`]'s
+    /// PascalCase spellings do: it is the spelling the README and the
+    /// shipped example documented, so it is what every config already on
+    /// disk says, and a config whose `action` no longer parses loses that
+    /// binding silently (audit finding J-08).
+    #[serde(alias = "tag_picker")]
+    OpenAssignPicker,
     /// Open the tag-switch picker for the active output.
-    TagSwitch,
+    ///
+    /// Named for what it opens, not for what the user eventually picks —
+    /// `tag_switch` and [`Action::SwitchTag`]'s `switch_tag` were one
+    /// transposition apart while meaning different things, so either
+    /// spelling silently did the other one's job (audit finding J-08).
+    /// `tag_switch` stays an alias, as on [`Action::OpenAssignPicker`].
+    #[serde(alias = "tag_switch")]
+    OpenSwitchPicker,
     /// Show the generated hotkey cheat-sheet.
     Hotkeys,
     Move,
@@ -127,8 +141,8 @@ impl std::fmt::Debug for Action {
             Self::FocusNext => f.write_str("FocusNext"),
             Self::Exit => f.write_str("Exit"),
             Self::CycleTag => f.write_str("CycleTag"),
-            Self::TagPicker => f.write_str("TagPicker"),
-            Self::TagSwitch => f.write_str("TagSwitch"),
+            Self::OpenAssignPicker => f.write_str("OpenAssignPicker"),
+            Self::OpenSwitchPicker => f.write_str("OpenSwitchPicker"),
             Self::Hotkeys => f.write_str("Hotkeys"),
             Self::Move => f.write_str("Move"),
             Self::Resize => f.write_str("Resize"),
@@ -532,8 +546,8 @@ impl Default for Config {
                 keybind("n", Action::FocusNext),
                 keybind("Escape", Action::Exit),
                 keybind("Tab", Action::CycleTag),
-                keybind("a", Action::TagPicker),
-                keybind("s", Action::TagSwitch),
+                keybind("a", Action::OpenAssignPicker),
+                keybind("s", Action::OpenSwitchPicker),
                 keybind("r", Action::Launcher),
                 // The only built-in needing a second modifier: xkbcommon
                 // has no unshifted `?` keysym, so the binding must match
@@ -1087,8 +1101,8 @@ impl Action {
             | Action::FocusNext
             | Action::Exit
             | Action::CycleTag
-            | Action::TagPicker
-            | Action::TagSwitch
+            | Action::OpenAssignPicker
+            | Action::OpenSwitchPicker
             | Action::Hotkeys
             | Action::Exec(_)
             | Action::SwitchTag(_) => false,
@@ -1104,8 +1118,8 @@ impl Action {
             Action::FocusNext => "focus_next",
             Action::Exit => "exit",
             Action::CycleTag => "cycle_tag",
-            Action::TagPicker => "tag_picker",
-            Action::TagSwitch => "tag_switch",
+            Action::OpenAssignPicker => "open_assign_picker",
+            Action::OpenSwitchPicker => "open_switch_picker",
             Action::Hotkeys => "hotkeys",
             Action::Move => "move",
             Action::Resize => "resize",
@@ -1125,8 +1139,8 @@ impl Action {
             Action::FocusNext => "Cycle focus".to_string(),
             Action::Exit => "Exit session".to_string(),
             Action::CycleTag => "Cycle tag".to_string(),
-            Action::TagPicker => "Tag manager (assign tags to focused window)".to_string(),
-            Action::TagSwitch => "Switch tag (or type a new name to create)".to_string(),
+            Action::OpenAssignPicker => "Tag manager (assign tags to focused window)".to_string(),
+            Action::OpenSwitchPicker => "Switch tag (or type a new name to create)".to_string(),
             Action::Hotkeys => "Show this hotkey list".to_string(),
             Action::Move => "Move window".to_string(),
             Action::Resize => "Resize window".to_string(),
@@ -1603,8 +1617,8 @@ action = "close"
         assert!(actions.contains(&&Action::Close));
         assert!(actions.contains(&&Action::FocusNext));
         assert!(actions.contains(&&Action::CycleTag));
-        assert!(actions.contains(&&Action::TagPicker));
-        assert!(actions.contains(&&Action::TagSwitch));
+        assert!(actions.contains(&&Action::OpenAssignPicker));
+        assert!(actions.contains(&&Action::OpenSwitchPicker));
         assert!(actions.contains(&&Action::Hotkeys));
         assert!(actions.contains(&&Action::Exit));
         assert_eq!(config.mousebinds.len(), 2);
@@ -1829,6 +1843,85 @@ action = "close"
             config.keybinds[0].action,
             Action::Exec("grim -g slurp".to_string())
         );
+    }
+
+    /// Every action spelling this project has ever documented, asserted
+    /// against the variant it must produce.
+    ///
+    /// Audit finding J-08 renamed `tag_picker`/`tag_switch` to
+    /// `open_assign_picker`/`open_switch_picker`. Renaming a variant under
+    /// `rename_all` silently changes the accepted config spelling, and a
+    /// spelling that stops parsing does not fail loudly — `Config::parse`
+    /// skips the offending `[[keybind]]`, so the user simply loses that
+    /// binding at their next login. `#[serde(alias)]` keeps the old
+    /// spellings, and this test is what stops a future rename from
+    /// dropping one.
+    #[test]
+    fn every_documented_action_spelling_still_parses() {
+        let parse_keybind = |action_toml: &str| -> Action {
+            let contents =
+                format!("[[keybind]]\nmod = [\"super\"]\nkey = \"F1\"\naction = {action_toml}\n");
+            let config = Config::parse(&contents)
+                .unwrap_or_else(|e| panic!("`action = {action_toml}` failed to parse: {e}"));
+            // A rejected action is *skipped*, not an error, and an empty
+            // keybind list falls back to the built-ins - so the length
+            // assertion is what turns a silently-dropped binding into a
+            // failure.
+            assert_eq!(
+                config.keybinds.len(),
+                1,
+                "`action = {action_toml}` was skipped rather than accepted"
+            );
+            config.keybinds[0].action.clone()
+        };
+
+        assert_eq!(parse_keybind(r#""terminal""#), Action::Terminal);
+        assert_eq!(parse_keybind(r#""launcher""#), Action::Launcher);
+        assert_eq!(parse_keybind(r#""close""#), Action::Close);
+        assert_eq!(parse_keybind(r#""focus_next""#), Action::FocusNext);
+        assert_eq!(parse_keybind(r#""exit""#), Action::Exit);
+        assert_eq!(parse_keybind(r#""cycle_tag""#), Action::CycleTag);
+        assert_eq!(parse_keybind(r#""hotkeys""#), Action::Hotkeys);
+        assert_eq!(
+            parse_keybind(r#"{ exec = "grim -g slurp" }"#),
+            Action::Exec("grim -g slurp".to_string())
+        );
+        assert_eq!(
+            parse_keybind(r#"{ switch_tag = "email" }"#),
+            Action::SwitchTag("email".to_string())
+        );
+
+        // The J-08 renames: old spelling and new spelling, same variant.
+        assert_eq!(parse_keybind(r#""tag_picker""#), Action::OpenAssignPicker);
+        assert_eq!(
+            parse_keybind(r#""open_assign_picker""#),
+            Action::OpenAssignPicker
+        );
+        assert_eq!(parse_keybind(r#""tag_switch""#), Action::OpenSwitchPicker);
+        assert_eq!(
+            parse_keybind(r#""open_switch_picker""#),
+            Action::OpenSwitchPicker
+        );
+
+        // `move`/`resize` are pointer-only, so they are only valid on a
+        // `[[mousebind]]`; parsing them here would assert the rejection,
+        // not the spelling.
+        let pointer_only = Config::parse(
+            r#"
+            [[mousebind]]
+            mod = ["Super"]
+            button = "Left"
+            action = "move"
+
+            [[mousebind]]
+            mod = ["Super"]
+            button = "Right"
+            action = "resize"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(pointer_only.mousebinds[0].action, Action::Move);
+        assert_eq!(pointer_only.mousebinds[1].action, Action::Resize);
     }
 
     #[test]

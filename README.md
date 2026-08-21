@@ -298,8 +298,11 @@ PascalCase spellings this file used to document (`"Super"`, `"Left"`) are
 still accepted, so an existing config needs no edit.
 
 Actions: `terminal`, `launcher`, `close`, `focus_next`, `exit`, `cycle_tag`,
-`tag_picker`, `tag_switch`, `hotkeys`, `{ switch_tag = "<name>" }`, and
-`{ exec = "<command>" }`. `exec` runs through `sh -c`, so pipes, arguments
+`open_assign_picker`, `open_switch_picker`, `hotkeys`,
+`{ switch_tag = "<name>" }`, and `{ exec = "<command>" }`. The pickers were
+previously spelled `tag_picker` and `tag_switch` — one transposition away
+from `switch_tag`, which does something else entirely — and both old
+spellings are still accepted. `exec` runs through `sh -c`, so pipes, arguments
 and `~` work as they would in a shell. `move` and `resize` drive a pointer
 drag and are mousebind-only.
 

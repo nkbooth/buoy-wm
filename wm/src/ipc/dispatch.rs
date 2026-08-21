@@ -35,7 +35,7 @@
 //! actual `crate::spawn_pinned_terminal` call, after the response has
 //! already been written back to the client and the `wm-core` mutex
 //! released — untested I/O glue, the same carve-out class as
-//! `Action::Terminal`, `Action::TagPicker`, and
+//! `Action::Terminal`, `Action::OpenAssignPicker`, and
 //! `ensure_pinned_terminal_spawned` itself.
 
 use buoy_common::log_err;

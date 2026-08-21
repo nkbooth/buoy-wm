@@ -647,7 +647,7 @@ fn main() {
 
     match mode {
         // Story 2.10 Task 5: `run_assign_mode` opens with or without a
-        // focused view now (`wm`'s `Action::TagPicker` no longer
+        // focused view now (`wm`'s `Action::OpenAssignPicker` no longer
         // requires one either) — `should_open_picker`'s guard, checked
         // inside `run_assign_mode` itself, only refuses when *neither* a
         // view nor an output is known.

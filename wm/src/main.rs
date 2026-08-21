@@ -1826,8 +1826,8 @@ impl Seat {
                 // `recompute_pinned_terminal_geometry`'s doc comment).
                 //
                 // Code review follow-up: also pass `--output=<name>`, the
-                // same real connector name `Action::TagPicker`/
-                // `TagSwitch` already pass to `buoy-tag-picker` (Story 2.9) -
+                // same real connector name `Action::OpenAssignPicker`/
+                // `OpenSwitchPicker` already pass to `buoy-tag-picker` (Story 2.9) -
                 // this arm spawns `fuzzel` directly, bypassing `buoy-tag-picker`
                 // entirely, so it never got that fix. Without it, `fuzzel`
                 // fell back to "let the compositor choose", which could
@@ -2036,7 +2036,7 @@ impl Seat {
             // panicking (NFR2). Once resolved, the spawn/error-handling
             // shape is otherwise byte-for-byte the same as
             // `Action::Terminal`'s above.
-            Action::TagPicker => {
+            Action::OpenAssignPicker => {
                 match std::env::current_exe() {
                     Ok(wm_exe) => {
                         let mut command = std::process::Command::new(tag_picker_path(&wm_exe));
@@ -2044,7 +2044,7 @@ impl Seat {
                         // threaded across the process boundary so
                         // assign-mode can switch the active output to a
                         // picked/created tag when no window is focused
-                        // (Tasks 4/5) — mirrors `Action::TagSwitch`'s own
+                        // (Tasks 4/5) — mirrors `Action::OpenSwitchPicker`'s own
                         // `<output_id> [<output_name>]` argument order
                         // below. Only appended when an output is actually
                         // registered; `None` (a startup-race edge case
@@ -2075,7 +2075,7 @@ impl Seat {
             // `active_output_id` resolution across the process boundary as
             // a CLI argument — `buoy-tag-picker` never re-derives "the active
             // output" itself (Task 1.2). Same fire-and-forget spawn shape
-            // as `Action::TagPicker` above, plus the same
+            // as `Action::OpenAssignPicker` above, plus the same
             // `None`-output defensive no-op shape as `Action::CycleTag`.
             // Always returns `None`: this arm never itself mutates
             // `wm_core` or triggers `manage_seats`' pinned-terminal-spawn
@@ -2083,14 +2083,14 @@ impl Seat {
             // pinned-terminal follow-up (Task 2) both happen later,
             // asynchronously, once the user picks a tag in the spawned
             // process.
-            Action::TagSwitch => {
+            Action::OpenSwitchPicker => {
                 match active_output_id {
                     Some(output_id) => match std::env::current_exe() {
                         Ok(wm_exe) => {
                             let mut command = std::process::Command::new(tag_picker_path(&wm_exe));
                             command.arg("switch").arg(output_id.0.to_string());
                             // Story 2.9 Task 3.4: same trailing-name
-                            // convention as `Action::TagPicker` above —
+                            // convention as `Action::OpenAssignPicker` above —
                             // appended after the existing two args, only
                             // when known, preserving today's two-arg
                             // `switch <id>` shape exactly when it isn't (AC
@@ -3117,7 +3117,7 @@ mod tests {
     use super::*;
 
     // Code review follow-up (Story 2.2, finding #1): `tag_picker_path` is
-    // the pure path-resolution logic pulled out of `Action::TagPicker`'s
+    // the pure path-resolution logic pulled out of `Action::OpenAssignPicker`'s
     // handler so it's testable without actually calling `current_exe()`.
     // The `current_exe()`/`Command::spawn()` call site itself stays
     // untested I/O glue, same carve-out as the rest of this file.

@@ -133,6 +133,11 @@ Notable changes per release. Format follows
   every previously documented spelling (`"Super"`, `"Mod4"`, `"Control"`,
   `"Left"`, …) is still accepted and always will be, so an existing config
   needs no edit.
+- The two picker actions are now `open_assign_picker` and
+  `open_switch_picker`. `tag_switch` opened a picker while `switch_tag`
+  switched immediately, one transposition apart, so either spelling silently
+  did the other one's job. **Nothing breaks:** `tag_picker` and `tag_switch`
+  are still accepted and always will be.
 
 ## [0.1.0] — first public release
 

@@ -79,8 +79,11 @@ pinned_terminals = true
 #            argument.
 #
 # Actions: terminal, launcher, close, focus_next, exit, cycle_tag,
-#          tag_picker, tag_switch, hotkeys,
+#          open_assign_picker, open_switch_picker, hotkeys,
 #          { switch_tag = "<name>" }, { exec = "<command line>" }
+# The older spellings `tag_picker` and `tag_switch` still work; they were
+# renamed because `tag_switch` (open the picker) and `switch_tag` (switch
+# now) were one transposition apart.
 # `move` and `resize` drive a pointer drag, so they are mousebind-only.
 #
 # Binding the same mod+key twice is reported rather than a silent race: the
@@ -114,12 +117,12 @@ action = "cycle_tag"
 [[keybind]]
 mod = ["super"]
 key = "a"
-action = "tag_picker"
+action = "open_assign_picker"
 
 [[keybind]]
 mod = ["super"]
 key = "s"
-action = "tag_switch"
+action = "open_switch_picker"
 
 [[keybind]]
 mod = ["super", "shift"]
