@@ -87,6 +87,14 @@ pub enum Response {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
     InvalidUtf8,
+    /// Carries `serde_json`'s own message, which **quotes the offending
+    /// input verbatim** (`unknown variant \`delete-everything\`, expected
+    /// one of ...`). It is therefore peer-controlled text: log it with
+    /// `{:?}` and a length cap, never with `{}`. `Display` would let
+    /// anything that can reach the socket write newlines and forged log
+    /// prefixes straight into the journal — see
+    /// `server::describe_parse_error`, which is the only place in this
+    /// crate that renders it.
     InvalidJson(String),
 }
 

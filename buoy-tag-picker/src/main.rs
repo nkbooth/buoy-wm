@@ -81,6 +81,16 @@ fn read_response(reader: &mut BufReader<UnixStream>) -> Option<wire::Response> {
     }
 }
 
+/// Reports a `wire::Response::Error` message on stderr.
+///
+/// `{:?}`, never `{}`: `message` arrives from whatever is on the other end
+/// of the socket, so `Display` would let a squatted socket path (or a
+/// wm-side error that embeds peer text) write control characters and
+/// forged lines into the terminal or journal.
+fn report_server_error(message: &str) {
+    eprintln!("buoy-tag-picker: {message:?}");
+}
+
 /// Sends `switch-tag` for `output_id`/`tag_id` and exits the process on
 /// any failure to send or on any non-`Ok` response — `switch-tag` is
 /// always the last thing any of its three call sites do (Code review
@@ -103,7 +113,7 @@ fn send_switch_tag_or_exit(
     match read_response(reader) {
         Some(wire::Response::Ok) => {}
         Some(wire::Response::Error { message }) => {
-            eprintln!("buoy-tag-picker: {message}");
+            report_server_error(&message);
             std::process::exit(1);
         }
         other => {
@@ -373,7 +383,7 @@ fn run_assign_mode(
                             picker::toggle_local_membership(&mut current_tags, tag_id);
                         }
                         Some(wire::Response::Error { message }) => {
-                            eprintln!("buoy-tag-picker: {message}");
+                            report_server_error(&message);
                             break;
                         }
                         other => {
@@ -481,7 +491,7 @@ fn run_switch_mode(
                         if message == picker::REJECTION_MESSAGE {
                             pending_rejected_name = Some(name);
                         } else {
-                            eprintln!("buoy-tag-picker: {message}");
+                            report_server_error(&message);
                             break;
                         }
                     }

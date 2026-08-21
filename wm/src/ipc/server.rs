@@ -21,13 +21,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use crate::config::Defaults;
 use crate::ipc::dispatch::handle_request;
 use crate::ipc::lock_recovering;
-use crate::ipc::protocol::{Response, parse_request, serialize_response};
+use crate::ipc::protocol::{ParseError, Request, Response, parse_request, serialize_response};
 use crate::wm_core::state::WmCore;
 
 /// The maximum accepted length of one request line, per the AC's "oversized
@@ -35,6 +37,117 @@ use crate::wm_core::state::WmCore;
 /// terminating newline is treated as malformed input (NFR2: bounds the
 /// read buffer instead of growing it forever for a hostile/broken client).
 const MAX_LINE_BYTES: usize = 64 * 1024;
+
+/// The longest peer-supplied detail this module will put in one log line.
+/// Bounds the journal cost of a malformed request to a constant.
+const MAX_LOGGED_DETAIL_BYTES: usize = 512;
+
+/// Consecutive accept failures between log lines. The first failure of a
+/// run is always logged; after that, `EMFILE` is a condition, not an
+/// event, and one line per attempt would fill the journal faster than the
+/// backoff sleep can slow it down.
+const ACCEPT_ERROR_LOG_INTERVAL: u32 = 100;
+
+/// Resource limits the accept loop and each connection enforce. Held in a
+/// struct rather than read from the constants directly so the tests can
+/// drive the very same code paths with deadlines that fit inside a test
+/// run — a 600-second read deadline is not otherwise testable.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    /// Connections served concurrently. Excess connections are dropped
+    /// immediately rather than queued: both real clients tolerate refusal
+    /// (`buoy-status-bar` retries on its next poll, `buoy-tag-picker`
+    /// exits with a message), and queueing would just move the unbounded
+    /// thread growth somewhere less visible.
+    max_connections: usize,
+    /// Stack reserved per connection thread. Each handler holds a
+    /// `BufReader` and one request line, so the platform default (8 MiB of
+    /// address space) buys nothing.
+    connection_stack_size: usize,
+    /// How long a response write may block before the peer is treated as
+    /// gone. Every response is one small line, so a peer that has not
+    /// drained it in this long is not reading at all.
+    write_timeout: Duration,
+    /// How long a connection may sit idle between requests before it is
+    /// closed. Deliberately *not* symmetric with `write_timeout`:
+    /// `buoy-tag-picker` keeps one connection open across successive
+    /// `fuzzel` invocations in assign mode, so this deadline has to cover
+    /// human think-time or the picker breaks mid-use.
+    idle_read_timeout: Duration,
+    /// How long the accept loop sleeps after a failed `accept`. Turns a
+    /// persistent `EMFILE` from a hot loop burning a core inside the
+    /// window manager into a slow retry.
+    accept_error_backoff: Duration,
+}
+
+impl Limits {
+    /// The values the real WM runs with. See each field for why.
+    const PRODUCTION: Self = Self {
+        max_connections: 16,
+        connection_stack_size: 256 * 1024,
+        write_timeout: Duration::from_secs(5),
+        idle_read_timeout: Duration::from_secs(600),
+        accept_error_backoff: Duration::from_millis(100),
+    };
+}
+
+/// The live-connection counter behind [`Limits::max_connections`], plus a
+/// one-shot flag that keeps the refusal log line from becoming the very
+/// flood the accept-loop backoff exists to prevent: a peer hammering a
+/// full server gets one line per capacity episode, not one per attempt.
+struct ConnectionCount {
+    active: AtomicUsize,
+    at_capacity_reported: AtomicBool,
+}
+
+impl ConnectionCount {
+    const fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            at_capacity_reported: AtomicBool::new(false),
+        }
+    }
+
+    /// Reserves one of `max` slots, returning the guard that releases it on
+    /// drop. `None` means the server is at capacity and the caller must
+    /// drop the connection.
+    fn try_acquire(self: &Arc<Self>, max: usize) -> Option<ConnectionSlot> {
+        if self.active.fetch_add(1, Ordering::AcqRel) >= max {
+            self.active.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(ConnectionSlot {
+            count: Arc::clone(self),
+        })
+    }
+
+    /// Logs "at capacity" at most once per episode, so the refusal path
+    /// cannot be used to write to the journal at connect speed.
+    fn report_at_capacity(&self, max: usize) {
+        if !self.at_capacity_reported.swap(true, Ordering::AcqRel) {
+            eprintln!("ipc: at capacity ({max} connections); refusing new connections");
+        }
+    }
+}
+
+/// Releases one connection slot when a connection handler ends — including
+/// when it ends by way of the `catch_unwind` in [`handle_connection`],
+/// which is why this is a `Drop` guard rather than a decrement at the end
+/// of the handler body.
+struct ConnectionSlot {
+    count: Arc<ConnectionCount>,
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.count.active.fetch_sub(1, Ordering::AcqRel);
+        // A freed slot starts a new capacity episode, so the next refusal
+        // is worth one line again.
+        self.count
+            .at_capacity_reported
+            .store(false, Ordering::Release);
+    }
+}
 
 /// Binds a Unix domain socket at `socket_path` and spawns a dedicated
 /// accept-loop thread that hands each connection off to its own thread
@@ -51,27 +164,108 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 /// `defaults` carries the pinned terminal's program and argv — the config
 /// values, passed in rather than read here so this module keeps its only
 /// dependency on the WM being the shared `wm_core` handle.
+///
+/// The accept loop is resource-bounded: at most [`Limits::max_connections`]
+/// connections are served at once, excess connections are dropped, a
+/// failed `accept` backs off instead of spinning, and a connection thread
+/// that cannot be created closes that one connection instead of
+/// unwinding the accept-loop thread. That last point is load-bearing —
+/// nothing restarts this thread, so losing it means IPC is dead (pickers
+/// and every status bar) for the rest of the login session.
 pub fn spawn(
     wm_core: Arc<Mutex<WmCore>>,
     socket_path: &Path,
     defaults: Defaults,
 ) -> std::io::Result<JoinHandle<()>> {
+    spawn_with_limits(wm_core, socket_path, defaults, Limits::PRODUCTION)
+}
+
+/// [`spawn`] with the resource limits supplied explicitly, so the tests can
+/// exercise the cap, the write timeout, the idle read deadline and the
+/// thread-spawn failure path with values that fit inside a test run.
+fn spawn_with_limits(
+    wm_core: Arc<Mutex<WmCore>>,
+    socket_path: &Path,
+    defaults: Defaults,
+    limits: Limits,
+) -> std::io::Result<JoinHandle<()>> {
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
 
-    Ok(std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let wm_core = Arc::clone(&wm_core);
-                    let defaults = defaults.clone();
-                    std::thread::spawn(move || handle_connection(stream, wm_core, &defaults));
+    // `Builder::spawn` rather than `thread::spawn`: a thread that cannot be
+    // created is an `Err` the caller can log and degrade on, not a panic in
+    // the middle of WM startup.
+    std::thread::Builder::new()
+        .name("buoy-ipc-accept".to_string())
+        .spawn(move || accept_loop(listener, wm_core, defaults, limits))
+}
+
+/// Accepts connections forever, handing each to its own thread while the
+/// connection budget allows. Never returns: `UnixListener::incoming()`
+/// never yields `None`.
+fn accept_loop(
+    listener: UnixListener,
+    wm_core: Arc<Mutex<WmCore>>,
+    defaults: Defaults,
+    limits: Limits,
+) {
+    let connections = Arc::new(ConnectionCount::new());
+    let mut consecutive_errors: u32 = 0;
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                consecutive_errors = 0;
+                match connections.try_acquire(limits.max_connections) {
+                    Some(slot) => launch_connection(stream, slot, &wm_core, &defaults, limits),
+                    // Dropping `stream` closes it, which both real clients
+                    // handle: the status bar retries next poll, the picker
+                    // reports and exits.
+                    None => connections.report_at_capacity(limits.max_connections),
                 }
-                Err(e) => eprintln!("ipc: accept error: {e}"),
+            }
+            Err(e) => {
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                if consecutive_errors == 1 || consecutive_errors % ACCEPT_ERROR_LOG_INTERVAL == 0 {
+                    eprintln!(
+                        "ipc: accept error (consecutive: {consecutive_errors}), backing off: {e}"
+                    );
+                }
+                // A persistent EMFILE/ENFILE would otherwise make this a
+                // hot loop writing stderr as fast as journald accepts it,
+                // inside the window manager process.
+                std::thread::sleep(limits.accept_error_backoff);
             }
         }
-    }))
+    }
+}
+
+/// Moves one accepted connection onto its own thread. A failure to create
+/// that thread closes the connection and leaves the accept loop running;
+/// `slot` is released either way, because a failed `Builder::spawn` drops
+/// the closure it was given.
+fn launch_connection(
+    stream: UnixStream,
+    slot: ConnectionSlot,
+    wm_core: &Arc<Mutex<WmCore>>,
+    defaults: &Defaults,
+    limits: Limits,
+) {
+    let wm_core = Arc::clone(wm_core);
+    let defaults = defaults.clone();
+    let spawned = std::thread::Builder::new()
+        .name("buoy-ipc-conn".to_string())
+        .stack_size(limits.connection_stack_size)
+        .spawn(move || {
+            // `slot` lives in the thread body so its release survives
+            // `handle_connection`'s `catch_unwind`.
+            let _slot = slot;
+            handle_connection(stream, wm_core, &defaults, limits);
+        });
+    if let Err(e) = spawned {
+        eprintln!("ipc: cannot spawn connection thread, dropping connection: {e}");
+    }
 }
 
 /// Reads and dispatches requests from one connection until the client
@@ -84,9 +278,14 @@ pub fn spawn(
 /// default `panic = "unwind"` already confine an unhandled panic to its
 /// own thread, and [`lock_recovering`](crate::ipc::lock_recovering) is
 /// what actually keeps a poisoned mutex from crashing the *next* locker.
-fn handle_connection(stream: UnixStream, wm_core: Arc<Mutex<WmCore>>, defaults: &Defaults) {
+fn handle_connection(
+    stream: UnixStream,
+    wm_core: Arc<Mutex<WmCore>>,
+    defaults: &Defaults,
+    limits: Limits,
+) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        handle_connection_inner(stream, &wm_core, defaults);
+        handle_connection_inner(stream, &wm_core, defaults, limits);
     }));
     if let Err(e) = result {
         eprintln!("ipc: connection handler panicked (contained): {e:?}");
@@ -104,7 +303,93 @@ fn write_response(stream: &mut UnixStream, response: &Response) -> bool {
         && stream.flush().is_ok()
 }
 
-fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, defaults: &Defaults) {
+/// Whether `error` is a read/write deadline expiring rather than a real
+/// I/O failure. Linux surfaces `SO_RCVTIMEO`/`SO_SNDTIMEO` as `EAGAIN`,
+/// which maps to `WouldBlock`, but other platforms use `TimedOut`.
+fn is_timeout(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+/// Renders `error` for a log line, escaped and length-capped.
+///
+/// [`ParseError::InvalidJson`] carries `serde_json`'s message, which quotes
+/// the peer's own text verbatim — so this is deliberately built with
+/// `{:?}` and never `{}`. `Display` would let anything that can reach the
+/// socket write newlines and forged `ipc: ` prefixes straight into the
+/// journal, turning a missing-log-line bug into a log-injection primitive.
+fn describe_parse_error(error: &ParseError) -> String {
+    match error {
+        ParseError::InvalidUtf8 => "invalid utf-8".to_string(),
+        ParseError::InvalidJson(detail) => truncate_for_log(&format!("{detail:?}")),
+    }
+}
+
+/// Caps an already-escaped log payload at [`MAX_LOGGED_DETAIL_BYTES`],
+/// cutting on a `char` boundary so the result stays valid UTF-8.
+fn truncate_for_log(escaped: &str) -> String {
+    if escaped.len() <= MAX_LOGGED_DETAIL_BYTES {
+        return escaped.to_string();
+    }
+    let mut end = MAX_LOGGED_DETAIL_BYTES;
+    while !escaped.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &escaped[..end])
+}
+
+/// A stable, never-peer-controlled label for `request`'s type. Exhaustive
+/// by construction, so a new [`Request`] variant is a compile error here
+/// rather than an unlabelled log line.
+fn request_kind(request: &Request) -> &'static str {
+    match request {
+        Request::GetState => "get-state",
+        Request::ToggleTag { .. } => "toggle-tag",
+        Request::CreateTag { .. } => "create-tag",
+        Request::SwitchTag { .. } => "switch-tag",
+    }
+}
+
+/// Logs the outcome of one dispatched request.
+///
+/// Rejections are always logged — they are the abuse signal that was
+/// missing entirely, and the connection deliberately stays open after one,
+/// which makes the wire errors an id-space oracle worth a journal trail.
+/// Successes are logged only for the three mutating requests: `get-state`
+/// is polled by every status bar four times a second per output, so
+/// logging it would drown everything else, including these rejections.
+///
+/// `message` is server-generated, but printed with `{:?}` anyway — the
+/// same rule as [`describe_parse_error`], applied by default rather than
+/// per-site, so a future wire error that embeds peer text cannot quietly
+/// become injectable.
+fn log_dispatch_outcome(kind: &'static str, response: &Response) {
+    match response {
+        Response::Error { message } => eprintln!("ipc: {kind} rejected: {message:?}"),
+        Response::Ok | Response::TagCreated { .. } => eprintln!("ipc: {kind} applied"),
+        Response::State { .. } => {}
+    }
+}
+
+fn handle_connection_inner(
+    stream: UnixStream,
+    wm_core: &Arc<Mutex<WmCore>>,
+    defaults: &Defaults,
+    limits: Limits,
+) {
+    // Set before the `try_clone` below: these are socket-level options, so
+    // one call covers the reader and the writer view of the same socket.
+    if let Err(e) = stream.set_write_timeout(Some(limits.write_timeout)) {
+        eprintln!("ipc: cannot set connection write timeout, closing: {e}");
+        return;
+    }
+    if let Err(e) = stream.set_read_timeout(Some(limits.idle_read_timeout)) {
+        eprintln!("ipc: cannot set connection read deadline, closing: {e}");
+        return;
+    }
+
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
@@ -123,6 +408,13 @@ fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, def
 
         let n = match read_result {
             Ok(n) => n,
+            Err(e) if is_timeout(&e) => {
+                eprintln!(
+                    "ipc: closing connection idle for more than {:?}",
+                    limits.idle_read_timeout
+                );
+                return;
+            }
             Err(e) => {
                 eprintln!("ipc: connection read error, closing: {e}");
                 return;
@@ -137,6 +429,9 @@ fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, def
             // Oversized line with no newline in sight: malformed input,
             // per the AC's ">64 KiB in one line" bullet. Reject and close
             // rather than continuing to read an unbounded amount.
+            eprintln!(
+                "ipc: rejecting request line over the {MAX_LINE_BYTES}-byte cap; closing connection"
+            );
             write_response(
                 &mut writer,
                 &Response::Error {
@@ -154,7 +449,11 @@ fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, def
         let line_bytes = &buf[..buf.len() - 1]; // strip the trailing '\n'
 
         match parse_request(line_bytes) {
-            Err(_) => {
+            Err(e) => {
+                eprintln!(
+                    "ipc: rejecting malformed request: {}",
+                    describe_parse_error(&e)
+                );
                 write_response(
                     &mut writer,
                     &Response::Error {
@@ -164,10 +463,12 @@ fn handle_connection_inner(stream: UnixStream, wm_core: &Arc<Mutex<WmCore>>, def
                 return; // malformed/unparseable input: reset the connection
             }
             Ok(request) => {
+                let kind = request_kind(&request);
                 let (response, pending_spawn) = {
                     let mut core = lock_recovering(wm_core);
                     handle_request(&mut core, request)
                 };
+                log_dispatch_outcome(kind, &response);
                 if !write_response(&mut writer, &response) {
                     return; // peer gone; nothing more to do
                 }
@@ -262,6 +563,16 @@ mod tests {
     impl TestClient {
         fn connect(path: &std::path::Path) -> Self {
             let stream = UnixStream::connect(path).expect("connect to test socket");
+            // Generous, but finite, on both directions: with no
+            // client-side deadline a server bug that stops answering — or
+            // stops reading — turns the whole suite into a hang rather
+            // than one failing test.
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("set test client read timeout");
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .expect("set test client write timeout");
             let read = BufReader::new(stream.try_clone().expect("clone stream for reading"));
             Self {
                 write: stream,
@@ -270,8 +581,14 @@ mod tests {
         }
 
         fn send_line(&mut self, line: &str) {
-            self.write.write_all(line.as_bytes()).unwrap();
-            self.write.write_all(b"\n").unwrap();
+            self.try_send_line(line).expect("write to test socket");
+        }
+
+        /// `send_line` for the cases where the server closing on us mid-burst
+        /// is the behaviour under test rather than a failure.
+        fn try_send_line(&mut self, line: &str) -> std::io::Result<()> {
+            self.write.write_all(line.as_bytes())?;
+            self.write.write_all(b"\n")
         }
 
         fn send_raw(&mut self, bytes: &[u8]) {
@@ -324,6 +641,316 @@ mod tests {
 
     fn spawn_test_server() -> (std::path::PathBuf, Arc<Mutex<WmCore>>) {
         spawn_test_server_with_core(WmCore::new())
+    }
+
+    /// Removes a test server's socket inode when the test ends, including
+    /// on a panicking assertion, so a resource-limit test run does not
+    /// litter the temp directory with one socket per case.
+    struct SocketGuard(std::path::PathBuf);
+
+    impl SocketGuard {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for SocketGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn spawn_test_server_with_limits(
+        core: WmCore,
+        limits: Limits,
+    ) -> (SocketGuard, Arc<Mutex<WmCore>>) {
+        let socket_path = unique_socket_path();
+        let wm_core = Arc::new(Mutex::new(core));
+        spawn_with_limits(
+            Arc::clone(&wm_core),
+            &socket_path,
+            Defaults {
+                terminal: "/bin/true".to_string(),
+                ..Defaults::default()
+            },
+            limits,
+        )
+        .expect("server must spawn successfully");
+        (SocketGuard(socket_path), wm_core)
+    }
+
+    /// What a one-shot `get-state` probe on a fresh connection observed.
+    /// `Refused` and `TimedOut` are kept apart deliberately: a refused
+    /// connection is the connection cap doing its job, while a timed-out
+    /// one means the accept loop itself stopped accepting — the failure
+    /// mode H-01 exists to prevent, and one that would otherwise show up
+    /// as a hung test suite rather than a failing test.
+    #[derive(Debug)]
+    enum ProbeResult {
+        Served(String),
+        Refused,
+        TimedOut,
+    }
+
+    fn probe_get_state(path: &std::path::Path) -> ProbeResult {
+        let mut stream = UnixStream::connect(path).expect("connect to test socket");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set probe read timeout");
+        if stream.write_all(b"{\"type\":\"get-state\"}\n").is_err() {
+            return ProbeResult::Refused;
+        }
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => ProbeResult::Refused,
+            Ok(_) => ProbeResult::Served(line),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                ProbeResult::TimedOut
+            }
+            Err(_) => ProbeResult::Refused,
+        }
+    }
+
+    /// Polls [`probe_get_state`] until the server serves a connection.
+    /// Slot release is asynchronous — the handler thread has to observe the
+    /// peer's EOF or its own write timeout first — so a single unretried
+    /// probe would be a race.
+    fn wait_for_served_get_state(path: &std::path::Path) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match probe_get_state(path) {
+                ProbeResult::Served(line) => return line,
+                other => assert!(
+                    std::time::Instant::now() < deadline,
+                    "server never freed a connection slot (last probe: {other:?})"
+                ),
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn production_read_deadline_is_far_longer_than_the_write_timeout() {
+        // The asymmetry is load-bearing, not incidental: `buoy-tag-picker`
+        // holds one connection open across successive `fuzzel` invocations
+        // in assign mode, so the read side has to tolerate human
+        // think-time while the write side must not tolerate a peer that
+        // has stopped reading. A future edit that collapses the two into
+        // one value breaks assign mode, so pin the relationship here.
+        assert!(
+            Limits::PRODUCTION.idle_read_timeout > Limits::PRODUCTION.write_timeout * 10,
+            "read deadline must dwarf the write timeout"
+        );
+    }
+
+    #[test]
+    fn connections_beyond_the_cap_are_dropped_and_their_slots_are_reused() {
+        let limits = Limits {
+            max_connections: 2,
+            ..Limits::PRODUCTION
+        };
+        let (socket, _wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+
+        // Both slots are held by connections whose handler thread is
+        // parked in `read_until` waiting for a second request.
+        let mut first = TestClient::connect(socket.path());
+        first.send_line(r#"{"type":"get-state"}"#);
+        assert!(
+            first
+                .read_line()
+                .expect("first slot served")
+                .contains(r#""type":"state""#)
+        );
+        let mut second = TestClient::connect(socket.path());
+        second.send_line(r#"{"type":"get-state"}"#);
+        assert!(
+            second
+                .read_line()
+                .expect("second slot served")
+                .contains(r#""type":"state""#)
+        );
+
+        assert!(
+            matches!(probe_get_state(socket.path()), ProbeResult::Refused),
+            "a connection beyond the cap must be dropped, not queued or served"
+        );
+
+        drop(first);
+        assert!(wait_for_served_get_state(socket.path()).contains(r#""type":"state""#));
+        drop(second);
+    }
+
+    #[test]
+    fn write_timeout_frees_a_slot_held_by_a_peer_that_never_reads() {
+        let limits = Limits {
+            max_connections: 1,
+            write_timeout: Duration::from_millis(100),
+            ..Limits::PRODUCTION
+        };
+        // A fat state makes each `get-state` response large enough that a
+        // few hundred unread replies overrun the socket's send buffer,
+        // which is the only way to park the handler in `write_all` at all.
+        let mut core = WmCore::new();
+        for i in 0..64 {
+            core.create_tag(format!("{}{i}", "t".repeat(200)))
+                .expect("fill the tag registry");
+        }
+        let (socket, _wm_core) = spawn_test_server_with_limits(core, limits);
+
+        let mut greedy = TestClient::connect(socket.path());
+        // The server closing on us part-way through the burst *is* the
+        // write timeout working, so a failed write here is a pass.
+        for _ in 0..500 {
+            if greedy.try_send_line(r#"{"type":"get-state"}"#).is_err() {
+                break;
+            }
+        }
+
+        // Without a write timeout the handler blocks in `write_all`
+        // forever and never releases the only slot, so this call would
+        // exhaust its deadline instead of returning.
+        assert!(wait_for_served_get_state(socket.path()).contains(r#""type":"state""#));
+        drop(greedy);
+    }
+
+    #[test]
+    fn an_idle_connection_is_closed_after_the_read_deadline() {
+        let limits = Limits {
+            idle_read_timeout: Duration::from_millis(150),
+            ..Limits::PRODUCTION
+        };
+        let (socket, _wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+
+        let mut client = TestClient::connect(socket.path());
+        client.send_line(r#"{"type":"get-state"}"#);
+        assert!(
+            client
+                .read_line()
+                .expect("served once")
+                .contains(r#""type":"state""#)
+        );
+        assert_eq!(
+            client.read_line(),
+            None,
+            "an idle connection must be closed once its read deadline passes, \
+             rather than parking a thread for the rest of the session"
+        );
+    }
+
+    #[test]
+    fn a_pause_between_requests_far_longer_than_the_write_timeout_keeps_the_connection() {
+        // Assign mode's shape: one connection, several requests, human
+        // think-time in between. The read deadline is what must govern
+        // here, never the write timeout.
+        let limits = Limits {
+            write_timeout: Duration::from_millis(50),
+            ..Limits::PRODUCTION
+        };
+        let (socket, _wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+
+        let mut client = TestClient::connect(socket.path());
+        client.send_line(r#"{"type":"get-state"}"#);
+        assert!(
+            client
+                .read_line()
+                .expect("first request served")
+                .contains(r#""type":"state""#)
+        );
+        std::thread::sleep(Duration::from_millis(250));
+        client.send_line(r#"{"type":"get-state"}"#);
+        assert!(
+            client
+                .read_line()
+                .expect("connection must survive a pause many times the write timeout")
+                .contains(r#""type":"state""#)
+        );
+    }
+
+    #[test]
+    fn a_connection_thread_that_cannot_be_spawned_does_not_kill_the_accept_loop() {
+        // Requesting a 1 TiB stack is refused by the kernel with the same
+        // EAGAIN a thread-exhausted host produces, which is the only way
+        // to reach `Builder::spawn`'s error arm without touching process
+        // rlimits from inside a shared test binary.
+        let limits = Limits {
+            connection_stack_size: 1 << 40,
+            ..Limits::PRODUCTION
+        };
+        let (socket, _wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+
+        assert!(
+            matches!(probe_get_state(socket.path()), ProbeResult::Refused),
+            "an unspawnable connection must be dropped, not panic the accept loop"
+        );
+        assert!(
+            matches!(probe_get_state(socket.path()), ProbeResult::Refused),
+            "the accept loop must still be accepting after a spawn failure"
+        );
+    }
+
+    #[test]
+    fn request_kind_labels_every_variant() {
+        assert_eq!(
+            request_kind(&crate::ipc::protocol::Request::GetState),
+            "get-state"
+        );
+        assert_eq!(
+            request_kind(&crate::ipc::protocol::Request::ToggleTag {
+                view_id: 1,
+                tag_id: 0
+            }),
+            "toggle-tag"
+        );
+        assert_eq!(
+            request_kind(&crate::ipc::protocol::Request::CreateTag { name: "x".into() }),
+            "create-tag"
+        );
+        assert_eq!(
+            request_kind(&crate::ipc::protocol::Request::SwitchTag {
+                output_id: 1,
+                tag_id: 0
+            }),
+            "switch-tag"
+        );
+    }
+
+    #[test]
+    fn parse_error_log_detail_escapes_peer_supplied_newlines() {
+        let error = ParseError::InvalidJson("harmless\nipc: forged log line".to_string());
+        let detail = describe_parse_error(&error);
+        assert!(
+            !detail.contains('\n'),
+            "a socket peer must not be able to write a second journal line: {detail}"
+        );
+        assert!(
+            detail.contains("\\n"),
+            "the newline must survive as an escape: {detail}"
+        );
+    }
+
+    #[test]
+    fn parse_error_log_detail_is_length_capped() {
+        let error = ParseError::InvalidJson("x".repeat(MAX_LOGGED_DETAIL_BYTES * 4));
+        let detail = describe_parse_error(&error);
+        assert!(
+            detail.len() <= MAX_LOGGED_DETAIL_BYTES + 3,
+            "one malformed request must not write an unbounded journal line ({} bytes)",
+            detail.len()
+        );
+    }
+
+    #[test]
+    fn parse_error_log_detail_names_the_invalid_utf8_case() {
+        assert_eq!(
+            describe_parse_error(&ParseError::InvalidUtf8),
+            "invalid utf-8"
+        );
     }
 
     #[test]
