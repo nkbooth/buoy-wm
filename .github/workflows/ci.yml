@@ -92,19 +92,28 @@ jobs:
         run: cargo llvm-cov --workspace --locked --summary-only
 
       # The floor, and deliberately not on that whole-workspace number: the
-      # three `src/main.rs` files are the composition roots — Wayland
-      # `Dispatch` glue, the poll loop, the process's one exit — and a
-      # workspace-wide floor set low enough to accommodate them would gate
-      # nothing, while one set high enough to be meaningful would fail on
-      # code that is deliberately covered across a process boundary instead
-      # (audit finding T-01 phase 4). So the floor covers everything *below*
-      # those roots, which is where the decisions live and where the test
-      # seam is supposed to hold: 97.33% at the time this was set, gated at
-      # 95% so an honest refactor has room and a slide does not.
+      # composition roots — Wayland `Dispatch` glue, the proxy-carrying
+      # records, the poll loop, the process's one exit — cannot be reached
+      # from a test at all, so a workspace-wide floor set low enough to
+      # accommodate them would gate nothing, while one set high enough to
+      # be meaningful would fail on code that is deliberately covered
+      # across a process boundary instead (audit finding T-01 phase 4). So
+      # the floor covers everything *below* those roots, which is where the
+      # decisions live and where the test seam is supposed to hold: 97.44%
+      # at the time this was last measured, gated at 95% so an honest
+      # refactor has room and a slide does not.
+      #
+      # The exempt files are named one by one rather than by directory
+      # (`wm/src/compositor/` would be shorter). A new module under that
+      # directory then lands *inside* the gate by default and has to earn
+      # its way out by being named here, which is the right way round: the
+      # reason `drag.rs` is not on this list is that pulling the drag
+      # arithmetic away from the live proxies took it to 100%, and a
+      # directory-wide exemption would have hidden that.
       - name: cargo llvm-cov (floor below the composition roots)
         run: >-
           cargo llvm-cov --workspace --locked --summary-only
-          --ignore-filename-regex 'src/main\.rs$'
+          --ignore-filename-regex 'src/main\.rs$|wm/src/compositor/(child|dispatch|launch|manager|report|river|seat|window|wire)\.rs$'
           --fail-under-lines 95
 
       # Enforces [workspace.lints.rustdoc]: a backticked identifier in a
