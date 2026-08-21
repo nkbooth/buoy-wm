@@ -140,4 +140,31 @@ mod tests {
     fn matching_is_case_sensitive() {
         assert!(!matches("*touchpad*", "PIXA3854:00 093A:0274 Touchpad"));
     }
+
+    /// The matcher collects `chars()` rather than bytes, so a multi-byte
+    /// pattern character is one unit on both sides — but nothing proved it,
+    /// and a keyboard or tablet whose vendor string carries an accent is
+    /// not exotic (audit finding T-05).
+    #[test]
+    fn a_non_ascii_pattern_matches_whole_characters_not_bytes() {
+        assert!(matches("*Tastatur*", "SEM Präzisions-Tastatur 2"));
+        assert!(matches("Wacom*é*", "Wacom Intuos Précision"));
+        assert!(!matches("*Präzision*", "SEM Prazision"));
+        // A `*` must not be able to stop half way through a character.
+        assert!(matches("é*", "élan"));
+        assert!(!matches("?*", "élan"));
+    }
+
+    /// A pattern built to make a naive matcher backtrack exponentially.
+    /// This one is linear by construction — one `star` position, never a
+    /// stack — and the test exists to keep it that way: the pattern comes
+    /// from a config file, and the matcher runs once per device per
+    /// `[[input]]` entry at startup.
+    #[test]
+    fn a_pathological_wildcard_pattern_terminates() {
+        let pattern = "*a".repeat(12);
+        let name = "a".repeat(48);
+        assert!(matches(&pattern, &name));
+        assert!(!matches(&format!("{pattern}b"), &name));
+    }
 }

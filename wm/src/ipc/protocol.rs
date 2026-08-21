@@ -175,7 +175,15 @@ mod tests {
 
     #[test]
     fn parse_request_rejects_non_json_garbage() {
-        assert!(parse_request(b"not json at all").is_err());
+        // The *variant*, not just `is_err()`: this test and the invalid-utf8
+        // one below would otherwise both keep passing if utf-8 rejection
+        // started reporting `InvalidJson`, collapsing a distinction this
+        // module documents deliberately and that `describe_parse_error`
+        // renders differently (audit finding T-05).
+        assert!(matches!(
+            parse_request(b"not json at all"),
+            Err(ParseError::InvalidJson(_))
+        ));
     }
 
     #[test]
@@ -231,7 +239,7 @@ mod tests {
     #[test]
     fn parse_request_rejects_invalid_utf8_bytes() {
         let bytes: &[u8] = &[0xFF, 0xFE];
-        assert!(parse_request(bytes).is_err());
+        assert_eq!(parse_request(bytes), Err(ParseError::InvalidUtf8));
     }
 
     #[test]

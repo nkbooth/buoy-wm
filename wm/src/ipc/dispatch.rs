@@ -210,51 +210,68 @@ pub fn handle_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::protocol::{Request, Response};
+    use crate::ipc::protocol::{OutputDto, Request, Response, TagDto, ViewDto};
     use crate::wm_core::ids::{OutputId, TagId, ViewId};
     use crate::wm_core::state::WmCore;
 
+    /// Audit finding T-02: this test built its expected values from
+    /// `core.snapshot()` — the very call `handle_request` makes internally —
+    /// so it could catch a swapped DTO field but not a wrong sort order and
+    /// not any error inside `snapshot()` itself, because both sides shared
+    /// it. Asserted against literals now, which `Response`'s `PartialEq`
+    /// and `Debug` make a drop-in.
+    ///
+    /// Two tags and two views deliberately: with one of each, an order this
+    /// wire protocol's clients depend on cannot be observed at all.
     #[test]
-    fn get_state_returns_state_response_matching_snapshot() {
+    fn get_state_returns_every_field_of_the_state_in_registration_order() {
         let mut core = WmCore::new();
-        let view_id = core.register_view("foot");
-        let tag_id = core.create_tag("web").unwrap();
-        core.toggle_view_tag(view_id, tag_id).unwrap();
+        let foot = core.register_view("foot");
+        let firefox = core.register_view("firefox");
+        let web = core.create_tag("web").unwrap();
+        let mail = core.create_tag("mail").unwrap();
+        core.toggle_view_tag(foot, web).unwrap();
+        core.toggle_view_tag(foot, mail).unwrap();
+        core.toggle_view_tag(firefox, mail).unwrap();
         let output_id = core.register_output();
-        core.switch_tag(output_id, tag_id).unwrap();
-        core.set_focus(view_id).unwrap();
+        core.switch_tag(output_id, mail).unwrap();
+        core.set_focus(firefox).unwrap();
 
-        let snapshot = core.snapshot();
         let (response, pending_spawn) = handle_request(&mut core, Request::GetState);
-        assert_eq!(pending_spawn, None);
 
-        match response {
+        assert_eq!(pending_spawn, None);
+        assert_eq!(
+            response,
             Response::State {
-                tags,
-                views,
-                outputs,
-                focused_view,
-            } => {
-                assert_eq!(tags.len(), snapshot.tags.len());
-                for (dto, snap) in tags.iter().zip(snapshot.tags.iter()) {
-                    assert_eq!(dto.id, snap.id.0);
-                    assert_eq!(dto.name, snap.name);
-                }
-                assert_eq!(views.len(), snapshot.views.len());
-                for (dto, snap) in views.iter().zip(snapshot.views.iter()) {
-                    assert_eq!(dto.id, snap.id.0);
-                    assert_eq!(dto.app_id, snap.app_id);
-                    assert_eq!(dto.tags, snap.tags.iter().map(|t| t.0).collect::<Vec<_>>());
-                }
-                assert_eq!(outputs.len(), snapshot.outputs.len());
-                for (dto, snap) in outputs.iter().zip(snapshot.outputs.iter()) {
-                    assert_eq!(dto.id, snap.id.0);
-                    assert_eq!(dto.current_tag, snap.current_tag.map(|t| t.0));
-                }
-                assert_eq!(focused_view, snapshot.focused_view.map(|v| v.0));
+                tags: vec![
+                    TagDto {
+                        id: web.0,
+                        name: "web".to_string(),
+                    },
+                    TagDto {
+                        id: mail.0,
+                        name: "mail".to_string(),
+                    },
+                ],
+                views: vec![
+                    ViewDto {
+                        id: foot.0,
+                        app_id: "foot".to_string(),
+                        tags: vec![web.0, mail.0],
+                    },
+                    ViewDto {
+                        id: firefox.0,
+                        app_id: "firefox".to_string(),
+                        tags: vec![mail.0],
+                    },
+                ],
+                outputs: vec![OutputDto {
+                    id: output_id.0,
+                    current_tag: Some(mail.0),
+                }],
+                focused_view: Some(firefox.0),
             }
-            other => panic!("expected Response::State, got {other:?}"),
-        }
+        );
     }
 
     #[test]
