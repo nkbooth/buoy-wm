@@ -20,11 +20,20 @@ Three surfaces are worth naming explicitly.
 domain socket at `$XDG_RUNTIME_DIR/buoy-wm.sock`, protected only by
 filesystem permissions. Any process running as the same user can connect and
 drive it. That surface is deliberately narrow — the entire request set is
-`get-state`, `create-tag`, `toggle-tag`, and `switch-tag`. There is no
-request that executes a command, reads a file, or writes anywhere. A hostile
-local process could read your tag names and window app-ids, and rearrange
-your workspaces; it could not use `buoy` to gain anything it did not already
-have as your user.
+`get-state`, `create-tag`, `toggle-tag`, and `switch-tag`.
+
+One of those does spawn a process. A `switch-tag` for a tag whose pinned
+terminal has not started yet runs the configured terminal and `zellij`
+(`wm/src/ipc/server.rs:187`). The command and its arguments come entirely
+from your own config, never from the request — the tag name reaches the child
+only as a `zellij` session argument, passed as argv rather than through a
+shell, so it cannot inject a command. The request set carries no command
+string of its own, reads no file, and writes nowhere.
+
+A hostile local process could therefore read your tag names and window
+app-ids, rearrange your workspaces, and cause up to 64 terminal sessions to
+be spawned. It could not use `buoy` to run a command of its choosing, or to
+gain anything it did not already have as your user.
 
 **`exec` keybinds run arbitrary commands, from your own config file.** The
 `{ exec = "..." }` action runs through `sh -c` with full shell semantics.

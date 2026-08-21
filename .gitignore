@@ -36,3 +36,6 @@
 
 # --- Packaging scratch ---
 /dist/
+
+# Audit reports (/audit skill output) — local analysis, not part of the product.
+/audits/
