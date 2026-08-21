@@ -24,8 +24,8 @@
 //! `wayland-scanner` marks every generated `Event` enum
 //! `#[non_exhaustive]`, which is exhaustive to match on inside its own
 //! crate and not across a crate boundary — so moving these bindings into
-//! the library while the ten `Dispatch::event` matches stay here would
-//! force ten `_ =>` arms and turn "the vendored protocol XML grew an
+//! the library while the eleven `Dispatch::event` matches stay here would
+//! force eleven `_ =>` arms and turn "the vendored protocol XML grew an
 //! event" from a compile error into a silently ignored message. Within one
 //! crate a file boundary costs nothing (audit finding J-10).
 //!

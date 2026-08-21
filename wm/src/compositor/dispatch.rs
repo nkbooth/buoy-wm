@@ -22,17 +22,19 @@
 //!
 //! # Rationale
 //!
-//! Every `match event` here is exhaustive, and that is the whole reason
+//! All eleven `match event`s here are exhaustive, and that is the whole
+//! reason
 //! [`super::river`] and this module are in the binary rather than behind
 //! `buoy_wm`'s library boundary: `wayland-scanner` marks each generated
 //! `Event` enum `#[non_exhaustive]`, which is exhaustive to match on
 //! inside its own crate and not across a crate boundary. Split them and
 //! every match below needs a `_ =>` arm, turning "the vendored protocol
 //! XML grew an event" from a compile error into a silently ignored
-//! message. Two arms are `_ =>` on purpose — `RiverLibinputDeviceV1` has
+//! message. One `_ =>` is deliberate — `RiverLibinputDeviceV1` has
 //! roughly forty report events and this WM surfaces two — and the
-//! difference between those and a wildcard added by a refactor is the
-//! point.
+//! difference between that and a wildcard added by a refactor is the
+//! point. (The registry handler's other wildcard is unavoidable: it
+//! matches on a `String`.)
 //!
 //! These handlers stay thin on purpose (`CONTRIBUTING.md`): a handler
 //! records what arrived and defers every decision to something testable.

@@ -34,8 +34,8 @@
 //! `wayland-scanner` marks every generated `Event` enum
 //! `#[non_exhaustive]`, which is exhaustive to match on inside its own
 //! crate and not across a crate boundary — so moving `river` here while
-//! the ten `Dispatch::event` matches stay in the binary would force ten
-//! `_ =>` arms and turn "the vendored protocol XML grew an event" from a
+//! the eleven `Dispatch::event` matches stay in the binary would force
+//! eleven `_ =>` arms and turn "the vendored protocol XML grew an event" from a
 //! compile error into a silently ignored message. They move together or
 //! not at all, and a directory inside the binary buys the same separation
 //! for free. Nothing in this file has to change when they do.
