@@ -59,11 +59,26 @@ devpod up . --devcontainer-path .devcontainer/act/devcontainer.json
 refactored at all. Write the test, watch it fail, then make it pass. Pull
 requests that add logic without tests will be asked for them.
 
-The one standing exception is Wayland `Dispatch` glue, process spawning, and
-socket I/O — code whose only behaviour is talking to something that does not
+The one standing exception is Wayland `Dispatch` glue and the socket setup
+around it — code whose only behaviour is talking to something that does not
 exist in a test harness. Keep those layers thin and push every decision they
-make down into something testable; that is why `bar_line.rs` and `mode.rs`
-exist as separate modules from their `main.rs`.
+make down into something testable; that is why `bar_line.rs`, `mode.rs` and
+`session.rs` exist as separate modules from their `main.rs`.
+
+The exception is narrower than it used to be. Every crate is a library plus a
+thin `[[bin]]`, so there are three tiers, and a new test belongs in the
+highest one that can hold it:
+
+- **Unit tests** beside the code, in `#[cfg(test)] mod tests`. Where almost
+  everything belongs.
+- **Doctests** on public items — `cargo test` runs them, so a `///` example
+  is compiled code and not prose.
+- **`tests/`**, which can `use` the library and can run the real binaries via
+  Cargo's `CARGO_BIN_EXE_<name>`. This is where anything crossing a process
+  boundary goes: `buoy-status-bar`'s stdout contract with waybar, the
+  picker's `fuzzel` argv and request sequence (stub the launcher by putting an
+  executable named `fuzzel` first on `PATH`), and the wire compatibility
+  between `protocol.rs` and the two satellites' `wire.rs`.
 
 **Docstrings on public items.** Every public function, method, type, and
 module gets a `///` or `//!` blurb. Private internals do not — the noise
@@ -76,10 +91,12 @@ codebase already; they are the most valuable thing in it.
 
 ## Testing against a real compositor
 
-Much of `buoy` cannot be verified without a live river session, and the test
-suite is honest about that boundary rather than pretending to cover it. If
-your change touches Wayland glue, waybar output, or `fuzzel` invocation, say
-in the pull request what you actually ran it against.
+The Wayland half of `buoy` cannot be verified without a live river session,
+and the test suite is honest about that boundary rather than pretending to
+cover it. waybar output and `fuzzel` invocation are no longer on the far side
+of it — both are driven end to end in `tests/` against a stub — so what is
+left is the compositor protocol itself. If your change touches Wayland glue,
+say in the pull request what you actually ran it against.
 
 Test from a TTY or a nested river before trusting a build as your login
 session. A `buoy-wm` that fails to start means a black screen and a bounce
