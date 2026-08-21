@@ -40,7 +40,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use buoy_common::{log_err, log_info};
-use buoy_wm::config::{self, Config};
+use buoy_wm::config::Config;
 use buoy_wm::ipc;
 use buoy_wm::wm_core::ids::{OutputId, TagId};
 use buoy_wm::wm_core::state::{WmCore, is_pinned_term_app_id, tag_id_from_pinned_app_id};
@@ -51,16 +51,16 @@ use wayland_client::{Proxy, QueueHandle, protocol::wl_output};
 use crate::compositor::child::reap_finished_children;
 use crate::compositor::drag::{dragged_origin, resize_origin};
 use crate::compositor::launch::spawn_pinned_terminal_or_release_claim;
+use crate::compositor::libinput::LibinputRegistry;
 use crate::compositor::report::log_wm_core_err;
 use crate::compositor::river::river_input_manager_v1::RiverInputManagerV1;
 use crate::compositor::river::river_layer_shell_v1::RiverLayerShellV1;
 use crate::compositor::river::river_libinput_config_v1::RiverLibinputConfigV1;
-use crate::compositor::river::river_libinput_device_v1::RiverLibinputDeviceV1;
 use crate::compositor::river::river_window_manager_v1::RiverWindowManagerV1;
 use crate::compositor::river::river_xkb_bindings_v1::RiverXkbBindingsV1;
 use crate::compositor::seat::{Seat, SeatOp};
 use crate::compositor::window::{ActiveOutput, Output, Window, output_contains, output_for_id};
-use crate::compositor::wire::{apply_libinput_setting, input_event_code, river_modifiers};
+use crate::compositor::wire::{input_event_code, river_modifiers};
 
 #[derive(Debug, Default)]
 pub(crate) struct AppData {
@@ -107,34 +107,15 @@ pub(crate) struct WindowManager {
     /// a permanent negative — the event's arrival time relative to
     /// `river_output_v1::WlOutput` is not guaranteed (Technical notes).
     pub(crate) wl_output_names: HashMap<ObjectId, String>,
-    /// Each `river_input_device_v1`'s name, keyed by that proxy's object id,
-    /// populated when its `name` event arrives. Held separately from
-    /// `libinput_devices` because the two objects are created by two
-    /// different globals and the protocol makes no promise about which
-    /// arrives first — same ordering trap as `wl_output_names` above.
-    pub(crate) input_device_names: HashMap<ObjectId, String>,
-    /// Each `river_libinput_device_v1`, keyed by its own object id.
-    pub(crate) libinput_devices: HashMap<ObjectId, LibinputDevice>,
+    /// Every libinput-configurable device river has told us about. A
+    /// registry of its own because nothing in it is a question about
+    /// windows, outputs or seats — see [`LibinputRegistry`].
+    pub(crate) libinput: LibinputRegistry,
     /// The user's `~/.config/buoy/config.toml`, or [`Config::default`]'s
     /// built-in equivalent when there is no such file. Loaded once at
     /// startup — re-reading it on change would mean tearing down and
     /// recreating every live binding object, which no story needs yet.
     pub(crate) config: Config,
-}
-
-/// A libinput-configurable device, and the correlation state needed before
-/// its `[[input]]` entry can be applied.
-#[derive(Debug)]
-pub(crate) struct LibinputDevice {
-    pub(crate) proxy: RiverLibinputDeviceV1,
-    /// The `river_input_device_v1` this configures, from the `input_device`
-    /// event. `None` until that arrives — the name lives on that object, so
-    /// there is nothing to match a config entry against until then.
-    pub(crate) input_device_id: Option<ObjectId>,
-    /// Whether the config has already been applied. The two halves of the
-    /// device's identity arrive in an unspecified order, so both arrival
-    /// paths attempt to configure and this is what keeps it to once.
-    pub(crate) configured: bool,
 }
 
 impl WindowManager {
@@ -727,68 +708,17 @@ impl WindowManager {
             .map(String::as_str)
     }
 
-    /// The device name behind a `river_libinput_device_v1`, once both its
-    /// `input_device` event and that device's `name` event have arrived.
-    fn libinput_device_name(&self, libinput_id: &ObjectId) -> Option<&str> {
-        let input_device_id = self
-            .libinput_devices
-            .get(libinput_id)?
-            .input_device_id
-            .as_ref()?;
-        self.input_device_names
-            .get(input_device_id)
-            .map(String::as_str)
-    }
-
-    /// The name of the device behind `libinput_id`, but only when the user
-    /// actually has an `[[input]]` entry for it — the gate that keeps
-    /// device-state logging to devices the config speaks about.
+    /// The name of the device behind `libinput_id`, but only when the
+    /// user has an `[[input]]` entry for it. The aggregate's job rather
+    /// than the registry's only because the config lives here.
     pub(crate) fn configured_device_name(&self, libinput_id: &ObjectId) -> Option<&str> {
-        let name = self.libinput_device_name(libinput_id)?;
-        self.config.input_for(name).map(|_| name)
+        self.libinput
+            .configured_device_name(libinput_id, &self.config)
     }
 
-    /// Applies each device's matching `[[input]]` entry, once.
-    ///
-    /// Called from both arrival paths — the device's `name` and its
-    /// `input_device` correlation — because the protocol does not order them
-    /// relative to each other. Whichever lands second is the one that finds
-    /// the device ready; `configured` keeps a device from being reconfigured
-    /// when the other path fires later for an unrelated device.
-    ///
-    /// A device with no matching entry is marked configured too: leaving
-    /// libinput's defaults alone is a decision, not unfinished work, and
-    /// re-deciding it on every later event would be pointless.
+    /// Applies each libinput device's matching `[[input]]` entry, once.
     pub(crate) fn configure_libinput_devices(&mut self, qh: &QueueHandle<AppData>) {
-        let ready: Vec<(ObjectId, Option<Vec<config::LibinputSetting>>, String)> = self
-            .libinput_devices
-            .iter()
-            .filter(|(_, device)| !device.configured)
-            .filter_map(|(id, _)| {
-                let name = self.libinput_device_name(id)?.to_string();
-                let settings = self.config.input_for(&name).map(|input| input.settings());
-                Some((id.clone(), settings, name))
-            })
-            .collect();
-        for (id, settings, name) in ready {
-            // Borrowed separately from the scan above: `libinput_device_name`
-            // needs `&self` while sending the requests needs the device
-            // mutably, and the two cannot overlap.
-            let Some(device) = self.libinput_devices.get_mut(&id) else {
-                continue;
-            };
-            device.configured = true;
-            let Some(settings) = settings else {
-                continue;
-            };
-            log_info!(
-                "libinput {name:?}: applying {} setting(s) from [[input]]",
-                settings.len()
-            );
-            for setting in settings {
-                apply_libinput_setting(&device.proxy, setting, &name, qh);
-            }
-        }
+        self.libinput.configure(&self.config, qh);
     }
 
     fn manage_seats(&mut self, wm_proxy: &RiverWindowManagerV1, any_new_windows: bool) {

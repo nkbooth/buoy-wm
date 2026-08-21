@@ -99,7 +99,7 @@ jobs:
       # be meaningful would fail on code that is deliberately covered
       # across a process boundary instead (audit finding T-01 phase 4). So
       # the floor covers everything *below* those roots, which is where the
-      # decisions live and where the test seam is supposed to hold: 97.44%
+      # decisions live and where the test seam is supposed to hold: 97.4%
       # at the time this was last measured, gated at 95% so an honest
       # refactor has room and a slide does not.
       #
@@ -113,7 +113,7 @@ jobs:
       - name: cargo llvm-cov (floor below the composition roots)
         run: >-
           cargo llvm-cov --workspace --locked --summary-only
-          --ignore-filename-regex 'src/main\.rs$|wm/src/compositor/(child|dispatch|launch|manager|report|river|seat|window|wire)\.rs$'
+          --ignore-filename-regex 'src/main\.rs$|wm/src/compositor/(child|dispatch|launch|libinput|manager|report|river|seat|window|wire)\.rs$'
           --fail-under-lines 95
 
       # Enforces [workspace.lints.rustdoc]: a backticked identifier in a

@@ -38,6 +38,7 @@ pub mod child;
 pub mod dispatch;
 pub mod drag;
 pub mod launch;
+pub mod libinput;
 pub mod manager;
 pub mod report;
 pub mod river;

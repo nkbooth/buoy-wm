@@ -48,7 +48,7 @@ use wayland_client::{
 };
 
 use crate::compositor::drag::requested_resize_edges;
-use crate::compositor::manager::{AppData, LibinputDevice};
+use crate::compositor::manager::AppData;
 use crate::compositor::report::wenum_label;
 use crate::compositor::river;
 use crate::compositor::river::{
@@ -570,12 +570,12 @@ impl Dispatch<RiverInputDeviceV1, ()> for AppData {
         use river::river_input_device_v1::Event;
         match event {
             Event::Name { name } => {
-                state.wm.input_device_names.insert(proxy.id(), name);
+                state.wm.libinput.record_device_name(proxy.id(), name);
                 // The libinput half may already be waiting on this name.
                 state.wm.configure_libinput_devices(qh);
             }
             Event::Removed => {
-                state.wm.input_device_names.remove(&proxy.id());
+                state.wm.libinput.forget_device_name(&proxy.id());
                 proxy.destroy();
             }
             Event::Type { .. } => {}
@@ -595,14 +595,7 @@ impl Dispatch<RiverLibinputConfigV1, ()> for AppData {
         use river::river_libinput_config_v1::Event;
         match event {
             Event::LibinputDevice { id } => {
-                state.wm.libinput_devices.insert(
-                    id.id(),
-                    LibinputDevice {
-                        proxy: id,
-                        input_device_id: None,
-                        configured: false,
-                    },
-                );
+                state.wm.libinput.add_device(id);
             }
             // As with the input manager: never requested, so never sent.
             Event::Finished => {}
@@ -626,14 +619,15 @@ impl Dispatch<RiverLibinputDeviceV1, ()> for AppData {
         use river::river_libinput_device_v1::Event;
         match event {
             Event::InputDevice { device } => {
-                if let Some(libinput_device) = state.wm.libinput_devices.get_mut(&proxy.id()) {
-                    libinput_device.input_device_id = Some(device.id());
-                }
+                state
+                    .wm
+                    .libinput
+                    .correlate_input_device(&proxy.id(), device.id());
                 // The name may already have arrived on the other object.
                 state.wm.configure_libinput_devices(qh);
             }
             Event::Removed => {
-                state.wm.libinput_devices.remove(&proxy.id());
+                state.wm.libinput.remove_device(&proxy.id());
                 proxy.destroy();
             }
             // Of this protocol's ~40 report events, only the two that answer
