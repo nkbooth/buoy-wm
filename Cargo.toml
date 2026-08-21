@@ -51,6 +51,14 @@ categories = ["command-line-utilities", "gui"]
 # version requirement is a wildcard, which fails CI's `cargo deny` job.
 [workspace.dependencies]
 buoy-common = { path = "buoy-common", version = "0.1.0" }
+# `wm` dev-depends on both satellites so one test can drive `protocol`'s
+# types against the two hand-written mirrors of them and fail when either
+# side drifts (audit finding J-01). Not a runtime dependency in either
+# direction — the satellites do not depend on `wm` at all, which is what
+# makes this a dev-dependency rather than a cycle. Versioned for the same
+# reason `buoy-common` is: `deny.toml` sets `wildcards = "deny"`.
+buoy-status-bar = { path = "buoy-status-bar", version = "0.1.0" }
+buoy-tag-picker = { path = "buoy-tag-picker", version = "0.1.0" }
 
 
 # Comments in this codebase reference identifiers in backticks constantly,

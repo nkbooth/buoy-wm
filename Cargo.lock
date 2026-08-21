@@ -39,6 +39,8 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "buoy-common",
+ "buoy-status-bar",
+ "buoy-tag-picker",
  "serde",
  "serde_json",
  "toml",
