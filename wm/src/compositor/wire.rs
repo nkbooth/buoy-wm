@@ -28,7 +28,7 @@
 
 use buoy_wm::config;
 
-use crate::AppData;
+use crate::compositor::manager::AppData;
 use crate::compositor::river;
 use crate::compositor::river::river_libinput_device_v1::RiverLibinputDeviceV1;
 use crate::compositor::river::river_seat_v1::Modifiers;

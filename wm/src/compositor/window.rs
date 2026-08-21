@@ -35,7 +35,7 @@ use buoy_wm::wm_core::ids::{OutputId, ViewId};
 use wayland_backend::client::ObjectId;
 use wayland_client::QueueHandle;
 
-use crate::AppData;
+use crate::compositor::manager::AppData;
 use crate::compositor::river::river_node_v1::RiverNodeV1;
 use crate::compositor::river::river_output_v1::RiverOutputV1;
 use crate::compositor::river::river_seat_v1::RiverSeatV1;
@@ -162,8 +162,8 @@ pub(crate) fn output_contains(
 /// sized to fill its output by hand rather than via
 /// `river_window_v1.fullscreen`, so callers need the real
 /// `position`/`dimensions` as well — see
-/// [`crate::WindowManager::recompute_pinned_terminal_geometry`] for why
-/// that is the mechanism.
+/// [`super::manager::WindowManager::recompute_pinned_terminal_geometry`]
+/// for why that is the mechanism.
 pub(crate) fn output_for_id(
     outputs: &HashMap<ObjectId, Output>,
     output_id: OutputId,
@@ -174,15 +174,16 @@ pub(crate) fn output_for_id(
 }
 
 /// The output an action acts on: the id
-/// [`crate::WindowManager::active_output_id`] resolved, plus that output's real
-/// Wayland connector name (e.g. `"eDP-1"`) when it is known.
+/// [`super::manager::WindowManager::active_output_id`] resolved, plus that
+/// output's real Wayland connector name (e.g. `"eDP-1"`) when it is known.
 ///
 /// One parameter rather than two because `name` is derived *from* `id` (via
-/// [`crate::WindowManager::output_name`]), so "a name but no id" is a state that
-/// cannot occur — yet every arm of [`crate::Seat::do_action`] used to receive two
-/// independent `Option`s and defend against it separately (audit finding
-/// J-04). `name` stays optional: it is genuinely unknown during the startup
-/// window before the connector name has arrived.
+/// [`super::manager::WindowManager::output_name`]), so "a name but no id"
+/// is a state that cannot occur — yet every arm of
+/// [`super::seat::Seat::do_action`] used to receive two independent
+/// `Option`s and defend against it separately (audit finding J-04). `name`
+/// stays optional: it is genuinely unknown during the startup window
+/// before the connector name has arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ActiveOutput<'a> {
     pub(crate) id: OutputId,

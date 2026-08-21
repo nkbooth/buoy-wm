@@ -39,12 +39,12 @@ use buoy_wm::wm_core::view::Geometry;
 use wayland_backend::client::ObjectId;
 use wayland_client::{Proxy, QueueHandle};
 
-use crate::AppData;
 use crate::compositor::drag::resize_extents;
 use crate::compositor::launch::{
     spawn_exec, spawn_hotkey_sheet, spawn_launcher, spawn_switch_picker, spawn_tag_picker,
     spawn_terminal,
 };
+use crate::compositor::manager::AppData;
 use crate::compositor::report::notify_user;
 use crate::compositor::river::river_pointer_binding_v1::RiverPointerBindingV1;
 use crate::compositor::river::river_seat_v1::{Modifiers, RiverSeatV1};
@@ -279,9 +279,9 @@ impl Seat {
 
     /// Executes `self.pending_action`, returning `Some(tag_id)` when the
     /// action just switched `active_output` onto `tag_id` — the signal
-    /// [`crate::WindowManager::manage_seats`] uses, after this seat loop ends, to
-    /// ensure that tag's pinned terminal is spawned
-    /// ([`crate::WindowManager::ensure_pinned_terminal_spawned`]).
+    /// [`super::manager::WindowManager::manage_seats`] uses, after this
+    /// seat loop ends, to ensure that tag's pinned terminal is spawned by
+    /// [`super::manager::WindowManager::ensure_pinned_terminal_spawned`].
     ///
     /// Exactly two of the thirteen actions can produce that signal, which is
     /// why they are the only two arms below that return a value; every other
@@ -326,9 +326,10 @@ impl Seat {
     /// `WmCore::closable_focused_view`'s single WM-wide focused view: with
     /// multiple seats the global field can reflect a different seat's focus
     /// by the time this runs (last seat processed in
-    /// [`crate::WindowManager::manage_seats`] wins), which could let the pinned
-    /// terminal be closed via this seat's request even though it isn't this
-    /// seat's real focus, or spuriously block a legitimate close.
+    /// [`super::manager::WindowManager::manage_seats`] wins), which could
+    /// let the pinned terminal be closed via this seat's request even
+    /// though it isn't this seat's real focus, or spuriously block a
+    /// legitimate close.
     fn close_focused(&self, windows: &VecDeque<Window>) {
         let Some(window_proxy) = self.focused.as_ref() else {
             return;
@@ -411,8 +412,9 @@ impl Seat {
     /// `self.hovered` was captured by a `PointerEnter` event that races the
     /// `closed` event dropping the window from `windows`, with no ordering
     /// promised between them — the same outlived-target hazard the
-    /// `'interacted` block in [`crate::WindowManager::manage_seats`] documents. A
-    /// miss loses this drag rather than the session (audit finding F-01).
+    /// `'interacted` block in
+    /// [`super::manager::WindowManager::manage_seats`] documents. A miss
+    /// loses this drag rather than the session (audit finding F-01).
     fn hovered_idle_window<'w>(
         &self,
         windows: &'w VecDeque<Window>,

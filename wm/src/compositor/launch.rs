@@ -43,8 +43,9 @@ use crate::compositor::child::{spawn_tracked, track_child};
 use crate::compositor::report::{log_wm_core_err, notify_user};
 use crate::compositor::window::ActiveOutput;
 
-/// Code review follow-up (Story 2.2, finding #1): resolves the `buoy-tag-picker`
-/// binary's path as a sibling of the WM's own running executable, rather
+/// Code review follow-up (Story 2.2, finding #1): resolves the
+/// `buoy-tag-picker` binary's path as a sibling of the WM's own running
+/// executable, rather
 /// than trusting `$PATH` — nothing in this repo installs the built
 /// `buoy-tag-picker` binary onto `PATH`, and both binaries land in the same
 /// Cargo workspace `target/{profile}/` directory, so `wm_exe`'s parent
@@ -67,8 +68,8 @@ pub(crate) fn tag_picker_path(wm_exe: &Path) -> PathBuf {
 ///
 /// `--layer=overlay`, not the default `top`, renders above a fullscreen
 /// window too (`fuzzel.ini(5)`) — kept as defense-in-depth even though the
-/// pinned terminal no longer uses real protocol fullscreen (see
-/// [`crate::WindowManager::recompute_pinned_terminal_geometry`]).
+/// pinned terminal no longer uses real protocol fullscreen — see
+/// [`super::manager::WindowManager::recompute_pinned_terminal_geometry`].
 ///
 /// `--output=<name>` names the connector this WM resolved as the active
 /// output. Without it `fuzzel` falls back to "let the compositor choose",

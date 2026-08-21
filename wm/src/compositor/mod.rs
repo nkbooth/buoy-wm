@@ -37,6 +37,7 @@
 pub mod child;
 pub mod drag;
 pub mod launch;
+pub mod manager;
 pub mod report;
 pub mod river;
 pub mod seat;
