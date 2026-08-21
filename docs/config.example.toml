@@ -38,8 +38,9 @@ launcher = "fuzzel"
 # The tag created and shown at login when no tag exists yet.
 default_tag = "default"
 # Argv passed to `terminal` to spawn a tag's pinned terminal. `{app_id}` is
-# required — it is how the WM recognizes that window — and `{session}` is
-# replaced with the tag's zellij session name. The default is foot's
+# required — it is how the WM recognizes that window, and which tag it
+# belongs to, and is replaced per tag with `pinned-term-<tag id>` — and
+# `{session}` is replaced with the tag's zellij session name. The default is foot's
 # spelling; most other terminals use `--class` instead of `-a`, e.g.
 #   pinned_terminal_args = ["--class", "{app_id}", "-e", "zellij", "attach", "--create", "{session}"]
 pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]

@@ -284,7 +284,10 @@ pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{sess
 
 Set it alongside `terminal` if your terminal spells the app-id flag
 differently — most use `--class`. `{app_id}` is **required**: it is how the
-WM recognises the pinned window, and its absence is rejected at load.
+WM recognises the pinned window, and its absence is rejected at load. It is
+substituted per tag, as `pinned-term-<tag id>` (for example
+`pinned-term-3`), which is how a mapped window says which tag it belongs to
+rather than the WM having to guess from the order spawns happen to start in.
 `{session}` becomes the tag's zellij session name.
 
 ### Input devices

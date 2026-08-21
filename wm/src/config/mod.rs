@@ -1129,16 +1129,20 @@ mod tests {
         );
     }
 
+    /// `{app_id}` is substituted with the *per-tag* identity the WM
+    /// recognises a pinned terminal by (`pinned-term-<tag id>`, audit
+    /// finding D-02) — the placeholder and its position in the user's argv
+    /// are unchanged, only the value substituted into it.
     #[test]
     fn pinned_terminal_argv_substitutes_both_placeholders() {
         let config = Config::default();
         assert_eq!(
             config
                 .defaults
-                .pinned_terminal_argv("pinned-term", "tag-email"),
+                .pinned_terminal_argv("pinned-term-3", "tag-email"),
             vec![
                 "-a",
-                "pinned-term",
+                "pinned-term-3",
                 "zellij",
                 "attach",
                 "--create",

@@ -100,7 +100,9 @@ mod wm_core;
 
 use config::{Action, Config};
 use wm_core::ids::{OutputId, TagId, ViewId};
-use wm_core::state::{PINNED_TERM_APP_ID, WmCore, WmCoreError};
+use wm_core::state::{
+    WmCore, WmCoreError, is_pinned_term_app_id, pinned_term_app_id, tag_id_from_pinned_app_id,
+};
 use wm_core::view::DEFAULT_FLOATING_GEOMETRY;
 
 /// Logs `result`'s error (if any) as `"{context}: {e:?}"`, otherwise no-ops.
@@ -705,7 +707,12 @@ impl WindowManager {
         for window in self.windows.iter_mut().filter(|w| w.new) {
             let view_id = wm_core.register_view(&window.app_id);
             window.view_id = Some(view_id);
-            if window.app_id == PINNED_TERM_APP_ID {
+            // Story 2.7 Task 2.3, reworked for audit finding D-01(b): the
+            // tag this pinned terminal was spawned for is encoded in its
+            // own `app_id`, so it is recovered here rather than popped from
+            // a queue whose order depended on which of two threads' spawns
+            // happened to map first.
+            if let Some(tag_id) = tag_id_from_pinned_app_id(&window.app_id) {
                 log_wm_core_err(
                     wm_core.set_view_floating(view_id, false),
                     "Failed to set pinned terminal non-floating",
@@ -723,22 +730,14 @@ impl WindowManager {
                 // up rendered *below* it despite their own `place_top()`
                 // call further down in this function (FR4/FR5).
                 window.node.place_bottom();
-                // Story 2.7 Task 2.3: recover which tag this pinned
-                // terminal was spawned for (the protocol gives no way to
-                // know from the mapped window alone - it only carries
-                // `app_id == PINNED_TERM_APP_ID`). Popping from an empty
-                // queue (no corresponding pending spawn) shouldn't happen
-                // given the spawn-then-map ordering, but is handled
-                // gracefully rather than panicking (NFR2): log and leave
-                // the window untagged, which Task 1's bootstrap exception
-                // (`is_view_visible`) keeps visible rather than
-                // permanently hidden.
-                match wm_core.pop_pending_pinned_terminal_tag() {
-                    Some(tag_id) => {
-                        log_wm_core_err(
-                            wm_core.toggle_view_tag(view_id, tag_id),
-                            "Failed to tag newly-mapped pinned terminal",
-                        );
+                // An `app_id` naming a tag that is not registered can only
+                // come from a client spoofing the convention (audit finding
+                // D-02), so it is handled gracefully rather than panicking
+                // (NFR2): log and leave the window untagged, which Task 1's
+                // bootstrap exception (`is_view_visible`) keeps visible
+                // rather than permanently hidden.
+                match wm_core.toggle_view_tag(view_id, tag_id) {
+                    Ok(()) => {
                         // Code review follow-up: no longer uses
                         // `river_window_v1.fullscreen()` (Story 2.7's
                         // original mechanism) - live testing found that a
@@ -773,9 +772,9 @@ impl WindowManager {
                                 .propose_dimensions(output.dimensions.0, output.dimensions.1);
                         }
                     }
-                    None => {
+                    Err(e) => {
                         eprintln!(
-                            "Pinned terminal window mapped with no pending spawn tag queued; leaving untagged"
+                            "Failed to tag newly-mapped pinned terminal onto {tag_id:?}: {e:?}; leaving untagged"
                         );
                         // Code review follow-up (Story 2.7): an untagged
                         // window is shown by `is_view_visible`'s bootstrap
@@ -784,10 +783,9 @@ impl WindowManager {
                         // gives every new window, rather than leaving it
                         // with whatever undefined geometry the compositor
                         // happens to pick — this is a stray window (no
-                        // known caller maps `app_id == PINNED_TERM_APP_ID`
-                        // without going through this WM's own spawn
-                        // tracking), but it must still render sanely if it
-                        // ever occurs.
+                        // pinned terminal this WM spawned names an
+                        // unregistered tag), but it must still render
+                        // sanely if it ever occurs.
                         window
                             .set_position(DEFAULT_FLOATING_GEOMETRY.x, DEFAULT_FLOATING_GEOMETRY.y);
                         window.proxy.propose_dimensions(
@@ -838,9 +836,7 @@ impl WindowManager {
     /// different output (or off every output) regardless of whether that
     /// happened via the raw keybind (`manage_seats`, same manage sequence
     /// as this call) or asynchronously via the IPC-driven picker (picked up
-    /// the next time any manage sequence runs - see
-    /// `WmCore::pending_pinned_terminal_tags`'s doc comment for why that's
-    /// the shared, cross-thread-correct queue).
+    /// the next time any manage sequence runs).
     ///
     /// Code review follow-up: no longer uses `river_window_v1.fullscreen()`
     /// (Story 2.7's original mechanism, renamed from
@@ -856,7 +852,7 @@ impl WindowManager {
     fn recompute_pinned_terminal_geometry(&mut self) {
         let wm_core = ipc::lock_recovering(&self.wm_core);
         for window in self.windows.iter_mut() {
-            if window.app_id != PINNED_TERM_APP_ID {
+            if !is_pinned_term_app_id(&window.app_id) {
                 continue;
             }
             let Some(view_id) = window.view_id else {
@@ -940,7 +936,7 @@ impl WindowManager {
                 &self
                     .config
                     .defaults
-                    .pinned_terminal_argv(PINNED_TERM_APP_ID, &session_name),
+                    .pinned_terminal_argv(&pinned_term_app_id(tag_id), &session_name),
             ),
             Ok(None) => {}
             Err(e) => {
@@ -1194,7 +1190,7 @@ impl WindowManager {
                 {
                     eprintln!("Failed to raise view {view_id:?} in wm_core stacking order: {e:?}");
                 }
-                if window.app_id == PINNED_TERM_APP_ID {
+                if is_pinned_term_app_id(&window.app_id) {
                     // FR4: the pinned terminal must always render at the
                     // bottom of the real z-order, so — unlike every other
                     // window — it must not be pushed to the back of
@@ -1388,7 +1384,8 @@ fn tag_picker_path(wm_exe: &Path) -> PathBuf {
 
 /// Spawns a tag's pinned terminal as `<terminal> <argv...>`, where `argv`
 /// is [`Config::pinned_terminal_argv`]'s already-substituted result — by
-/// default foot's `-a pinned-term zellij attach --create <session>`.
+/// default foot's `-a pinned-term-<tag id> zellij attach --create
+/// <session>`.
 ///
 /// Both the program and its argv are configurable because the flag that
 /// sets a window's app-id is terminal-specific (code-review follow-up:
@@ -1396,7 +1393,8 @@ fn tag_picker_path(wm_exe: &Path) -> PathBuf {
 /// terminal silently, and permanently — the spawn succeeds, the tag is
 /// marked spawned, and the claim is idempotent so it never retries).
 /// `Config::parse` requires the argv to carry `{app_id}`, since
-/// `PINNED_TERM_APP_ID` is how the rest of this WM recognizes the window.
+/// [`pinned_term_app_id`] is how the rest of this WM recognizes the window
+/// and recovers which tag it belongs to.
 ///
 /// Arguments are passed individually to `Command`, never through a shell,
 /// so an arbitrary tag name in the session carries no injection risk.
@@ -1670,7 +1668,7 @@ impl Seat {
                     let is_pinned_terminal = windows
                         .iter()
                         .find(|window| &window.proxy == window_proxy)
-                        .is_some_and(|window| window.app_id == PINNED_TERM_APP_ID);
+                        .is_some_and(|window| is_pinned_term_app_id(&window.app_id));
                     if !is_pinned_terminal {
                         window_proxy.close();
                     }
@@ -1705,7 +1703,7 @@ impl Seat {
                     // `place_top()` reorder (FR4: always bottom) but still
                     // give it real keyboard focus, same direct-focus
                     // pattern click-to-focus uses in `manage_seats`.
-                    if windows[i].app_id == PINNED_TERM_APP_ID {
+                    if is_pinned_term_app_id(&windows[i].app_id) {
                         let window = &windows[i];
                         self.proxy.focus_window(&window.proxy);
                         self.focused = Some(window.proxy.clone());
@@ -1949,7 +1947,7 @@ impl Seat {
                 // path already makes, and the case this scan newly reaches:
                 // before, focus_top could only ever land on `windows.back()`,
                 // which the pinned terminal is never pushed to.
-                if window.app_id != PINNED_TERM_APP_ID {
+                if !is_pinned_term_app_id(&window.app_id) {
                     window.node.place_top();
                 }
                 self.focused = Some(window.proxy.clone());
@@ -2702,13 +2700,13 @@ mod tests {
     }
 
     /// Audit finding D-01: `claim_pinned_terminal_spawn` commits the claim
-    /// before any process exists, so a spawn that never happens leaves the
-    /// tag marked spawned forever *and* a stale correlation entry that
-    /// mis-tags every pinned terminal mapped afterwards. Exercises the real
-    /// failure branch — the terminal path does not exist, so
-    /// `Command::spawn` returns `ENOENT` and no process is created.
+    /// before any process exists, so a spawn that never happens would
+    /// otherwise leave the tag marked spawned forever, with no retry.
+    /// Exercises the real failure branch — the terminal path does not
+    /// exist, so `Command::spawn` returns `ENOENT` and no process is
+    /// created.
     #[test]
-    fn a_failed_pinned_terminal_spawn_releases_the_claim_and_its_queue_entry() {
+    fn a_failed_pinned_terminal_spawn_releases_the_claim() {
         let wm_core = Mutex::new(WmCore::new());
         let tag_id = ipc::lock_recovering(&wm_core).create_tag("web").unwrap();
         let session_name = ipc::lock_recovering(&wm_core)
@@ -2724,11 +2722,6 @@ mod tests {
         );
 
         let mut core = ipc::lock_recovering(&wm_core);
-        assert_eq!(
-            core.pop_pending_pinned_terminal_tag(),
-            None,
-            "a failed spawn left a stale correlation entry behind"
-        );
         assert_eq!(
             core.claim_pinned_terminal_spawn(tag_id),
             Ok(Some("tag-web".to_string())),

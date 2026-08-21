@@ -6,6 +6,21 @@ Notable changes per release. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A tag's pinned terminal is spawned with a per-tag `app_id`,
+  `pinned-term-<tag id>`, instead of the shared `pinned-term` — a mapped
+  window now says which tag it belongs to rather than the WM inferring it
+  from the order spawns happen to start in. `pinned_terminal_args` is
+  unchanged: `{app_id}` is still required, and still the placeholder the
+  value is substituted into.
+
+### Fixed
+
+- A pinned terminal whose spawn failed no longer leaves its tag marked as
+  spawned for the rest of the session, and no longer mis-tags the next
+  pinned terminal that appears.
+
 ## [0.1.0] — first public release
 
 Initial release. Everything below is new.

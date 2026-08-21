@@ -490,7 +490,7 @@ fn handle_connection_inner(
                         pending.tag_id,
                         &defaults.terminal,
                         &defaults.pinned_terminal_argv(
-                            crate::wm_core::state::PINNED_TERM_APP_ID,
+                            &crate::wm_core::state::pinned_term_app_id(pending.tag_id),
                             &pending.session_name,
                         ),
                     );

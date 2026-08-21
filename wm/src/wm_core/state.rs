@@ -20,19 +20,62 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use super::MAX_TAGS;
 use super::ids::{OutputId, TagId, ViewId};
 use super::output::Output;
 use super::tag::{TagRegistry, TagRegistryError};
 use super::tag_set::TagSet;
 use super::view::{Geometry, View};
 
-/// The `app_id` reserved for the lazily-spawned pinned terminal (Story
-/// 1.5 will pass this literal to `foot -a pinned-term`). Views registered
-/// with this `app_id` are never returned by
-/// [`WmCore::closable_focused_view`] — the architectural constraint that
-/// the pinned terminal is never closed via a routed keybind
-/// (`architectural-constraints.md`).
+/// The `app_id` prefix reserved for the lazily-spawned pinned terminals.
+/// Each tag's terminal is spawned with `pinned-term-<tag id>` (see
+/// [`pinned_term_app_id`]), which is how a mapped window is recognised as a
+/// pinned terminal *and* which tag it belongs to. Views recognised this way
+/// are never returned by [`WmCore::closable_focused_view`] — the
+/// architectural constraint that the pinned terminal is never closed via a
+/// routed keybind (`architectural-constraints.md`).
+///
+/// This is a convention, not an authenticated identity (audit finding
+/// D-02): `app_id` arrives from the client via `xdg_toplevel.set_app_id`,
+/// so any same-UID Wayland client can claim one of these strings and
+/// receive the pinned terminal's treatment — unclosable by keybind,
+/// force-lowered, geometry-managed. That is window-management confusion
+/// inside the documented trust boundary, not an escalation, and the
+/// protocol offers nothing better to check it against:
+/// `river_window_v1.unreliable_pid` says in its own description that it
+/// "must not be used for anything security sensitive".
 pub const PINNED_TERM_APP_ID: &str = "pinned-term";
+
+/// The `app_id` a pinned terminal for `tag_id` is spawned with.
+///
+/// The tag is encoded in the identity rather than correlated by spawn order
+/// because the two spawn sites run on different threads and a window maps
+/// whenever its process gets round to it — so position-based correlation
+/// silently swapped two tags' terminals whenever the later spawn won the
+/// race (audit finding D-01(b)).
+pub fn pinned_term_app_id(tag_id: TagId) -> String {
+    format!("{PINNED_TERM_APP_ID}-{}", tag_id.0)
+}
+
+/// The tag a pinned terminal's `app_id` names, or `None` if `app_id` is not
+/// one this WM emits.
+///
+/// Accepts only the exact spelling [`pinned_term_app_id`] produces for a
+/// registrable tag id: `+3`, `03` and `pinned-term-300` are all rejected
+/// rather than folded onto tag 3, so one tag's terminal identity has
+/// exactly one spelling.
+pub fn tag_id_from_pinned_app_id(app_id: &str) -> Option<TagId> {
+    let suffix = app_id.strip_prefix(PINNED_TERM_APP_ID)?.strip_prefix('-')?;
+    let tag_id = TagId(suffix.parse::<u8>().ok()?);
+    (tag_id.0 < MAX_TAGS && pinned_term_app_id(tag_id) == app_id).then_some(tag_id)
+}
+
+/// Whether `app_id` names a pinned terminal — the replacement for the
+/// `app_id == PINNED_TERM_APP_ID` equality test every call site used while
+/// every pinned terminal shared one `app_id`.
+pub fn is_pinned_term_app_id(app_id: &str) -> bool {
+    tag_id_from_pinned_app_id(app_id).is_some()
+}
 
 /// Errors returned by [`WmCore`]'s mutating API. Every variant indicates a
 /// reference to an id that is not currently registered; no `WmCore`
@@ -113,23 +156,6 @@ pub struct WmCore {
     /// vendored `main.rs` `WindowManager.windows: VecDeque<Window>`
     /// convention).
     stacking_order: VecDeque<ViewId>,
-    /// Story 2.7 Task 2: FIFO queue of tag ids for pinned-terminal
-    /// processes that [`WmCore::claim_pinned_terminal_spawn`] has just
-    /// claimed (and thus caused to actually be spawned) but whose window
-    /// has not yet mapped and been correlated back to that tag. Lives
-    /// here rather than in `main.rs`'s `WindowManager` because
-    /// `claim_pinned_terminal_spawn` has two real production call sites on
-    /// two different threads that share only this `WmCore` behind its
-    /// `Arc<Mutex<_>>`: the Wayland-dispatch main thread's keybind path
-    /// (`ensure_pinned_terminal_spawned`) and the IPC server's per-
-    /// connection thread's switch-tag path
-    /// (`ipc::dispatch::handle_request`'s `SwitchTag` arm). A
-    /// `WindowManager`-local queue would silently miss every
-    /// picker-driven switch-mode spawn, since that path never touches
-    /// `WindowManager` at all. `main.rs`'s `init_new_windows` pops FIFO
-    /// via [`WmCore::pop_pending_pinned_terminal_tag`] the next time a
-    /// pinned-terminal window maps.
-    pending_pinned_terminal_tags: VecDeque<TagId>,
 }
 
 impl WmCore {
@@ -413,20 +439,21 @@ impl WmCore {
 
     /// The single atomic "check + claim" decision for the pinned
     /// terminal's lazy-spawn-once invariant: if `tag_id`'s terminal has
-    /// not yet been spawned, marks it spawned, pushes `tag_id` onto the
-    /// internal [`WmCore::pending_pinned_terminal_tags`] queue (Story 2.7
-    /// Task 2 - see that field's doc comment for why the push lives here
-    /// rather than at each call site), and returns
+    /// not yet been spawned, marks it spawned and returns
     /// `Ok(Some("tag-<name>"))` — the zellij session name the caller
-    /// should spawn `foot -a pinned-term zellij attach --create` with. On
-    /// every subsequent call for the same tag, returns `Ok(None)` without
-    /// side effects (including no queue push). Deliberately bundled into
-    /// one method (mirroring `cycle_focus`'s precedent of composing
-    /// several `wm-core`-internal steps into one atomic call) rather than
-    /// exposing separate `tag_terminal_spawned`/`tag_name` queries, so no
-    /// caller can accidentally check without claiming, claim twice, or
-    /// claim without also queueing the correlation entry. Fails with
+    /// should spawn the terminal with, as
+    /// `<terminal> -a <pinned_term_app_id(tag_id)> zellij attach --create
+    /// tag-<name>`. On every subsequent call for the same tag, returns
+    /// `Ok(None)` without side effects. Deliberately bundled into one
+    /// method (mirroring `cycle_focus`'s precedent of composing several
+    /// `wm-core`-internal steps into one atomic call) rather than exposing
+    /// separate `tag_terminal_spawned`/`tag_name` queries, so no caller can
+    /// accidentally check without claiming or claim twice. Fails with
     /// [`WmCoreError::UnknownTag`] for an unregistered id.
+    ///
+    /// The claim is necessarily committed before the process it claims for
+    /// exists, so a caller whose spawn fails must undo it with
+    /// [`WmCore::release_pinned_terminal_claim`].
     // Wired into `main.rs`'s tag-cycle/tag-create keybind path since Story
     // 1.7, via `ensure_pinned_terminal_spawned`; and into
     // `ipc::dispatch::handle_request`'s `SwitchTag` arm since Story 2.4.
@@ -447,49 +474,21 @@ impl WmCore {
         let session_name = format!("tag-{}", tag.name);
         self.mark_terminal_spawned(tag_id)
             .expect("tag_id was just confirmed registered above");
-        self.pending_pinned_terminal_tags.push_back(tag_id);
         Ok(Some(session_name))
     }
 
     /// Rolls back a [`WmCore::claim_pinned_terminal_spawn`] whose spawn
-    /// then failed: clears the tag's `terminal_spawned` flag and removes
-    /// the correlation entry the claim queued.
+    /// then failed, so the tag can claim again.
     ///
-    /// The claim is necessarily committed before the process it claims for
-    /// exists, so without this the two halves of a failed spawn are both
-    /// permanent (audit finding D-01): the tag never retries because the
-    /// claim is idempotent by design, and the stale queue entry is popped
-    /// by the next pinned terminal that maps from a *different* tag,
-    /// mis-tagging it and everything after it. Fails with
-    /// [`WmCoreError::UnknownTag`] for an unregistered id.
+    /// Without this a failed spawn is permanent (audit finding D-01): the
+    /// tag never retries, because the claim is idempotent by design. Fails
+    /// with [`WmCoreError::UnknownTag`] for an unregistered id.
     // Called from `main.rs`'s `spawn_pinned_terminal_or_release_claim`, the
     // one place that knows whether the spawn actually happened.
     pub fn release_pinned_terminal_claim(&mut self, tag_id: TagId) -> Result<(), WmCoreError> {
         self.tags
             .unmark_terminal_spawned(tag_id)
-            .map_err(|_| WmCoreError::UnknownTag)?;
-        // The claim pushed to the back, and a claim is idempotent, so at
-        // most one entry for this tag exists and it is the newest.
-        if let Some(index) = self
-            .pending_pinned_terminal_tags
-            .iter()
-            .rposition(|&queued| queued == tag_id)
-        {
-            self.pending_pinned_terminal_tags.remove(index);
-        }
-        Ok(())
-    }
-
-    /// Pops the next pending pinned-terminal tag association, FIFO (Story
-    /// 2.7 Task 2's other half of the correlation mechanism started by
-    /// [`WmCore::claim_pinned_terminal_spawn`]). `main.rs`'s
-    /// `init_new_windows` calls this exactly when a window with `app_id ==
-    /// PINNED_TERM_APP_ID` maps, to recover which tag it was spawned for.
-    /// Returns `None` if the queue is empty - defensively handled by the
-    /// caller (NFR2: log and leave the window untagged), not expected in
-    /// practice given spawn-then-map ordering.
-    pub fn pop_pending_pinned_terminal_tag(&mut self) -> Option<TagId> {
-        self.pending_pinned_terminal_tags.pop_front()
+            .map_err(|_| WmCoreError::UnknownTag)
     }
 
     /// Returns the stacking/render order, front-to-back (front=bottom,
@@ -509,7 +508,7 @@ impl WmCore {
 
     /// Moves an already-registered view to the back (top) of the stacking
     /// order. A no-op success (state unchanged) for the pinned terminal
-    /// (`app_id == PINNED_TERM_APP_ID`): FR4 requires it always be
+    /// (recognised by [`is_pinned_term_app_id`]): FR4 requires it always be
     /// rendered at the bottom of the render order, and both of `main.rs`'s
     /// reordering call sites — `cycle_focus` (via `Action::FocusNext`) and
     /// click-to-focus (`manage_seats`'s `interacted` handling) — route
@@ -521,7 +520,7 @@ impl WmCore {
     /// [`WmCoreError::UnknownView`] for an unregistered id.
     pub fn raise_view(&mut self, id: ViewId) -> Result<(), WmCoreError> {
         let view = self.views.get(&id).ok_or(WmCoreError::UnknownView)?;
-        if view.app_id == PINNED_TERM_APP_ID {
+        if is_pinned_term_app_id(&view.app_id) {
             return Ok(());
         }
         self.stacking_order.retain(|&v| v != id);
@@ -545,7 +544,7 @@ impl WmCore {
     }
 
     /// Returns the currently-focused view's id, unless it is the pinned
-    /// terminal (`app_id == PINNED_TERM_APP_ID`) or nothing is focused. A
+    /// terminal (recognised by [`is_pinned_term_app_id`]) or nothing is focused. A
     /// pure decision query, not a close operation — the actual close
     /// request and eventual `unregister_view` still happen separately,
     /// driven by the compositor's own `Closed` event. Never panics
@@ -563,7 +562,7 @@ impl WmCore {
     pub fn closable_focused_view(&self) -> Option<ViewId> {
         let id = self.focused_view?;
         let view = self.views.get(&id)?;
-        (view.app_id != PINNED_TERM_APP_ID).then_some(id)
+        (!is_pinned_term_app_id(&view.app_id)).then_some(id)
     }
 
     /// Cycles keyboard focus to the next view in stacking order (FR12):
@@ -606,7 +605,7 @@ impl WmCore {
         let target = self.stacking_order.iter().copied().find(|&id| {
             self.views
                 .get(&id)
-                .is_some_and(|view| view.app_id != PINNED_TERM_APP_ID)
+                .is_some_and(|view| !is_pinned_term_app_id(&view.app_id))
                 && self.is_view_visible(id).unwrap_or(false)
         })?;
         self.raise_view(target)
@@ -821,7 +820,9 @@ impl WmCore {
 #[cfg(test)]
 mod tests {
     use super::super::ids::OutputId;
-    use super::{PINNED_TERM_APP_ID, WmCore, WmCoreError};
+    use super::{
+        WmCore, WmCoreError, is_pinned_term_app_id, pinned_term_app_id, tag_id_from_pinned_app_id,
+    };
     use crate::wm_core::ids::{TagId, ViewId};
     use crate::wm_core::view::{DEFAULT_FLOATING_GEOMETRY, Geometry};
 
@@ -1578,7 +1579,7 @@ mod tests {
     #[test]
     fn raise_view_is_a_no_op_for_the_pinned_terminal() {
         let mut core = WmCore::new();
-        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
         let other = core.register_view("app-one");
         assert_eq!(core.stacking_order(), vec![pinned, other]);
         core.raise_view(pinned).unwrap();
@@ -1596,7 +1597,7 @@ mod tests {
     #[test]
     fn cycle_focus_does_not_move_pinned_terminal_from_bottom_of_stacking_order() {
         let mut core = WmCore::new();
-        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
         let other = core.register_view("app-one");
         core.lower_view(pinned).unwrap();
         assert_eq!(core.stacking_order(), vec![pinned, other]);
@@ -1621,7 +1622,7 @@ mod tests {
     #[test]
     fn cycle_focus_skips_pinned_terminal_and_round_robins_through_others() {
         let mut core = WmCore::new();
-        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
         let a = core.register_view("a");
         let b = core.register_view("b");
         core.lower_view(pinned).unwrap();
@@ -1653,7 +1654,7 @@ mod tests {
     #[test]
     fn cycle_focus_returns_none_when_only_pinned_terminal_registered() {
         let mut core = WmCore::new();
-        core.register_view(PINNED_TERM_APP_ID);
+        core.register_view(&pinned_term_app_id(TagId(0)));
         assert_eq!(core.cycle_focus(), None);
     }
 
@@ -1699,7 +1700,7 @@ mod tests {
         let output_id = core.register_output();
         core.switch_tag(output_id, visible_tag).unwrap();
 
-        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
         core.toggle_view_tag(pinned, visible_tag).unwrap();
         core.lower_view(pinned).unwrap();
         let hidden = core.register_view("hidden-app");
@@ -1763,7 +1764,7 @@ mod tests {
         core.switch_tag(this_output, here).unwrap();
         core.switch_tag(other_output, elsewhere).unwrap();
 
-        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
         core.toggle_view_tag(pinned, here).unwrap();
         core.lower_view(pinned).unwrap();
         let other = core.register_view("app-one");
@@ -1853,7 +1854,7 @@ mod tests {
         let output_id = core.register_output();
         core.switch_tag(output_id, visible_tag).unwrap();
 
-        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
         core.toggle_view_tag(pinned, visible_tag).unwrap();
         core.lower_view(pinned).unwrap();
         let hidden = core.register_view("app-one");
@@ -1874,7 +1875,7 @@ mod tests {
         let output_id = core.register_output();
         core.switch_tag(output_id, shown_tag).unwrap();
 
-        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
         core.toggle_view_tag(pinned, hidden_tag).unwrap();
         core.lower_view(pinned).unwrap();
         let hidden = core.register_view("app-one");
@@ -2014,7 +2015,7 @@ mod tests {
     #[test]
     fn closable_focused_view_returns_none_for_pinned_terminal_app_id() {
         let mut core = WmCore::new();
-        let view_id = core.register_view(PINNED_TERM_APP_ID);
+        let view_id = core.register_view(&pinned_term_app_id(TagId(0)));
         core.set_focus(view_id).unwrap();
         assert_eq!(core.closable_focused_view(), None);
     }
@@ -2032,7 +2033,7 @@ mod tests {
         );
 
         let mut core = WmCore::new();
-        let pinned = core.register_view(PINNED_TERM_APP_ID);
+        let pinned = core.register_view(&pinned_term_app_id(TagId(0)));
         core.set_focus(pinned).unwrap();
         let snapshot = core.clone();
         assert_eq!(core.closable_focused_view(), None);
@@ -2423,11 +2424,10 @@ mod tests {
     }
 
     // Story 2.7 Task 5 RED: `view_tags` is the pure query
-    // `main.rs`'s pinned-terminal fullscreen-recompute pass uses to
-    // recover which tag a pinned terminal was associated with (Task 2's
-    // `pending_pinned_terminal_tags` queue only carries the association at
-    // mapping time - after that, `wm-core`'s own tag membership is the
-    // source of truth).
+    // `main.rs`'s pinned-terminal geometry-recompute pass uses to recover
+    // which tag a pinned terminal was associated with (the window's own
+    // `app_id` carries that association only at mapping time - after that,
+    // `wm-core`'s own tag membership is the source of truth).
 
     #[test]
     fn view_tags_returns_empty_vec_for_untagged_view() {
@@ -2480,65 +2480,48 @@ mod tests {
         assert_eq!(core.output_current_tag(bogus_output), None);
     }
 
-    // Story 2.7 Task 2 RED: `claim_pinned_terminal_spawn` must push the
-    // claimed tag id onto an internal FIFO queue, and
-    // `pop_pending_pinned_terminal_tag` must pop it back off - the
-    // correlation mechanism `main.rs`'s `init_new_windows` uses to tag a
-    // freshly-mapped pinned-terminal window with the tag it was spawned
-    // for. Lives in `WmCore` (not `main.rs`'s `WindowManager`) because
-    // `claim_pinned_terminal_spawn` has two real callers on two different
-    // threads (see the field's own doc comment).
-
+    /// Audit finding D-02/D-01(b): a pinned terminal's window carries its
+    /// tag in its own `app_id`, so correlation no longer depends on the
+    /// order two threads' spawns happen to map in.
     #[test]
-    fn pop_pending_pinned_terminal_tag_returns_none_when_queue_empty() {
-        let mut core = WmCore::new();
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
+    fn pinned_term_app_id_round_trips_through_tag_id_from_pinned_app_id() {
+        for raw in [0u8, 1, 7, 63] {
+            let tag_id = TagId(raw);
+            let app_id = pinned_term_app_id(tag_id);
+            assert_eq!(tag_id_from_pinned_app_id(&app_id), Some(tag_id));
+            assert!(is_pinned_term_app_id(&app_id));
+        }
     }
 
     #[test]
-    fn claim_pinned_terminal_spawn_pushes_tag_onto_pending_queue_on_first_claim() {
-        let mut core = WmCore::new();
-        let tag_id = core.create_tag("web").unwrap();
-        core.claim_pinned_terminal_spawn(tag_id).unwrap();
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_id));
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
+    fn pinned_term_app_ids_are_distinct_per_tag() {
+        assert_ne!(pinned_term_app_id(TagId(0)), pinned_term_app_id(TagId(1)));
     }
 
+    /// Only the exact form this WM emits is recognised: everything else is
+    /// an ordinary window, including the bare prefix, a non-canonical
+    /// spelling of a number, and an id no tag can ever have.
     #[test]
-    fn claim_pinned_terminal_spawn_idempotent_second_call_does_not_push_again() {
-        let mut core = WmCore::new();
-        let tag_id = core.create_tag("web").unwrap();
-        core.claim_pinned_terminal_spawn(tag_id).unwrap();
-        core.claim_pinned_terminal_spawn(tag_id).unwrap();
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_id));
-        assert_eq!(
-            core.pop_pending_pinned_terminal_tag(),
-            None,
-            "an idempotent no-op second claim must not push a second queue entry"
-        );
-    }
-
-    #[test]
-    fn claim_pinned_terminal_spawn_unknown_tag_does_not_push_to_pending_queue() {
-        let mut core = WmCore::new();
-        let bogus_tag = TagId(63);
-        assert_eq!(
-            core.claim_pinned_terminal_spawn(bogus_tag),
-            Err(WmCoreError::UnknownTag)
-        );
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
-    }
-
-    #[test]
-    fn pending_pinned_terminal_tags_pop_in_fifo_order_across_multiple_claims() {
-        let mut core = WmCore::new();
-        let tag_a = core.create_tag("a").unwrap();
-        let tag_b = core.create_tag("b").unwrap();
-        core.claim_pinned_terminal_spawn(tag_a).unwrap();
-        core.claim_pinned_terminal_spawn(tag_b).unwrap();
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_a));
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_b));
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
+    fn tag_id_from_pinned_app_id_rejects_everything_but_the_canonical_form() {
+        for app_id in [
+            "foot",
+            "pinned-term",
+            "pinned-term-",
+            "pinned-term-x",
+            "pinned-term-03",
+            "pinned-term-+3",
+            "pinned-term-1-2",
+            "pinned-term-64",
+            "pinned-term-300",
+            "Xpinned-term-1",
+        ] {
+            assert_eq!(
+                tag_id_from_pinned_app_id(app_id),
+                None,
+                "{app_id:?} was accepted as a pinned terminal"
+            );
+            assert!(!is_pinned_term_app_id(app_id));
+        }
     }
 
     /// Audit finding D-01: the claim is committed before any process
@@ -2554,21 +2537,6 @@ mod tests {
             core.claim_pinned_terminal_spawn(tag_id),
             Ok(Some("tag-web".to_string()))
         );
-    }
-
-    /// Audit finding D-01's second half: a released claim that left its
-    /// correlation entry behind mis-tags the *next* pinned terminal that
-    /// maps, and every one after it, permanently.
-    #[test]
-    fn release_pinned_terminal_claim_removes_the_stale_correlation_entry() {
-        let mut core = WmCore::new();
-        let failed = core.create_tag("failed").unwrap();
-        let next = core.create_tag("next").unwrap();
-        core.claim_pinned_terminal_spawn(failed).unwrap();
-        core.release_pinned_terminal_claim(failed).unwrap();
-        core.claim_pinned_terminal_spawn(next).unwrap();
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(next));
-        assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
     }
 
     #[test]
