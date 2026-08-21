@@ -258,6 +258,18 @@ keybinds, which may be a keymap you have not used in months. Refusing to
 start would leave you in a session with no way to reach the file and fix it,
 so the WM starts either way.
 
+Two more refusals are about the file rather than its contents: buoy reads at
+most 1 MiB of it, and it must be a regular file — a directory or a FIFO at
+that path is reported instead of read, because a read that never returns is a
+login that never completes.
+
+This file is as trusted as `~/.bashrc`: an `{ exec = "..." }` binding runs
+through `sh -c` in your session. So if it is group- or world-**writable**, or
+owned by another user, buoy loads it anyway and tells you — the same warning
+bash gives a world-writable profile. `chmod 600 ~/.config/buoy/config.toml`
+clears it. The default `644` is fine; who can *read* the file is not the
+concern.
+
 Both cases raise a desktop notification naming the file and the problem, and
 log it. To read the log:
 

@@ -2942,14 +2942,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "the config file".to_string());
     app_data.wm.config = match Config::load() {
-        Ok((config, skipped)) => {
-            if let Some(error) = config::ConfigError::from_many(skipped) {
+        Ok(loaded) => {
+            // Reported separately from the skipped entries, and first: the
+            // file was used in full either way, so folding the two into one
+            // notification would read as though the mode had cost the user
+            // a binding (audit finding C-08).
+            if let Some(problem) = loaded.trust_problem {
+                notify_user(&format!("{config_path}: {problem}"));
+            }
+            if let Some(error) = config::ConfigError::from_many(loaded.skipped) {
                 notify_user(&format!(
                     "{config_path}: {error}\nThose entries were skipped; \
                      everything else in the file is in effect."
                 ));
             }
-            config
+            loaded.config
         }
         Err(e) => {
             notify_user(&format!(

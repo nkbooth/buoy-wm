@@ -28,6 +28,9 @@ pub mod keysym;
 use serde::Deserialize;
 use std::ffi::OsStr;
 use std::fmt;
+use std::io::Read;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// A modifier key a binding can require.
@@ -373,6 +376,11 @@ pub enum ConfigError {
     DuplicateInput(String),
     /// An `accel_speed` outside libinput's `-1.0..=1.0`.
     AccelSpeedOutOfRange(f64),
+    /// The file is bigger than [`MAX_CONFIG_BYTES`].
+    TooLarge,
+    /// The config path is a directory, a FIFO, a device — anything whose
+    /// read would not simply return the file's bytes.
+    NotARegularFile,
     Io(std::io::Error),
     /// More than one offending entry in the same file. Reported together
     /// so four independent mistakes take one edit-and-restart cycle
@@ -447,6 +455,14 @@ impl fmt::Display for ConfigError {
                 f,
                 "[[input]] `accel_speed` is {speed}, outside libinput's \
                  -1.0..=1.0 range"
+            ),
+            ConfigError::TooLarge => write!(
+                f,
+                "the config file is larger than the 1 MiB buoy-wm will read"
+            ),
+            ConfigError::NotARegularFile => write!(
+                f,
+                "the config path is not a regular file, so it was not read"
             ),
             ConfigError::Io(e) => write!(f, "{e}"),
             ConfigError::Multiple(errors) => {
@@ -588,6 +604,108 @@ struct RawDefaults {
     pinned_terminal_args: Option<Vec<String>>,
 }
 
+/// The most this module will read from a config file.
+///
+/// river `exec`s `buoy-wm` as the login session leader, so an unbounded
+/// read — plus the further multiple of it the TOML parser allocates — makes
+/// an accidentally enormous file a login loop rather than a recoverable
+/// error (audit finding C-07). A megabyte is roughly two thousand times the
+/// shipped example. Mirrors
+/// [`MAX_LINE_BYTES`](buoy_common::framing::MAX_LINE_BYTES), which bounds
+/// the other place untrusted-length input reaches this process.
+pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// Why a config file's ownership or mode makes it a risk, given that it
+/// grants arbitrary command execution through `{ exec = "..." }`.
+///
+/// This is a warning, never a refusal: refusing means running with the
+/// built-in keybinds, and a user locked out of the keymap they actually use
+/// is worse off than one who was told to run `chmod` (audit finding C-08).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigTrustProblem {
+    /// Group or others may write the file, so any local user in that set
+    /// can add an `exec` binding to this session. Deliberately *not*
+    /// triggered by readability: `644` is what an ordinary editor save or
+    /// dotfile-manager apply produces, and warning about it would train the
+    /// user to ignore the case that matters.
+    WritableByOthers { mode: u32 },
+    /// The file belongs to a different user, so its contents are that
+    /// user's to change and this one cannot even fix the mode.
+    ForeignOwner { file_uid: u32, effective_uid: u32 },
+}
+
+impl fmt::Display for ConfigTrustProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigTrustProblem::WritableByOthers { mode } => write!(
+                f,
+                "the config file's mode is {mode:04o}, so another local user \
+                 can write it — and an `exec` binding runs whatever they put \
+                 there in your session. Run `chmod 600` on it. It was loaded \
+                 anyway."
+            ),
+            ConfigTrustProblem::ForeignOwner {
+                file_uid,
+                effective_uid,
+            } => write!(
+                f,
+                "the config file belongs to uid {file_uid}, not to the uid \
+                 running buoy-wm ({effective_uid}), so its `exec` bindings \
+                 are that user's to change. It was loaded anyway."
+            ),
+        }
+    }
+}
+
+/// Whether `mode` and `file_uid` make a config file untrustworthy for the
+/// user identified by `effective_uid`.
+///
+/// Split from the file I/O so the decision is testable without a second
+/// user account and without root — the same split
+/// [`accept_peer`](buoy_common::peer::accept_peer) uses.
+///
+/// Only the `0o022` bits are examined. Bash refuses a world-writable
+/// `~/.bashrc` and ssh a group-writable key for this reason; neither cares
+/// who can *read* it, and neither does this.
+pub fn config_trust_problem(
+    mode: u32,
+    file_uid: u32,
+    effective_uid: u32,
+) -> Option<ConfigTrustProblem> {
+    if file_uid != effective_uid {
+        return Some(ConfigTrustProblem::ForeignOwner {
+            file_uid,
+            effective_uid,
+        });
+    }
+    if mode & 0o022 != 0 {
+        return Some(ConfigTrustProblem::WritableByOthers {
+            mode: mode & 0o7777,
+        });
+    }
+    None
+}
+
+/// A config file that was read: what it says, what in it was skipped, and
+/// anything about the file itself that the user should know.
+///
+/// A struct rather than a tuple because the two lists mean different things
+/// to the caller — `skipped` entries were dropped from `config`, while
+/// `trust_problem` cost nothing and changed nothing — and a caller reading
+/// `(config, a, b)` at the call site cannot tell which is which.
+#[derive(Debug)]
+pub struct LoadedConfig {
+    /// The configuration to run with. Never partial: an entry that was
+    /// skipped is absent, and everything else in the file applies.
+    pub config: Config,
+    /// One error per `[[keybind]]`, `[[mousebind]]` or `[[input]]` entry
+    /// that was skipped.
+    pub skipped: Vec<ConfigError>,
+    /// Set when the file's own ownership or mode is a risk (audit finding
+    /// C-08). Independent of `skipped`: the file was used either way.
+    pub trust_problem: Option<ConfigTrustProblem>,
+}
+
 impl Config {
     /// Parses config file contents, rejecting the file if anything in it
     /// is wrong.
@@ -727,22 +845,74 @@ impl Config {
     /// when it doesn't exist — running without a config file is the
     /// expected case, not an error.
     ///
-    /// Returns the config together with one error per entry that was
-    /// skipped, so the caller can put them in front of the user. `Err`
-    /// means the file could not be used at all: unreadable, not valid
-    /// TOML, or a bad `[defaults]` value.
-    pub fn load() -> Result<(Self, Vec<ConfigError>), ConfigError> {
+    /// `Err` means the file could not be used at all: unreadable, larger
+    /// than [`MAX_CONFIG_BYTES`], not a regular file, not valid TOML, or a
+    /// bad `[defaults]` value.
+    pub fn load() -> Result<LoadedConfig, ConfigError> {
         let Some(path) = config_path() else {
-            return Ok((Config::default(), Vec::new()));
+            return Ok(LoadedConfig {
+                config: Config::default(),
+                skipped: Vec::new(),
+                trust_problem: None,
+            });
         };
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => Config::parse_lenient(&contents),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Ok((Config::default(), Vec::new()))
-            }
-            Err(e) => Err(ConfigError::Io(e)),
-        }
+        Config::load_from(&path)
     }
+
+    /// [`Config::load`] against an explicit path, so the
+    /// missing-versus-oversized-versus-unparseable trichotomy is testable
+    /// without touching the real `~/.config` (audit finding T-01).
+    pub fn load_from(path: &Path) -> Result<LoadedConfig, ConfigError> {
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadedConfig {
+                    config: Config::default(),
+                    skipped: Vec::new(),
+                    trust_problem: None,
+                });
+            }
+            Err(e) => return Err(ConfigError::Io(e)),
+        };
+        let metadata = file.metadata().map_err(ConfigError::Io)?;
+        // Checked before the read, not after: reading a FIFO or a
+        // character device blocks forever, and this process is the login
+        // session leader, so a read that never returns is a login that
+        // never completes (audit finding C-07).
+        if !metadata.file_type().is_file() {
+            return Err(ConfigError::NotARegularFile);
+        }
+        let contents = read_bounded(file)?;
+        let trust_problem = config_trust_problem(
+            metadata.permissions().mode(),
+            metadata.uid(),
+            buoy_common::peer::own_uid(),
+        );
+        let (config, skipped) = Config::parse_lenient(&contents)?;
+        Ok(LoadedConfig {
+            config,
+            skipped,
+            trust_problem,
+        })
+    }
+}
+
+/// Reads at most [`MAX_CONFIG_BYTES`] from `file`, refusing anything
+/// longer rather than reading it.
+///
+/// `take(MAX_CONFIG_BYTES + 1)` rather than a `metadata().len()` check:
+/// the length a `stat` reports is not what a subsequent read returns for
+/// anything that is growing while it is read, and the bound has to hold
+/// against the bytes actually delivered.
+fn read_bounded(file: std::fs::File) -> Result<String, ConfigError> {
+    let mut contents = String::new();
+    std::io::Read::take(file, MAX_CONFIG_BYTES + 1)
+        .read_to_string(&mut contents)
+        .map_err(ConfigError::Io)?;
+    if contents.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(ConfigError::TooLarge);
+    }
+    Ok(contents)
 }
 
 /// The rules one `[[keybind]]` has to satisfy, in the order a reader would
@@ -1095,6 +1265,194 @@ tap = true
         assert_eq!(skipped.len(), 1);
         assert_eq!(config.inputs.len(), 1);
         assert_eq!(config.inputs[0].name, "good");
+    }
+
+    // --- Reading the file (audit findings C-07 and C-08) ---------------
+
+    /// A temporary directory to write config files into, removed when the
+    /// guard drops so a failing assertion does not litter `/tmp`. Same
+    /// shape as `buoy_common::socket_path`'s test-local guard; there is no
+    /// shared test-support target to hold one copy until this crate has a
+    /// `[lib]` (audit finding T-04).
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("buoy-config-{label}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create test directory");
+            Self(path)
+        }
+
+        /// Writes `contents` to a config file in this directory with an
+        /// explicit mode, and returns its path.
+        fn write_config(&self, contents: &str, mode: u32) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.0.join("config.toml");
+            std::fs::write(&path, contents).expect("write test config");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                .expect("set test config mode");
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const A_MINIMAL_CONFIG: &str =
+        "[[keybind]]\nmod = [\"super\"]\nkey = \"z\"\naction = \"close\"\n";
+
+    #[test]
+    fn a_missing_config_file_is_not_an_error() {
+        let dir = TempDir::new("missing");
+        let loaded = Config::load_from(&dir.0.join("config.toml"))
+            .expect("running with no config file is the expected case");
+        assert_eq!(loaded.config, Config::default());
+        assert!(loaded.skipped.is_empty());
+        assert_eq!(loaded.trust_problem, None);
+    }
+
+    /// Audit finding C-07: river `exec`s this binary as the session
+    /// leader, so an unbounded read plus the parser's own allocation makes
+    /// a runaway generator or a mistyped redirect a login loop rather than
+    /// a recoverable error.
+    #[test]
+    fn a_config_file_over_the_size_cap_is_refused_before_it_is_parsed() {
+        let dir = TempDir::new("oversize");
+        let mut contents = String::from("# padding\n");
+        while contents.len() as u64 <= MAX_CONFIG_BYTES {
+            contents.push_str("# padding padding padding padding padding padding\n");
+        }
+        let path = dir.write_config(&contents, 0o600);
+        let error = Config::load_from(&path).expect_err("an oversized file must be refused");
+        assert!(matches!(error, ConfigError::TooLarge));
+        assert!(error.to_string().contains("1 MiB"), "got: {error}");
+    }
+
+    /// The cap is a cap, not a rejection of large-but-plausible files: a
+    /// heavily commented config right below it still loads.
+    #[test]
+    fn a_config_file_just_under_the_size_cap_still_loads() {
+        let dir = TempDir::new("just-under");
+        let mut contents = String::from(A_MINIMAL_CONFIG);
+        let filler = "# padding padding padding padding padding padding\n";
+        while (contents.len() + filler.len()) as u64 <= MAX_CONFIG_BYTES {
+            contents.push_str(filler);
+        }
+        let path = dir.write_config(&contents, 0o600);
+        let loaded = Config::load_from(&path).expect("a file under the cap must still load");
+        assert_eq!(loaded.config.keybinds.len(), 1);
+        assert_eq!(loaded.config.keybinds[0].key, "z");
+    }
+
+    /// A FIFO or a character device at the config path would otherwise
+    /// block the read forever, which for the session leader is a login
+    /// that never completes — strictly worse than falling back to the
+    /// built-in defaults. A directory is the same rejection with no
+    /// `mkfifo` needed.
+    #[test]
+    fn a_config_path_that_is_not_a_regular_file_is_refused() {
+        let dir = TempDir::new("not-a-file");
+        let path = dir.0.join("config.toml");
+        std::fs::create_dir(&path).expect("create a directory at the config path");
+        let error = Config::load_from(&path).expect_err("a non-regular file must be refused");
+        assert!(matches!(error, ConfigError::NotARegularFile));
+    }
+
+    /// **The compatibility case.** A `644` config is what an ordinary
+    /// `install`, editor save or `chezmoi apply` produces, and it is what
+    /// the author's own machine has. Audit finding C-08 is about
+    /// *writability* by other users, so a world-readable config must load
+    /// with nothing said about it — a warning here would train the user to
+    /// ignore the one that matters.
+    #[test]
+    fn a_mode_644_config_loads_with_no_warning() {
+        let dir = TempDir::new("mode-644");
+        let path = dir.write_config(A_MINIMAL_CONFIG, 0o644);
+        let loaded = Config::load_from(&path).expect("a 644 config must load");
+        assert_eq!(loaded.trust_problem, None);
+        assert_eq!(loaded.config.keybinds.len(), 1);
+        assert_eq!(loaded.config.keybinds[0].key, "z");
+    }
+
+    /// Audit finding C-08: this file grants arbitrary command execution
+    /// through `{ exec = "..." }`, so a group- or world-writable one is a
+    /// persistent foothold for any other local user. Warned about rather
+    /// than refused, because refusing means falling back to built-in
+    /// keybinds — a user locked out of the keymap they actually use is a
+    /// worse outcome than one told to run `chmod`.
+    #[test]
+    fn a_group_writable_config_is_still_loaded_but_warned_about() {
+        let dir = TempDir::new("group-writable");
+        let path = dir.write_config(A_MINIMAL_CONFIG, 0o664);
+        let loaded = Config::load_from(&path).expect("the file is still used");
+        assert_eq!(
+            loaded.trust_problem,
+            Some(ConfigTrustProblem::WritableByOthers { mode: 0o664 })
+        );
+        assert_eq!(
+            loaded.config.keybinds.len(),
+            1,
+            "the warning must not cost the user their keybinds"
+        );
+    }
+
+    /// The decision, tabulated: only the `0o022` bits matter. Readability
+    /// is not a finding, and neither is any owner permission.
+    #[test]
+    fn only_write_permission_for_group_or_others_is_a_trust_problem() {
+        let own_uid = 1000;
+        for mode in [0o600, 0o640, 0o644, 0o444, 0o700, 0o755, 0o400] {
+            assert_eq!(
+                config_trust_problem(mode, own_uid, own_uid),
+                None,
+                "mode {mode:o} grants no write access to another user"
+            );
+        }
+        for mode in [0o620, 0o602, 0o622, 0o664, 0o646, 0o666, 0o777] {
+            assert_eq!(
+                config_trust_problem(mode, own_uid, own_uid),
+                Some(ConfigTrustProblem::WritableByOthers { mode }),
+                "mode {mode:o} lets another user rewrite the file"
+            );
+        }
+    }
+
+    /// A file this user cannot even fix is reported whatever its mode:
+    /// `root`-owned with `0644` is a config the session leader executes
+    /// and the session's own user cannot edit.
+    #[test]
+    fn a_config_owned_by_another_user_is_a_trust_problem_whatever_its_mode() {
+        assert_eq!(
+            config_trust_problem(0o644, 0, 1000),
+            Some(ConfigTrustProblem::ForeignOwner {
+                file_uid: 0,
+                effective_uid: 1000,
+            })
+        );
+        assert_eq!(config_trust_problem(0o644, 1000, 1000), None);
+    }
+
+    /// The message is the whole point of warning rather than refusing, so
+    /// it has to name the mode and the command that fixes it.
+    #[test]
+    fn a_trust_warning_names_the_mode_and_how_to_fix_it() {
+        let writable = ConfigTrustProblem::WritableByOthers { mode: 0o664 }.to_string();
+        assert!(writable.contains("664"), "got: {writable}");
+        assert!(writable.contains("chmod"), "got: {writable}");
+        let foreign = ConfigTrustProblem::ForeignOwner {
+            file_uid: 0,
+            effective_uid: 1000,
+        }
+        .to_string();
+        assert!(foreign.contains("uid 0"), "got: {foreign}");
+        assert!(foreign.contains("1000"), "got: {foreign}");
     }
 
     /// A `[defaults]` mistake is not skippable: there is no "this entry"

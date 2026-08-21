@@ -61,7 +61,11 @@ gain anything it did not already have as your user.
 **`exec` keybinds run arbitrary commands, from your own config file.** The
 `{ exec = "..." }` action runs through `sh -c` with full shell semantics.
 `~/.config/buoy/config.toml` is therefore as trusted as your shell profile.
-Do not source one from an untrusted place.
+Do not source one from an untrusted place. Since 0.1, that expectation is
+also checked rather than merely stated: a config file that is group- or
+world-writable, or owned by another user, is loaded but reported, the way
+bash reports a world-writable profile. Only writability is checked — `644`
+is a normal, accepted mode.
 
 **A malformed config does not stop startup.** `buoy` reports the error on
 stderr and falls back to built-in defaults. This is a deliberate
