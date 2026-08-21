@@ -63,6 +63,20 @@ Notable changes per release. Format follows
   `buoy-tag-picker` — which had no socket deadline at all — applies a
   five-second read and write timeout.
 
+- `pinned_terminals = false` in `[defaults]` turns pinned terminals off
+  entirely — the supported way out for a user whose terminal or `zellij` is
+  broken, in the one subsystem of the process that *is* your session which
+  launches another program. Setting `pinned_terminal_args = []` looked like
+  that switch and was in fact a `[defaults]` error, which discards the whole
+  file; it is still rejected, but now says so and names the real switch.
+- A config file that is group- or world-**writable**, or owned by another
+  user, is now loaded *and* reported — the same warning bash gives a
+  world-writable profile, for a file whose `exec` bindings run in your
+  session. Readability is not checked: the usual `644` stays silent.
+- The config file is read with a 1 MiB bound and must be a regular file. An
+  accidentally enormous file, or a FIFO at that path, used to be an
+  out-of-memory or an unfinishable login rather than a reported problem.
+
 - Tag names are validated where they enter the registry: non-empty and not
   whitespace-only, at most 64 bytes, not a bare `.` or `..`, and free of `/`,
   `\` and control characters. A rejected name is reported as
@@ -114,6 +128,11 @@ Notable changes per release. Format follows
   first was acted on is now reported instead of vanishing.
 - A failed response write is logged unless it is just the peer having hung
   up.
+- `mod` and `button` values are now spelled in lowercase like every other
+  config value — `mod = ["super"]`, `button = "left"`. **Nothing breaks:**
+  every previously documented spelling (`"Super"`, `"Mod4"`, `"Control"`,
+  `"Left"`, …) is still accepted and always will be, so an existing config
+  needs no edit.
 
 ## [0.1.0] — first public release
 
