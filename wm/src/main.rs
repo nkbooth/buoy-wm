@@ -135,6 +135,31 @@ fn wenum_label<T: Debug>(value: wayland_client::WEnum<T>) -> String {
     }
 }
 
+/// Records `action` as the binding press the next manage sequence will act
+/// on, returning whichever press it displaced.
+///
+/// The slot holds exactly one action, and `blocking_dispatch` dispatches
+/// *every* queued event before returning to the manage sequence that drains
+/// it — so two bindings firing in one round (two fast keypresses, or a key
+/// press plus a pointer-button press) used to discard the first with no
+/// trace at all (audit finding K-01).
+///
+/// Deliberately reports rather than queues. Whether river ever batches two
+/// binding events into one dispatch round is unverified, and a `VecDeque`
+/// sized for a condition that may never occur is speculative machinery with
+/// its own ordering questions; a log line that never fires costs nothing
+/// and answers the question after one session of fast typing. If this line
+/// turns up in a journal, the queue is the next step.
+fn set_pending_action(slot: &mut Option<Action>, action: Action) -> Option<Action> {
+    let displaced = slot.replace(action);
+    if let Some(dropped) = &displaced {
+        // `{:?}` is safe here: `Action`'s hand-written `Debug` redacts
+        // `Exec`'s command line (audit finding G-05).
+        log_err!("Dropped keybind action {dropped:?}: a second binding fired before it was run");
+    }
+    displaced
+}
+
 /// The smallest width or height this WM will ever propose for a window.
 ///
 /// A resize drag can legitimately carry the pointer past the window's
@@ -615,6 +640,10 @@ struct Seat {
     /// The action a binding fired since the last `do_action`, if any.
     /// `Option` rather than a `None` enum variant so a parameterized action
     /// can be taken by value without cloning its payload.
+    ///
+    /// Capacity one, which is a real limit and not just a shape: write it
+    /// through [`set_pending_action`] so a displaced press is reported
+    /// rather than lost (audit finding K-01).
     pending_action: Option<Action>,
     op: SeatOp,
     op_dx: i32,
@@ -2687,7 +2716,9 @@ impl Dispatch<RiverXkbBindingV1, ObjectId> for AppData {
             return;
         };
         match event {
-            Event::Pressed => seat.pending_action = Some(binding.action.clone()),
+            Event::Pressed => {
+                set_pending_action(&mut seat.pending_action, binding.action.clone());
+            }
             Event::Released => {}
             Event::StopRepeat => {}
         }
@@ -2717,7 +2748,9 @@ impl Dispatch<RiverPointerBindingV1, ObjectId> for AppData {
             return;
         };
         match event {
-            Event::Pressed => seat.pending_action = Some(binding.action.clone()),
+            Event::Pressed => {
+                set_pending_action(&mut seat.pending_action, binding.action.clone());
+            }
             Event::Released => {}
         }
     }
@@ -3071,6 +3104,22 @@ mod tests {
     // handler so it's testable without actually calling `current_exe()`.
     // The `current_exe()`/`Command::spawn()` call site itself stays
     // untested I/O glue, same carve-out as the rest of this file.
+
+    /// Audit finding K-01: the slot holds one action and
+    /// `blocking_dispatch` dispatches every queued event before the manage
+    /// sequence that drains it, so two binding presses in one round left no
+    /// trace of the first. Whether river ever batches two is unverified —
+    /// this reports the loss rather than queueing for it.
+    #[test]
+    fn a_second_binding_press_before_the_first_is_acted_on_is_reported() {
+        let mut slot = None;
+        assert_eq!(set_pending_action(&mut slot, Action::CycleTag), None);
+        assert_eq!(
+            set_pending_action(&mut slot, Action::FocusNext),
+            Some(Action::CycleTag)
+        );
+        assert_eq!(slot, Some(Action::FocusNext));
+    }
 
     /// Audit finding F-05: `Command::spawn` succeeds for anything on
     /// `$PATH`, so a misconfigured `defaults.terminal` that starts and
