@@ -135,6 +135,76 @@ fn wenum_label<T: Debug>(value: wayland_client::WEnum<T>) -> String {
     }
 }
 
+/// The edges a `pointer_resize_requested` event names, or `None` when this
+/// build's copy of the protocol does not recognise the bitmask.
+///
+/// A `WEnum` arriving off the wire is protocol version skew, not a logic
+/// invariant this code can prove: `expect`ing it meant the next river
+/// upgrade that widens the edge bitfield would take the whole login
+/// session down over one resize (audit finding F-01). Dropping the request
+/// costs the user a drag; panicking costs them everything unsaved.
+fn requested_resize_edges(edges: wayland_client::WEnum<Edges>) -> Option<Edges> {
+    match edges.into_result() {
+        Ok(recognised) => Some(recognised),
+        Err(_) => {
+            log_err!(
+                "Ignoring a resize request naming edges this build does not \
+                 recognise: {}",
+                wenum_label(edges)
+            );
+            None
+        }
+    }
+}
+
+/// The one line a panic leaves behind, whichever thread raised it.
+///
+/// `[profile.release] strip = true` leaves backtraces symbol-poor, so a
+/// stable, greppable sentence naming the source location is the only thing
+/// that will identify the next unforeseen panic in a journal from a
+/// session that has already ended (audit finding F-01).
+fn panic_report(location: &str, message: &str) -> String {
+    format!("buoy-wm panicked at {location}: {message}")
+}
+
+/// The human-readable half of a panic payload.
+///
+/// `panic!("literal")` yields a `&'static str` and `panic!("{x}")` yields a
+/// `String`; a reporter that reads only one of them is blank for half the
+/// panics this codebase can raise.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(literal) = payload.downcast_ref::<&'static str>() {
+        literal
+    } else if let Some(owned) = payload.downcast_ref::<String>() {
+        owned
+    } else {
+        "panicked with a payload of an unrecognised type"
+    }
+}
+
+/// Makes a panic visible to the user before the process dies, then defers
+/// to the default hook so stderr and the exit path are unchanged.
+///
+/// Deliberately a hook rather than a `catch_unwind` around the dispatch
+/// loop. A panic part-way through a manage sequence leaves `WmCore`,
+/// `WindowManager::windows` and river's own in-flight transaction
+/// half-updated with no way to tell which; resuming the loop over that
+/// state would trade a visible crash for silently wrong window management,
+/// which is the worse of the two outcomes for a session leader. Reporting
+/// and dying is honest — the hook only makes sure the user finds out why
+/// their desktop vanished (audit finding F-01).
+fn install_panic_reporter() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| location.to_string())
+            .unwrap_or_else(|| "an unknown location".to_string());
+        notify_user(&panic_report(&location, panic_message(info.payload())));
+        default_hook(info);
+    }));
+}
+
 /// Every child this WM spawns is fire-and-forget — nothing ever reads an
 /// exit status. Without a `wait` each finished child lingers as a zombie
 /// for the lifetime of the session, and this process is a long-lived
@@ -1011,19 +1081,33 @@ impl WindowManager {
 
     fn manage_windows(&mut self) {
         for window in self.windows.iter_mut() {
+            // Both proxies were captured in an *earlier* event, so the seat
+            // they name may have been destroyed by `remove_seats` in the
+            // meantime. `expect`ing the lookup carried the same
+            // outlived-target hazard that once took the session down over a
+            // click (see `manage_seats`' `'interacted` block); a miss costs
+            // one drag instead (audit finding F-01).
             if let Some(seat_proxy) = window.pointer_move_requested.take() {
-                let seat = self
-                    .seats
-                    .get_mut(&seat_proxy.id())
-                    .expect("Seat not found");
-                seat.pointer_move(window);
+                match self.seats.get_mut(&seat_proxy.id()) {
+                    Some(seat) => seat.pointer_move(window),
+                    None => log_err!(
+                        "Ignoring a move request from seat {:?}, which is no \
+                         longer registered",
+                        seat_proxy.id()
+                    ),
+                }
             }
             if let Some(seat_proxy) = window.pointer_resize_requested.take() {
-                let seat = self
-                    .seats
-                    .get_mut(&seat_proxy.id())
-                    .expect("Seat not found");
-                seat.pointer_resize(window, window.pointer_resize_requested_edges);
+                match self.seats.get_mut(&seat_proxy.id()) {
+                    Some(seat) => {
+                        seat.pointer_resize(window, window.pointer_resize_requested_edges)
+                    }
+                    None => log_err!(
+                        "Ignoring a resize request from seat {:?}, which is no \
+                         longer registered",
+                        seat_proxy.id()
+                    ),
+                }
             }
         }
     }
@@ -1203,7 +1287,13 @@ impl WindowManager {
                     );
                     break 'interacted;
                 };
-                let window = self.windows.remove(i).unwrap();
+                // `i` came from the `position()` immediately above with no
+                // intervening mutation, so `None` is unreachable — written
+                // as a fallible match anyway so the census of panic sites on
+                // this thread stays empty (audit finding F-01).
+                let Some(window) = self.windows.remove(i) else {
+                    break 'interacted;
+                };
                 // Keep wm_core's stacking_order synchronized with the real
                 // z-order on every click-to-focus reorder, not just on
                 // FocusNext — otherwise stacking_order silently and
@@ -1742,8 +1832,11 @@ impl Seat {
                                 "Failed to set focus for view {next_view_id:?} in wm_core: {e:?}"
                             );
                         }
-                    } else {
-                        let window = windows.remove(i).unwrap();
+                    } else if let Some(window) = windows.remove(i) {
+                        // `i` came from a `position()` on this same deque
+                        // with no intervening mutation, so `None` is
+                        // unreachable; written fallibly so no panic site
+                        // remains on this thread (audit finding F-01).
                         windows.push_back(window);
                         // Unscoped: `cycle_focus` has already chosen the
                         // target and only considers visible views, so this
@@ -1753,23 +1846,35 @@ impl Seat {
                 }
                 None
             }
+            // `self.hovered` was captured by a `PointerEnter` event that
+            // races the `closed` event dropping the window from `windows`,
+            // with no ordering promised between them — the same
+            // outlived-target hazard the `'interacted` block in
+            // `manage_seats` documents. A miss loses this drag rather than
+            // the session (audit finding F-01).
             Action::Move => {
                 if let (Some(window_proxy), SeatOp::None) = (self.hovered.as_ref(), &self.op) {
-                    let window = windows
-                        .iter()
-                        .find(|window| &window.proxy == window_proxy)
-                        .expect("Hovered window not found");
-                    self.pointer_move(window);
+                    match windows.iter().find(|window| &window.proxy == window_proxy) {
+                        Some(window) => self.pointer_move(window),
+                        None => log_err!(
+                            "Ignoring a move of the hovered window, which is \
+                             no longer managed (already closed)"
+                        ),
+                    }
                 }
                 None
             }
             Action::Resize => {
                 if let (Some(window_proxy), SeatOp::None) = (self.hovered.as_ref(), &self.op) {
-                    let window = windows
-                        .iter()
-                        .find(|window| &window.proxy == window_proxy)
-                        .expect("Hovered window not found");
-                    self.pointer_resize(window, Edges::Bottom.union(Edges::Right));
+                    match windows.iter().find(|window| &window.proxy == window_proxy) {
+                        Some(window) => {
+                            self.pointer_resize(window, Edges::Bottom.union(Edges::Right))
+                        }
+                        None => log_err!(
+                            "Ignoring a resize of the hovered window, which is \
+                             no longer managed (already closed)"
+                        ),
+                    }
                 }
                 None
             }
@@ -2195,10 +2300,17 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
             }
             Event::Finished => std::process::exit(0),
             Event::ManageStart => {
+                // Deliberately still a panic (audit finding F-01). `main`
+                // exits before the first `blocking_dispatch` if this global
+                // is absent and nothing ever clears it, so a `None` here is
+                // a real broken invariant — and the only alternative,
+                // returning without `manage_finish()`, would wedge river's
+                // manage sequence and freeze the desktop instead of ending
+                // it, which is strictly worse.
                 let river_xkb = state
                     .river_xkb
                     .as_ref()
-                    .expect("river_xkb_bindings_v1 missing");
+                    .expect("river_xkb_bindings_v1 was checked present before the event loop");
                 state.wm.handle_manage_start(proxy, river_xkb, qh)
             }
             Event::RenderStart => state.wm.handle_render_start(proxy),
@@ -2298,9 +2410,10 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
             Event::DecorationHint { hint: _ } => {}
             Event::PointerMoveRequested { seat } => window.pointer_move_requested = Some(seat),
             Event::PointerResizeRequested { seat, edges } => {
-                window.pointer_resize_requested = Some(seat);
-                window.pointer_resize_requested_edges =
-                    edges.into_result().expect("Invalid edges for resize");
+                if let Some(recognised) = requested_resize_edges(edges) {
+                    window.pointer_resize_requested = Some(seat);
+                    window.pointer_resize_requested_edges = recognised;
+                }
             }
             Event::ShowWindowMenuRequested { x: _, y: _ } => {}
             Event::MaximizeRequested => {}
@@ -2325,11 +2438,19 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
         _qh: &QueueHandle<Self>,
     ) {
         use river::river_output_v1::Event;
-        let output = state
-            .wm
-            .outputs
-            .get_mut(&proxy.id())
-            .expect("Output not found");
+        // `remove_outputs` destroys this proxy and drops the map entry
+        // during a manage sequence while `river_output_v1` events for it
+        // arrive independently, so a miss here is a race rather than a
+        // broken invariant — the same graceful-return shape
+        // `RiverWindowV1`'s dispatcher above already uses (audit finding
+        // F-01).
+        let Some(output) = state.wm.outputs.get_mut(&proxy.id()) else {
+            log_err!(
+                "Ignoring an event for output {:?}, which is no longer registered",
+                proxy.id()
+            );
+            return;
+        };
         match event {
             Event::Removed => output.removed = true,
             // Story 2.9 Task 2: `name` here is the *registry* name the
@@ -2402,7 +2523,16 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
         _qh: &QueueHandle<Self>,
     ) {
         use river::river_seat_v1::Event;
-        let seat = state.wm.seats.get_mut(&proxy.id()).expect("Seat not found");
+        // Same race as `RiverOutputV1` above: `remove_seats` destroys the
+        // proxy and drops the entry mid-manage-sequence while events for it
+        // are still in flight (audit finding F-01).
+        let Some(seat) = state.wm.seats.get_mut(&proxy.id()) else {
+            log_err!(
+                "Ignoring an event for seat {:?}, which is no longer registered",
+                proxy.id()
+            );
+            return;
+        };
         match event {
             Event::Removed => seat.removed = true,
             Event::WlSeat { name: _ } => {}
@@ -2432,11 +2562,20 @@ impl Dispatch<RiverXkbBindingV1, ObjectId> for AppData {
         _qh: &QueueHandle<Self>,
     ) {
         use river::river_xkb_binding_v1::Event;
-        let seat = state.wm.seats.get_mut(data).expect("Seat not found");
-        let binding = seat
-            .xkb_bindings
-            .get(&proxy.id())
-            .expect("xkb_binding not found");
+        // `remove_seats` destroys every binding proxy along with its seat,
+        // so a keypress already queued when the seat went away resolves to
+        // neither — a race, not a broken invariant (audit finding F-01).
+        let Some(seat) = state.wm.seats.get_mut(data) else {
+            log_err!("Ignoring a keybind press for seat {data:?}, which is no longer registered");
+            return;
+        };
+        let Some(binding) = seat.xkb_bindings.get(&proxy.id()) else {
+            log_err!(
+                "Ignoring a press of keybinding {:?}, which is no longer registered",
+                proxy.id()
+            );
+            return;
+        };
         match event {
             Event::Pressed => seat.pending_action = Some(binding.action.clone()),
             Event::Released => {}
@@ -2455,11 +2594,18 @@ impl Dispatch<RiverPointerBindingV1, ObjectId> for AppData {
         _qh: &QueueHandle<Self>,
     ) {
         use river::river_pointer_binding_v1::Event;
-        let seat = state.wm.seats.get_mut(data).expect("Seat not found");
-        let binding = seat
-            .pointer_bindings
-            .get(&proxy.id())
-            .expect("pointer_binding not found");
+        // Same race as `RiverXkbBindingV1` above (audit finding F-01).
+        let Some(seat) = state.wm.seats.get_mut(data) else {
+            log_err!("Ignoring a mousebind press for seat {data:?}, which is no longer registered");
+            return;
+        };
+        let Some(binding) = seat.pointer_bindings.get(&proxy.id()) else {
+            log_err!(
+                "Ignoring a press of mousebinding {:?}, which is no longer registered",
+                proxy.id()
+            );
+            return;
+        };
         match event {
             Event::Pressed => seat.pending_action = Some(binding.action.clone()),
             Event::Released => {}
@@ -2636,6 +2782,8 @@ wayland_client::delegate_noop!(AppData: ignore RiverNodeV1);
 wayland_client::delegate_noop!(AppData: ignore RiverLayerShellV1);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    install_panic_reporter();
+
     // Queue up a get_registry event.
     let conn = Connection::connect_to_env()?;
     let display = conn.display();
@@ -2806,6 +2954,51 @@ mod tests {
     // handler so it's testable without actually calling `current_exe()`.
     // The `current_exe()`/`Command::spawn()` call site itself stays
     // untested I/O glue, same carve-out as the rest of this file.
+
+    /// Audit finding F-01: a `WEnum` straight off the wire is protocol
+    /// version skew, not a logic invariant, so an edge bitmask this build
+    /// has never heard of must cost one resize rather than the session.
+    #[test]
+    fn an_unrecognised_resize_edge_bitmask_is_dropped_rather_than_fatal() {
+        assert_eq!(
+            requested_resize_edges(wayland_client::WEnum::Unknown(0xdead)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_recognised_resize_edge_bitmask_is_passed_through() {
+        assert_eq!(
+            requested_resize_edges(wayland_client::WEnum::Value(
+                Edges::Left.union(Edges::Bottom)
+            )),
+            Some(Edges::Left.union(Edges::Bottom))
+        );
+    }
+
+    #[test]
+    fn a_panic_report_names_where_it_happened_and_what_it_said() {
+        let report = panic_report("wm/src/main.rs:42:9", "Seat not found");
+        assert!(report.contains("wm/src/main.rs:42:9"), "{report}");
+        assert!(report.contains("Seat not found"), "{report}");
+    }
+
+    /// `panic!("literal")` and `panic!("{x}")` produce payloads of two
+    /// different types, and a report that can only read one of them is
+    /// blank for half of the panics this codebase can actually raise.
+    #[test]
+    fn a_panic_message_is_read_from_either_payload_type() {
+        assert_eq!(panic_message(&"a string literal"), "a string literal");
+        assert_eq!(
+            panic_message(&String::from("a formatted panic")),
+            "a formatted panic"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_panic_payload_still_produces_a_message() {
+        assert!(!panic_message(&7u32).is_empty());
+    }
 
     #[test]
     fn wenum_label_prints_a_known_value_without_the_wrapper() {
