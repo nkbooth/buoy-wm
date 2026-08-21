@@ -24,6 +24,8 @@
 //! this binary across a process boundary and every `///` example was
 //! uncompiled prose (audit finding T-04).
 
+pub mod launcher;
 pub mod mode;
 pub mod picker;
+pub mod session;
 pub mod wire;
