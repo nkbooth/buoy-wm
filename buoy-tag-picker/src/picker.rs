@@ -150,6 +150,24 @@ pub const REJECTION_MESSAGE: &str = "tag limit reached (64)";
 /// `CreateTag` here; Story 2.13 moved creation to switch mode entirely, so
 /// assign mode now has nothing to do with a name that isn't already a tag —
 /// see [`parse_switch_selection`], which owns that arm now.
+///
+/// ```
+/// use buoy_tag_picker::picker::{PickerAction, parse_fuzzel_output};
+///
+/// // `fuzzel` prints the whole accepted line; the tag id is the field
+/// // after the tab.
+/// let accepted = parse_fuzzel_output(true, "[x] web\t0\n", &[0, 1]);
+/// assert_eq!(accepted, PickerAction::Toggled(0));
+///
+/// // Escape, an id that is not in the registry, and a typed name that
+/// // matched no row are all the same non-action.
+/// assert_eq!(parse_fuzzel_output(false, "", &[0, 1]), PickerAction::Cancelled);
+/// assert_eq!(
+///     parse_fuzzel_output(true, "[ ] gone\t9\n", &[0, 1]),
+///     PickerAction::Cancelled,
+/// );
+/// assert_eq!(parse_fuzzel_output(true, "brand new\n", &[0, 1]), PickerAction::Cancelled);
+/// ```
 pub fn parse_fuzzel_output(exit_success: bool, stdout: &str, known_tag_ids: &[u8]) -> PickerAction {
     if !exit_success {
         return PickerAction::Cancelled;

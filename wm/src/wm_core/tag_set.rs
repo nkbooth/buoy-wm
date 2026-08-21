@@ -44,6 +44,20 @@ impl TagSet {
     /// absent rather than panicking or reading a wrapped bit — `TagId` and
     /// `TagSet`'s inner field are both `pub`, so this guard has to live
     /// here, not just at `TagRegistry`'s call sites (NFR2).
+    ///
+    /// ```
+    /// use buoy_wm::wm_core::tag_set::TagSet;
+    ///
+    /// let mut tags = TagSet::default();
+    /// tags.insert(63);
+    /// assert!(tags.contains(63));
+    ///
+    /// // Out of range is absent, and inserting out of range is a no-op —
+    /// // never a panic and never a wrapped bit.
+    /// tags.insert(64);
+    /// assert!(!tags.contains(64));
+    /// assert!(!tags.contains(255));
+    /// ```
     pub fn contains(&self, pos: u8) -> bool {
         pos < MAX_TAGS && (self.0 & (1u64 << pos) != 0)
     }

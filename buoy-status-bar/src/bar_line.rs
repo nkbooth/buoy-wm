@@ -117,6 +117,21 @@ struct WaybarLine<'a> {
 /// always-serializable type, so the one `.expect()` here is
 /// safe-by-construction, not caller-facing (same precedent as `wm`'s own
 /// `serialize_response`).
+///
+/// ```
+/// use buoy_status_bar::bar_line::{BarLine, format_waybar_line};
+///
+/// assert_eq!(
+///     format_waybar_line(Some(BarLine::Normal("web".to_string()))),
+///     r#"{"text":"web","class":"normal"}"#,
+/// );
+/// // A name that would corrupt a hand-interpolated line is escaped, not
+/// // rejected: this goes through `serde_json`.
+/// assert_eq!(
+///     format_waybar_line(Some(BarLine::Normal(r#"say "hi""#.to_string()))),
+///     r#"{"text":"say \"hi\"","class":"normal"}"#,
+/// );
+/// ```
 pub fn format_waybar_line(line: Option<BarLine>) -> String {
     let waybar_line = match &line {
         None => WaybarLine {

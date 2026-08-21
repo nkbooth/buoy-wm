@@ -50,6 +50,21 @@ const SOCKET_FILE_NAME: &str = "buoy-wm.sock";
 /// requires a relative value be ignored, and an empty one joined onto a
 /// filename would yield a path resolved against the process's working
 /// directory.
+///
+/// ```
+/// use buoy_common::socket_path::resolve_socket_path;
+/// use std::path::PathBuf;
+///
+/// assert_eq!(
+///     resolve_socket_path(Some("/run/user/1000")),
+///     Some(PathBuf::from("/run/user/1000/buoy-wm.sock")),
+/// );
+/// // Unset, empty and relative all mean "there is no socket path", not
+/// // "resolve it against wherever the session happened to start".
+/// assert_eq!(resolve_socket_path(None), None);
+/// assert_eq!(resolve_socket_path(Some("")), None);
+/// assert_eq!(resolve_socket_path(Some("run/user/1000")), None);
+/// ```
 pub fn resolve_socket_path(xdg_runtime_dir: Option<&str>) -> Option<PathBuf> {
     let dir = Path::new(xdg_runtime_dir?);
     if !dir.is_absolute() {

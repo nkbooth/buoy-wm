@@ -29,6 +29,16 @@
 /// run of characters (including none). Every other character, `?` and `[`
 /// included, is matched literally. Comparison is case-sensitive: libinput
 /// device names are stable strings, not user input.
+///
+/// ```
+/// use buoy_wm::config::glob::matches;
+///
+/// assert!(matches("*Touchpad*", "PIXA3854:00 093A:0274 Touchpad"));
+/// assert!(matches("*", "anything at all"));
+/// // `?` is not a metacharacter here, so it only matches itself.
+/// assert!(!matches("Touchpa?", "Touchpad"));
+/// assert!(!matches("*touchpad*", "PIXA3854:00 093A:0274 Touchpad"));
+/// ```
 pub fn matches(pattern: &str, name: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let name: Vec<char> = name.chars().collect();

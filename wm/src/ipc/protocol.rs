@@ -111,6 +111,19 @@ pub enum ParseError {
 /// invalid-UTF-8 byte sequence is rejected here rather than reaching the
 /// JSON parser at all. Never panics (NFR2) — every failure path returns
 /// `Err`.
+///
+/// ```
+/// use buoy_wm::ipc::protocol::{Request, parse_request};
+///
+/// assert_eq!(
+///     parse_request(br#"{"type":"switch-tag","output_id":7,"tag_id":1}"#),
+///     Ok(Request::SwitchTag { output_id: 7, tag_id: 1 }),
+/// );
+/// // Nothing on this socket can panic the WM: bad UTF-8, bad JSON and an
+/// // unknown request type are all just `Err`.
+/// assert!(parse_request(&[0xFF, 0xFE]).is_err());
+/// assert!(parse_request(br#"{"type":"delete-everything"}"#).is_err());
+/// ```
 pub fn parse_request(bytes: &[u8]) -> Result<Request, ParseError> {
     let text = std::str::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)?;
     serde_json::from_str(text).map_err(|e| ParseError::InvalidJson(e.to_string()))
