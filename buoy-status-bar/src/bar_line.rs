@@ -82,6 +82,18 @@ pub fn resolve_bar_line(output_id: u64, outputs: &[OutputDto], tags: &[TagDto]) 
     }
 }
 
+/// The CSS class waybar applies to a healthy line, and half of this
+/// binary's public contract: users target `#custom-tag.normal` from their
+/// own `style.css`, so it is a name that cannot be changed freely, not an
+/// incidental literal (audit finding J-09).
+pub const CLASS_NORMAL: &str = "normal";
+
+/// The CSS class waybar applies when the WM could not be reached or
+/// disowned the output. Same public-contract status as [`CLASS_NORMAL`] —
+/// dimming and color for this state are the user's `style.css`'s job, which
+/// is only possible because this string is stable.
+pub const CLASS_DISCONNECTED: &str = "disconnected";
+
 /// The waybar-facing wire shape for a `custom/tag` module line
 /// (`return-type: "json"`): `{"text":...,"class":...}`. Private — only
 /// [`format_waybar_line`] constructs one, always through `serde_json`
@@ -109,19 +121,19 @@ pub fn format_waybar_line(line: Option<BarLine>) -> String {
     let waybar_line = match &line {
         None => WaybarLine {
             text: "⚠ disconnected",
-            class: "disconnected",
+            class: CLASS_DISCONNECTED,
         },
         Some(BarLine::Normal(name)) => WaybarLine {
             text: name,
-            class: "normal",
+            class: CLASS_NORMAL,
         },
         Some(BarLine::NoTagSelected) => WaybarLine {
             text: "no tag",
-            class: "normal",
+            class: CLASS_NORMAL,
         },
         Some(BarLine::UnknownOutput) => WaybarLine {
             text: "⚠ unknown output",
-            class: "disconnected",
+            class: CLASS_DISCONNECTED,
         },
     };
     serde_json::to_string(&waybar_line)

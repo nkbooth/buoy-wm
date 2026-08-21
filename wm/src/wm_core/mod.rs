@@ -24,6 +24,16 @@
 //! (that wiring is Story 1.4's job) — its public API is exercised
 //! directly by unit tests in this crate.
 
+/// The maximum number of tags a [`tag::TagRegistry`] may hold, and the
+/// exclusive upper bound on any [`ids::TagId`] a [`tag_set::TagSet`] can
+/// represent.
+///
+/// Fixed by `u64`'s width, not a tunable: ADR-006 stores tag membership as
+/// one bit per tag in a `u64` bitset. Lives here beside the types it
+/// constrains rather than being restated as a bare `64` at each guard
+/// (audit finding J-06).
+pub const MAX_TAGS: u8 = u64::BITS as u8;
+
 pub mod ids;
 pub mod output;
 pub mod state;

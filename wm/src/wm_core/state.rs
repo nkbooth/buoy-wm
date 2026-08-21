@@ -134,11 +134,13 @@ pub struct WmCore {
 
 impl WmCore {
     /// Returns a new, empty `WmCore`.
-    // Not yet called from production `main.rs` — `WindowManager`'s
-    // `#[derive(Default)]` constructs its `wm_core` field via
-    // `WmCore::default()` instead. Kept as public constructor API/for
-    // test ergonomics.
-    #[allow(dead_code)]
+    ///
+    /// Test-only: production goes through `WindowManager`'s
+    /// `#[derive(Default)]`, which constructs its `wm_core` field via
+    /// `WmCore::default()`. `#[cfg(test)]` rather than
+    /// `#[allow(dead_code)]` so that stays compiler-enforced (audit finding
+    /// J-09).
+    #[cfg(test)]
     pub fn new() -> Self {
         WmCore::default()
     }
@@ -436,6 +438,12 @@ impl WmCore {
         if tag.terminal_spawned {
             return Ok(None);
         }
+        // The `tag-` prefix is load-bearing security, not cosmetics: tag
+        // names are unvalidated, and this unconditional prefix is the only
+        // thing keeping a tag called `--layout` from reaching zellij's argv
+        // as a flag-shaped token. Pinned by
+        // `pinned_terminal_session_name_can_never_begin_with_a_dash`
+        // (audit finding D-03).
         let session_name = format!("tag-{}", tag.name);
         self.mark_terminal_spawned(tag_id)
             .expect("tag_id was just confirmed registered above");
@@ -457,14 +465,15 @@ impl WmCore {
 
     /// Returns the stacking/render order, front-to-back (front=bottom,
     /// back=top).
-    // Story 1.4 code-review follow-up (efficiency): `cycle_focus` now
-    // reads `self.stacking_order.front()` directly (O(1), no allocation)
-    // instead of going through this O(n)-allocating accessor, so this has
-    // no current production call site. Kept as public API and exercised
-    // extensively by existing tests (whole-order assertions read far more
-    // naturally as a `Vec`) — Story 1.6's floating-placement work is a
-    // plausible future production caller.
-    #[allow(dead_code)]
+    /// Test-only. Story 1.4 code-review follow-up (efficiency):
+    /// `cycle_focus` now reads `self.stacking_order.front()` directly
+    /// (O(1), no allocation) instead of going through this O(n)-allocating
+    /// accessor, leaving it with no production call site. Exercised
+    /// extensively by tests, where whole-order assertions read far more
+    /// naturally as a `Vec`. `#[cfg(test)]` rather than
+    /// `#[allow(dead_code)]` so that stays compiler-enforced (audit finding
+    /// J-09).
+    #[cfg(test)]
     pub fn stacking_order(&self) -> Vec<ViewId> {
         self.stacking_order.iter().copied().collect()
     }
@@ -518,11 +527,10 @@ impl WmCore {
     // focus target under multiple seats (last-seat-processed-wins races
     // ahead of this call) — using it as the pinned-terminal-close gate
     // could let the exclusion be bypassed. `main.rs` now checks the
-    // acting seat's own focused `Window.app_id` directly instead. Kept as
-    // public, still-tested API — pure query, harmless, and cheap to
-    // rewire if a future story needs a WM-wide "what's focused and
-    // closable" answer.
-    #[allow(dead_code)]
+    // acting seat's own focused `Window.app_id` directly instead, leaving
+    // this test-only; `#[cfg(test)]` rather than `#[allow(dead_code)]` so
+    // that stays compiler-enforced (audit finding J-09).
+    #[cfg(test)]
     pub fn closable_focused_view(&self) -> Option<ViewId> {
         let id = self.focused_view?;
         let view = self.views.get(&id)?;
@@ -2502,5 +2510,26 @@ mod tests {
         assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_a));
         assert_eq!(core.pop_pending_pinned_terminal_tag(), Some(tag_b));
         assert_eq!(core.pop_pending_pinned_terminal_tag(), None);
+    }
+
+    /// Audit finding D-03: tag names are entirely unvalidated, so the
+    /// `tag-` prefix `claim_pinned_terminal_spawn` builds the session name
+    /// with is the only thing preventing a flag-shaped argv token reaching
+    /// `zellij`. It is an incidental property of a `format!` in a
+    /// bookkeeping function, so it needs a test of its own before someone
+    /// reworks how session names are derived.
+    #[test]
+    fn pinned_terminal_session_name_can_never_begin_with_a_dash() {
+        let mut core = WmCore::default();
+        let tag_id = core.create_tag("--layout").unwrap();
+        let session_name = core
+            .claim_pinned_terminal_spawn(tag_id)
+            .unwrap()
+            .expect("a freshly created tag has not claimed its spawn yet");
+        assert!(
+            !session_name.starts_with('-'),
+            "session name {session_name:?} is flag-shaped and would be \
+             parsed as an option by zellij"
+        );
     }
 }

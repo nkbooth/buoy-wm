@@ -15,7 +15,15 @@
 // PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 // language governing rights and limitations under the RPL.
 
-//! Pure decision logic driving the toggle-and-reopen loop that ADR-004's
+//! Pure decision logic for both picker modes.
+//!
+//! Named `picker`, not `checklist`: it started as assign mode's checklist
+//! and grew switch mode's `SwitchAction`, `render_switch_list`,
+//! `parse_switch_selection` and `render_rejection_row` too, at which point
+//! the old name described a third of its contents and its module doc had to
+//! disclaim the mismatch (audit finding J-09).
+//!
+//! Assign mode drives the toggle-and-reopen loop that ADR-004's
 //! resolved spike settled on (`fuzzel` 1.14.1 offers no native checkbox
 //! toggle and no `--multi`): building the checkbox-glyph-prefixed row list
 //! from a `wm`-reported tag registry and a focused view's current tags,

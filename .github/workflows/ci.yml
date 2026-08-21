@@ -68,7 +68,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      # Read the floor out of the manifest rather than hardcoding it here.
+      # This job exists specifically to guard the manifest's MSRV promise,
+      # so a pinned duplicate meant bumping Cargo.toml alone left CI
+      # silently testing the old floor while the manifest claimed the new
+      # one — a check that could not detect the thing it exists to detect.
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          version="$(grep -m1 '^rust-version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ -z "$version" ]; then
+            echo "could not read rust-version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
       - name: Install system dependencies
         run: |
           sudo apt-get update

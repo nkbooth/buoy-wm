@@ -64,7 +64,7 @@ Rather than fall back to a custom picker, the checklist is built from a
 sequential toggle-and-reopen loop — one single-select `fuzzel --dmenu` per
 toggle, using `--with-nth`/`--accept-nth`/`--nth-delimiter` to show a
 checkbox glyph per row and return a stable tag id. See
-`buoy-tag-picker/src/checklist.rs`.
+`buoy-tag-picker/src/picker.rs`.
 
 ## ADR-005: Enforce one-tag-per-output maximum
 **Date:** 2026-08-06

@@ -28,11 +28,8 @@
 // tag-cycle keybind).
 use std::collections::HashMap;
 
+use super::MAX_TAGS;
 use super::ids::TagId;
-
-/// The maximum number of tags a `TagRegistry` may hold (ADR-006: one bit
-/// per tag in a `u64` bitset).
-const MAX_TAGS: usize = 64;
 
 /// A named tag. `terminal_spawned` tracks whether the lazy-spawn-once
 /// terminal for this tag has already been launched (Story 1.5).
@@ -63,21 +60,20 @@ pub struct TagRegistry {
 
 impl TagRegistry {
     /// Returns a new, empty tag registry.
-    // Not called from production code — `WmCore`'s `#[derive(Default)]`
-    // constructs its `tags` field via `TagRegistry::default()` instead,
-    // same as `WmCore::new()`'s own precedent. Kept as public constructor
-    // API/for test ergonomics.
-    #[allow(dead_code)]
+    ///
+    /// Test-only: production constructs the registry via
+    /// `TagRegistry::default()`, so this exists purely so whole-registry
+    /// assertions read naturally. `#[cfg(test)]` rather than
+    /// `#[allow(dead_code)]` makes that status compiler-enforced instead of
+    /// asserted by a comment that could go stale (audit finding J-09).
+    #[cfg(test)]
     pub fn new() -> Self {
         TagRegistry::default()
     }
 
-    /// Returns the number of registered tags.
-    // Not called from production code since the `Mod4+T` generated-name
-    // keybind that used it was removed (superseded by `buoy-tag-picker`'s
-    // named tag-creation flow) - kept as public API/for test ergonomics,
-    // same precedent as `new()` above.
-    #[allow(dead_code)]
+    /// Returns the number of registered tags. Reached from production via
+    /// [`WmCore::tag_count`](super::state::WmCore::tag_count), which
+    /// `main.rs` uses to decide whether to bootstrap the default tag.
     pub fn count(&self) -> usize {
         self.tags.len()
     }
@@ -97,7 +93,7 @@ impl TagRegistry {
         if let Some(&id) = self.ids_by_name.get(name) {
             return Ok(id);
         }
-        if self.tags.len() >= MAX_TAGS {
+        if self.tags.len() >= usize::from(MAX_TAGS) {
             return Err(TagRegistryError::Full);
         }
         let id = TagId(self.tags.len() as u8);

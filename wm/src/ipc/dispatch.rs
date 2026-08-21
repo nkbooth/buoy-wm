@@ -39,6 +39,7 @@
 //! `ensure_pinned_terminal_spawned` itself.
 
 use crate::ipc::protocol::{OutputDto, Request, Response, TagDto, ViewDto};
+use crate::wm_core::MAX_TAGS;
 use crate::wm_core::ids::{OutputId, TagId, ViewId};
 use crate::wm_core::state::{WmCore, WmCoreError, WmCoreSnapshot};
 
@@ -79,12 +80,19 @@ impl From<WmCoreSnapshot> for Response {
 /// wire. `create-tag`'s registry-cap message ("tag limit reached (64)") is
 /// the single place that string is defined — Story 2.3's picker renders it
 /// verbatim, not a duplicated literal.
+///
+/// The cap in that message is interpolated from
+/// [`MAX_TAGS`](crate::wm_core::MAX_TAGS) rather than typed, so the number
+/// the user is shown cannot disagree with the number actually enforced
+/// (audit finding J-06). `buoy-tag-picker` cannot import from `wm` and so
+/// keeps its own literal copy, which
+/// `tag_limit_message_matches_the_pickers_hardcoded_copy` pins.
 fn describe_wm_core_error(e: WmCoreError) -> String {
     match e {
         WmCoreError::UnknownView => "unknown view".to_string(),
         WmCoreError::UnknownTag => "unknown tag".to_string(),
         WmCoreError::UnknownOutput => "unknown output".to_string(),
-        WmCoreError::TagLimitReached => "tag limit reached (64)".to_string(),
+        WmCoreError::TagLimitReached => format!("tag limit reached ({MAX_TAGS})"),
     }
 }
 
@@ -500,6 +508,26 @@ mod tests {
             Request::CreateTag {
                 name: "sweep".into(),
             },
+        );
+    }
+
+    /// Audit finding E-06: `buoy-tag-picker` uses this exact string as
+    /// *control flow* — `buoy-tag-picker/src/main.rs` compares a
+    /// `create-tag` error response against its own hand-copied
+    /// `checklist::REJECTION_MESSAGE` to decide whether to reopen the
+    /// picker with the rejected name restored, or to print an opaque line
+    /// and give up. The two literals live in crates whose test suites never
+    /// meet, so nothing else notices a reword.
+    #[test]
+    fn tag_limit_message_matches_the_pickers_hardcoded_copy() {
+        assert_eq!(
+            describe_wm_core_error(WmCoreError::TagLimitReached),
+            "tag limit reached (64)",
+            "buoy-tag-picker/src/picker.rs's REJECTION_MESSAGE is a \
+             hand-copied duplicate of this string and compares against it by \
+             equality as control flow — update it in lockstep, or the tag-cap \
+             flow silently degrades from \"reopen with your name preserved\" \
+             to \"generic error, start over\""
         );
     }
 }

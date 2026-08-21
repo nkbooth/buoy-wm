@@ -241,13 +241,18 @@ fn river_modifiers(mods: &[config::Modifier]) -> Modifiers {
     })
 }
 
+/// Linux input event codes for the three pointer buttons river's
+/// `create_pointer_binding` takes, from `linux/input-event-codes.h`.
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+const BTN_MIDDLE: u32 = 0x112;
+
 /// Translates a config pointer button into its Linux input event code.
-/// See `linux/input-event-codes.h`.
 fn input_event_code(button: config::Button) -> u32 {
     match button {
-        config::Button::Left => 0x110,
-        config::Button::Right => 0x111,
-        config::Button::Middle => 0x112,
+        config::Button::Left => BTN_LEFT,
+        config::Button::Right => BTN_RIGHT,
+        config::Button::Middle => BTN_MIDDLE,
     }
 }
 
@@ -2334,9 +2339,7 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
             Event::PointerEnter { window } => seat.hovered = Some(window),
             Event::PointerLeave => seat.hovered = None,
             Event::WindowInteraction { window } => seat.interacted = Some(window),
-            Event::ShellSurfaceInteraction {
-                shell_surface: _shell_surface,
-            } => {}
+            Event::ShellSurfaceInteraction { .. } => {}
             Event::OpDelta { dx, dy } => (seat.op_dx, seat.op_dy) = (dx, dy),
             Event::OpRelease => seat.op_release = true,
             // Story 2.8 Task 2: track the pointer's last-known global
@@ -2386,7 +2389,7 @@ impl Dispatch<RiverPointerBindingV1, ObjectId> for AppData {
         let binding = seat
             .pointer_bindings
             .get(&proxy.id())
-            .expect("xkb_binding not found");
+            .expect("pointer_binding not found");
         match event {
             Event::Pressed => seat.pending_action = Some(binding.action.clone()),
             Event::Released => {}

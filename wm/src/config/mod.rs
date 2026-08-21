@@ -256,38 +256,29 @@ impl InputConfig {
     /// `tap` deliberately precedes `tap_button_map`, which is meaningless
     /// until tap is enabled.
     pub fn settings(&self) -> Vec<LibinputSetting> {
-        let mut settings = Vec::new();
-        if let Some(tap) = self.tap {
-            settings.push(LibinputSetting::Tap(tap));
-        }
-        if let Some(button_map) = self.tap_button_map {
-            settings.push(LibinputSetting::TapButtonMap(button_map));
-        }
-        if let Some(method) = self.click_method {
-            settings.push(LibinputSetting::ClickMethod(method));
-        }
-        if let Some(natural) = self.natural_scroll {
-            settings.push(LibinputSetting::NaturalScroll(natural));
-        }
-        if let Some(dwt) = self.disable_while_typing {
-            settings.push(LibinputSetting::DisableWhileTyping(dwt));
-        }
-        if let Some(speed) = self.accel_speed {
-            settings.push(LibinputSetting::AccelSpeed(speed));
-        }
-        settings
+        [
+            self.tap.map(LibinputSetting::Tap),
+            self.tap_button_map.map(LibinputSetting::TapButtonMap),
+            self.click_method.map(LibinputSetting::ClickMethod),
+            self.natural_scroll.map(LibinputSetting::NaturalScroll),
+            self.disable_while_typing
+                .map(LibinputSetting::DisableWhileTyping),
+            self.accel_speed.map(LibinputSetting::AccelSpeed),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// Whether this entry sets anything at all. An entry that names a
     /// device and configures nothing is rejected at load — it reads like it
     /// does something.
+    ///
+    /// Defined in terms of [`InputConfig::settings`] rather than as a
+    /// hand-written inverse of it, so a field added to one and forgotten in
+    /// the other cannot make the two disagree (audit finding C-09).
     fn is_empty(&self) -> bool {
-        self.tap.is_none()
-            && self.tap_button_map.is_none()
-            && self.click_method.is_none()
-            && self.natural_scroll.is_none()
-            && self.disable_while_typing.is_none()
-            && self.accel_speed.is_none()
+        self.settings().is_empty()
     }
 }
 
@@ -673,8 +664,27 @@ impl Action {
     /// structurally by only ever passing them to `create_pointer_binding`;
     /// with one shared action enum it has to be a check (code-review
     /// follow-up).
+    ///
+    /// Exhaustive rather than a `matches!`, so adding a variant forces its
+    /// classification instead of defaulting it to key-bindable — the
+    /// `matches!` form let a new pointer-only action be silently accepted
+    /// on a `[[keybind]]` and produce exactly the stuck-window failure
+    /// above (audit finding J-05).
     fn is_pointer_only(&self) -> bool {
-        matches!(self, Action::Move | Action::Resize)
+        match self {
+            Action::Move | Action::Resize => true,
+            Action::Terminal
+            | Action::Launcher
+            | Action::Close
+            | Action::FocusNext
+            | Action::Exit
+            | Action::CycleTag
+            | Action::TagPicker
+            | Action::TagSwitch
+            | Action::Hotkeys
+            | Action::Exec(_)
+            | Action::SwitchTag(_) => false,
+        }
     }
 
     /// This action's spelling in the config file, for error messages.
@@ -1719,5 +1729,60 @@ mod tests {
             resolve_config_path(Some(OsStr::new("/xdg")), Some(OsStr::new("/home/x"))),
             Some(PathBuf::from("/xdg/buoy/config.toml"))
         );
+    }
+
+    #[test]
+    fn is_empty_agrees_with_settings_for_every_single_field_entry() {
+        // Audit finding C-09: `is_empty` used to be a hand-written logical
+        // inverse of `settings()`, so a field added to one and forgotten in
+        // the other failed silently — either never applied, or an entry
+        // setting only the new field rejected at load as "empty".
+        let blank = InputConfig {
+            name: "*".to_string(),
+            tap: None,
+            tap_button_map: None,
+            click_method: None,
+            natural_scroll: None,
+            disable_while_typing: None,
+            accel_speed: None,
+        };
+        assert!(blank.is_empty());
+        assert_eq!(blank.settings(), vec![]);
+
+        let one_field_each = [
+            InputConfig {
+                tap: Some(true),
+                ..blank.clone()
+            },
+            InputConfig {
+                tap_button_map: Some(TapButtonMap::Lrm),
+                ..blank.clone()
+            },
+            InputConfig {
+                click_method: Some(ClickMethod::Clickfinger),
+                ..blank.clone()
+            },
+            InputConfig {
+                natural_scroll: Some(true),
+                ..blank.clone()
+            },
+            InputConfig {
+                disable_while_typing: Some(true),
+                ..blank.clone()
+            },
+            InputConfig {
+                accel_speed: Some(0.5),
+                ..blank.clone()
+            },
+        ];
+        for entry in &one_field_each {
+            assert!(!entry.is_empty(), "{entry:?} sets a field but reads empty");
+            assert_eq!(
+                entry.settings().len(),
+                1,
+                "{entry:?} sets one field but implies {} settings",
+                entry.settings().len()
+            );
+        }
     }
 }

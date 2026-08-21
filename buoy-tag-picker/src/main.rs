@@ -36,11 +36,11 @@
 //! module is process-spawn and live-socket I/O glue only — every decision
 //! it makes (what to render, how to parse `fuzzel`'s output, how to
 //! detect cancel, which mode argv selects) is unit-tested in
-//! `checklist`/`wire`/`mode`; nothing here has its own RED/GREEN tests
+//! `picker`/`wire`/`mode`; nothing here has its own RED/GREEN tests
 //! (same carve-out class as `wm/src/main.rs`'s Wayland-`Dispatch` glue).
 
-mod checklist;
 mod mode;
+mod picker;
 mod socket_path;
 mod wire;
 
@@ -114,7 +114,18 @@ fn send_switch_tag_or_exit(
 }
 
 /// Spawns one `fuzzel --dmenu` invocation, writes `input` to its stdin,
-/// and waits for it to exit. Real flags cross-checked against `fuzzel(1)`
+/// and waits for it to exit.
+///
+/// The binary name is deliberately hardcoded rather than read from
+/// `defaults.launcher`: `fuzzel` is driven here as a dmenu-style pager
+/// with fuzzel-specific flags (`--with-nth`, `--nth-delimiter`,
+/// `--accept-nth`'s absence), not as the user's chosen launcher, and this
+/// process has no access to the WM's config anyway. `wm`'s own
+/// `Action::Hotkeys` arm hardcodes it for the same reason. The consequence
+/// is worth stating: a user without `fuzzel` installed gets a silent no-op
+/// from `Super+A`/`Super+S` (audit finding J-09).
+///
+/// Real flags cross-checked against `fuzzel(1)`
 /// (Technical notes' "Spike finding"): `--with-nth=1` displays only the
 /// checkbox-glyph+name column (`--nth-delimiter` is the tab this module's
 /// stdin rows use as the field separator).
@@ -129,7 +140,7 @@ fn send_switch_tag_or_exit(
 /// for a typed, non-matching custom entry (the create-tag path), which by
 /// definition has no tab-delimited columns at all. Every tag ever created
 /// by typing a new name was silently misnamed to the literal text `"{2}"`
-/// as a result. `checklist::parse_fuzzel_output`/`parse_switch_selection`
+/// as a result. `picker::parse_fuzzel_output`/`parse_switch_selection`
 /// now parse the *full* raw returned line themselves (splitting on the
 /// tab delimiter when one is present) instead of trusting `fuzzel` to
 /// have already extracted just the id — this is what the `--with-nth=1`
@@ -309,14 +320,14 @@ fn connect_and_get_state() -> (
 ///
 /// Story 2.13: this mode no longer creates tags. A typed name that matches
 /// no row now parses as `Cancelled` (see
-/// `checklist::parse_fuzzel_output`), and the create-and-reopen machinery
+/// `picker::parse_fuzzel_output`), and the create-and-reopen machinery
 /// that used to live here — the cap-rejection row, the create-then-toggle
 /// chain, the local `tags` mirror update and the "created but not applied"
 /// notice row — moved wholesale to [`run_switch_mode`], which is where
 /// creating a tag belongs: a new tag is a place you go, not a label you
 /// attach. `tags` is consequently read-only for the whole call now.
 ///
-/// Code review follow-up (Story 2.10): `checklist::should_open_picker` is
+/// Code review follow-up (Story 2.10): `picker::should_open_picker` is
 /// checked once, up front, before any wire traffic at all. It also makes
 /// every `output_id.expect(...)` below safe: once past this guard, a `None`
 /// view guarantees a `Some` output for the rest of this call.
@@ -329,7 +340,7 @@ fn run_assign_mode(
     output_id: Option<u64>,
     output_name: Option<&str>,
 ) {
-    if !checklist::should_open_picker(view_id, output_id) {
+    if !picker::should_open_picker(view_id, output_id) {
         eprintln!("buoy-tag-picker: no window focused and no output known");
         std::process::exit(0);
     }
@@ -342,16 +353,16 @@ fn run_assign_mode(
     let known_ids: Vec<u8> = tags.iter().map(|t| t.id).collect();
 
     loop {
-        let entries = checklist::build_checklist_entries(&tags, &current_tags);
-        let input = checklist::render_fuzzel_input(&entries);
+        let entries = picker::build_checklist_entries(&tags, &current_tags);
+        let input = picker::render_fuzzel_input(&entries);
         // No `initial_search` — that mechanism exists only to restore a
         // name rejected at the tag cap, which is a create-path concept and
         // therefore switch mode's now (Story 2.13).
         let (exit_success, stdout) = run_fuzzel(&input, None, output_name, ASSIGN_PLACEHOLDER);
 
-        match checklist::parse_fuzzel_output(exit_success, &stdout, &known_ids) {
-            checklist::PickerAction::Cancelled => break,
-            checklist::PickerAction::Toggled(tag_id) => match view_id {
+        match picker::parse_fuzzel_output(exit_success, &stdout, &known_ids) {
+            picker::PickerAction::Cancelled => break,
+            picker::PickerAction::Toggled(tag_id) => match view_id {
                 Some(view_id) => {
                     if !send_request(&mut writer, &wire::Request::ToggleTag { view_id, tag_id }) {
                         eprintln!("buoy-tag-picker: failed to send toggle-tag request");
@@ -359,7 +370,7 @@ fn run_assign_mode(
                     }
                     match read_response(&mut reader) {
                         Some(wire::Response::Ok) => {
-                            checklist::toggle_local_membership(&mut current_tags, tag_id);
+                            picker::toggle_local_membership(&mut current_tags, tag_id);
                         }
                         Some(wire::Response::Error { message }) => {
                             eprintln!("buoy-tag-picker: {message}");
@@ -431,9 +442,9 @@ fn run_switch_mode(
     loop {
         let mut input = String::new();
         if pending_rejected_name.is_some() {
-            input.push_str(&checklist::render_rejection_row());
+            input.push_str(&picker::render_rejection_row());
         }
-        input.push_str(&checklist::render_switch_list(&tags));
+        input.push_str(&picker::render_switch_list(&tags));
         let (exit_success, stdout) = run_fuzzel(
             &input,
             pending_rejected_name.as_deref(),
@@ -441,13 +452,13 @@ fn run_switch_mode(
             SWITCH_PLACEHOLDER,
         );
 
-        match checklist::parse_switch_selection(exit_success, &stdout, &known_ids) {
-            checklist::SwitchAction::Cancelled => break,
-            checklist::SwitchAction::Selected(tag_id) => {
+        match picker::parse_switch_selection(exit_success, &stdout, &known_ids) {
+            picker::SwitchAction::Cancelled => break,
+            picker::SwitchAction::Selected(tag_id) => {
                 send_switch_tag_or_exit(&mut writer, &mut reader, output_id, tag_id);
                 break;
             }
-            checklist::SwitchAction::CreateTag(name) => {
+            picker::SwitchAction::CreateTag(name) => {
                 if !send_request(
                     &mut writer,
                     &wire::Request::CreateTag { name: name.clone() },
@@ -467,7 +478,7 @@ fn run_switch_mode(
                         break;
                     }
                     Some(wire::Response::Error { message }) => {
-                        if message == checklist::REJECTION_MESSAGE {
+                        if message == picker::REJECTION_MESSAGE {
                             pending_rejected_name = Some(name);
                         } else {
                             eprintln!("buoy-tag-picker: {message}");

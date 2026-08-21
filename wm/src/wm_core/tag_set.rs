@@ -18,6 +18,8 @@
 //! `TagSet`: a `u64` bitset of tag membership, one bit per `TagId`
 //! (0..64 per ADR-006).
 
+use super::MAX_TAGS;
+
 /// A bitset of tag membership. Bit position `n` corresponds to
 /// `TagId(n)`; valid positions are `0..64` per ADR-006.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -25,14 +27,14 @@ pub struct TagSet(u64);
 
 impl TagSet {
     /// Returns a `TagSet` with no bits set.
-    // `contains`/`insert`/`remove` are now reached via
-    // `WmCore::toggle_view_tag`, wired since Story 2.1's IPC dispatch
-    // layer — but `View`'s own `tags` field is still constructed via
-    // `Default::default()` in `register_view`, not `TagSet::empty()`, so
-    // this one constructor remains genuinely unreached from production
-    // code. Narrowed to just this function, same precedent as
-    // `TagRegistry::new()`'s existing narrow allow.
-    #[allow(dead_code)]
+    ///
+    /// Test-only. `contains`/`insert`/`remove` are reached from production
+    /// via `WmCore::toggle_view_tag`, but `View`'s own `tags` field is
+    /// constructed by `Default::default()` in `register_view`, so this
+    /// constructor never is. `#[cfg(test)]` rather than
+    /// `#[allow(dead_code)]` so that claim is compiler-enforced instead of
+    /// asserted by a comment that could go stale (audit finding J-09).
+    #[cfg(test)]
     pub fn empty() -> Self {
         TagSet(0)
     }
@@ -43,19 +45,19 @@ impl TagSet {
     /// `TagSet`'s inner field are both `pub`, so this guard has to live
     /// here, not just at `TagRegistry`'s call sites (NFR2).
     pub fn contains(&self, pos: u8) -> bool {
-        pos < 64 && (self.0 & (1u64 << pos) != 0)
+        pos < MAX_TAGS && (self.0 & (1u64 << pos) != 0)
     }
 
     /// Sets bit `pos`. A no-op for `pos >= 64` (see [`Self::contains`]).
     pub fn insert(&mut self, pos: u8) {
-        if pos < 64 {
+        if pos < MAX_TAGS {
             self.0 |= 1u64 << pos;
         }
     }
 
     /// Clears bit `pos`. A no-op for `pos >= 64` (see [`Self::contains`]).
     pub fn remove(&mut self, pos: u8) {
-        if pos < 64 {
+        if pos < MAX_TAGS {
             self.0 &= !(1u64 << pos);
         }
     }
