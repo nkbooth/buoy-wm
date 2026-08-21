@@ -30,7 +30,10 @@ use wayland_client::{
     protocol::{wl_output, wl_registry},
 };
 
-use crate::river::{
+mod compositor;
+
+use crate::compositor::river;
+use crate::compositor::river::{
     river_input_device_v1::RiverInputDeviceV1,
     river_input_manager_v1::RiverInputManagerV1,
     river_layer_shell_v1::RiverLayerShellV1,
@@ -46,55 +49,6 @@ use crate::river::{
     river_xkb_binding_v1::RiverXkbBindingV1,
     river_xkb_bindings_v1::RiverXkbBindingsV1,
 };
-
-mod river {
-    pub extern crate wayland_client;
-    pub use wayland_client::protocol::*;
-
-    mod interfaces {
-        pub(super) mod rwm {
-            pub use wayland_client::protocol::__interfaces::*;
-            wayland_scanner::generate_interfaces!("./protocol/river-window-management-v1.xml");
-        }
-
-        pub(super) mod rxkb {
-            use super::rwm::*;
-            wayland_scanner::generate_interfaces!("./protocol/river-xkb-bindings-v1.xml");
-        }
-
-        pub(super) mod rlayer {
-            use super::rwm::*;
-            wayland_scanner::generate_interfaces!("./protocol/river-layer-shell-v1.xml");
-        }
-
-        pub(super) mod rinput {
-            // Needs `wl_output` in scope for `map_to_output`, and nothing
-            // from `rwm` — input management is a standalone tree, unlike
-            // `rxkb`/`rlayer` which both hang off `river_seat_v1`.
-            pub use wayland_client::protocol::__interfaces::*;
-            wayland_scanner::generate_interfaces!("./protocol/river-input-management-v1.xml");
-        }
-
-        pub(super) mod rlibinput {
-            // `river_libinput_device_v1.input_device` carries a
-            // `river_input_device_v1`, so this must be generated after (and
-            // importing) `rinput`.
-            use super::rinput::*;
-            wayland_scanner::generate_interfaces!("./protocol/river-libinput-config-v1.xml");
-        }
-    }
-
-    use self::interfaces::rinput::*;
-    use self::interfaces::rlayer::*;
-    use self::interfaces::rlibinput::*;
-    use self::interfaces::rwm::*;
-    use self::interfaces::rxkb::*;
-    wayland_scanner::generate_client_code!("./protocol/river-window-management-v1.xml");
-    wayland_scanner::generate_client_code!("./protocol/river-xkb-bindings-v1.xml");
-    wayland_scanner::generate_client_code!("./protocol/river-layer-shell-v1.xml");
-    wayland_scanner::generate_client_code!("./protocol/river-input-management-v1.xml");
-    wayland_scanner::generate_client_code!("./protocol/river-libinput-config-v1.xml");
-}
 
 use buoy_wm::{config, ipc, wm_core};
 
