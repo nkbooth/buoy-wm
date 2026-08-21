@@ -21,6 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use buoy_common::{log_err, log_info};
 use wayland_backend::client::ObjectId;
@@ -173,6 +174,31 @@ fn spawn_tracked(command: &mut std::process::Command, what: &str) -> bool {
             false
         }
     }
+}
+
+/// Puts `message` in front of the user — as a desktop notification as well
+/// as in the journal.
+///
+/// This WM is `exec`'d by river with no attached TTY, so whether a log line
+/// reaches the journal, `~/.xsession-errors` or `/dev/null` depends on the
+/// display manager: from the user's seat every one of them is
+/// conditionally invisible (audit finding G-03). Reserved for failures the
+/// user can actually act on — a dead keybind, a rejected config, an IPC
+/// server that never started. Structurally-unreachable developer
+/// tripwires, such as the `log_wm_core_err` sites, stay on plain logging;
+/// a notification the user cannot act on trains them to dismiss the ones
+/// they can.
+///
+/// Routed through [`spawn_tracked`] like every other child: this process
+/// lives for the whole session and would otherwise accumulate one zombie
+/// per notification. There is no recursion risk in doing so —
+/// `spawn_tracked`'s own failure path only logs.
+fn notify_user(message: &str) {
+    spawn_tracked(
+        &mut buoy_common::notify::notify_send_command(message),
+        "notify-send",
+    );
+    log_err!("{message}");
 }
 
 /// Sends the one `river_libinput_device_v1` request `setting` stands for.
@@ -1548,7 +1574,10 @@ impl Seat {
             // change shape, so a read stays a read.
             Action::SwitchTag(name) => {
                 let Some(output_id) = active_output_id else {
-                    log_err!("Tag keybind for `{name}` pressed but no output is registered yet");
+                    notify_user(&format!(
+                        "The keybind for tag `{name}` did nothing: no output is \
+                         registered yet."
+                    ));
                     return None;
                 };
                 let tag_id = match wm_core.tag_id_by_name(&name) {
@@ -1758,7 +1787,7 @@ impl Seat {
                     }
                 },
                 None => {
-                    log_err!("Tag-cycle keybind pressed but no output is registered yet");
+                    notify_user("The tag-cycle keybind did nothing: no output is registered yet.");
                     None
                 }
             },
@@ -1846,9 +1875,9 @@ impl Seat {
                             log_err!("Failed to resolve wm's own executable path: {e}")
                         }
                     },
-                    None => {
-                        log_err!("Tag-switch keybind pressed but no output is registered yet")
-                    }
+                    None => notify_user(
+                        "The tag-switch keybind did nothing: no output is registered yet.",
+                    ),
                 }
                 None
             }
@@ -2622,16 +2651,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // with, so refusing to start over a bad keybind would lock them out of
     // their own session. Loaded before the first roundtrip binds any seat,
     // since `init_new_seats` registers whatever this produces.
+    // `load` only reports a problem for a file it actually found, so the
+    // path is always resolvable here; the fallback label is
+    // belt-and-braces rather than a reachable case.
+    let config_path = config::config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "the config file".to_string());
     app_data.wm.config = match Config::load() {
-        Ok(config) => config,
+        Ok((config, skipped)) => {
+            if let Some(error) = config::ConfigError::from_many(skipped) {
+                notify_user(&format!(
+                    "{config_path}: {error}\nThose entries were skipped; \
+                     everything else in the file is in effect."
+                ));
+            }
+            config
+        }
         Err(e) => {
-            // `load` only returns `Err` for a file it actually found, so
-            // the path is always resolvable here; the fallback label is
-            // belt-and-braces rather than a reachable case.
-            let path = config::config_path()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "the config file".to_string());
-            log_err!("Failed to load {path}: {e}\nFalling back to built-in defaults.");
+            notify_user(&format!(
+                "{config_path} was rejected ({e}).\nRunning with built-in \
+                 default keybinds until it is fixed."
+            ));
             Config::default()
         }
     };
@@ -2655,9 +2695,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // convention rather than `std::process::exit`, which this file
     // otherwise reserves for unrecoverable Wayland-protocol-level
     // failures only.
-    let ipc_socket = start_ipc_server(&app_data.wm.wm_core, &app_data.wm.config.defaults);
+    // A failed IPC server is not fatal — the WM's core job, managing
+    // windows, must not depend on it, and refusing to start is the one
+    // outcome `SECURITY.md` rules out for the session leader. But three
+    // keybinds and every status bar are dead until the next restart, which
+    // used to be explained by a single line on an invisible stderr (audit
+    // finding B-03).
+    let (ipc_socket, ipc_outage) =
+        match start_ipc_server(&app_data.wm.wm_core, &app_data.wm.config.defaults) {
+            Ok(socket_path) => (Some(socket_path), None),
+            Err(reason) => {
+                notify_user(&format!(
+                    "buoy-wm started with no IPC server: {reason}.\nThe tag \
+                     picker (Super+A), the tag switcher (Super+S) and every \
+                     status bar will do nothing until buoy-wm is restarted."
+                ));
+                (None, Some(reason))
+            }
+        };
 
-    let outcome = run_event_loop(&mut event_queue, &mut app_data);
+    let outcome = run_event_loop(&mut event_queue, &mut app_data, ipc_outage);
 
     // Audit finding B-04: nothing used to unlink the socket, so every
     // start found a stale inode and had to decide whether to clobber it.
@@ -2697,33 +2754,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn start_ipc_server(
     wm_core: &Arc<Mutex<wm_core::state::WmCore>>,
     defaults: &config::Defaults,
-) -> Option<PathBuf> {
-    let socket_path = buoy_common::socket_path::default_socket_path()?;
+) -> Result<PathBuf, String> {
+    let socket_path = buoy_common::socket_path::default_socket_path()
+        .ok_or_else(|| buoy_common::socket_path::NO_RUNTIME_DIR_MESSAGE.to_string())?;
     // The socket's own `0600` mode is applied one syscall after `bind`,
     // and Linux checks AF_UNIX permissions at `connect(2)` — so the
     // directory, not the mode, is what actually has to be private (audit
     // finding C-03).
-    let parent = socket_path.parent()?;
-    if let Err(e) = buoy_common::socket_path::verify_private_dir(parent) {
-        log_err!("IPC server disabled: {e}");
-        return None;
-    }
-    match ipc::server::spawn(Arc::clone(wm_core), &socket_path, defaults.clone()) {
-        Ok(_accept_thread) => Some(socket_path),
-        Err(e) => {
-            log_err!("Failed to start IPC server on {socket_path:?}: {e}");
-            None
-        }
-    }
+    let parent = socket_path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", socket_path.display()))?;
+    buoy_common::socket_path::verify_private_dir(parent).map_err(|e| e.to_string())?;
+    ipc::server::spawn(Arc::clone(wm_core), &socket_path, defaults.clone())
+        .map(|_accept_thread| socket_path.clone())
+        .map_err(|e| format!("cannot listen on {}: {e}", socket_path.display()))
 }
 
+/// How long between reminders that this session has no IPC server. Long
+/// enough not to become the noise it is trying to be heard over, short
+/// enough that a journal from any point in the session says so.
+const IPC_OUTAGE_REMINDER: Duration = Duration::from_secs(600);
+
 /// Dispatches Wayland events until the connection ends.
+///
+/// `ipc_outage`, when set, is the reason IPC never started; it is re-logged
+/// on a slow timer rather than once at startup, so a journal read hours
+/// later still explains why `Super+A` does nothing.
 fn run_event_loop(
     event_queue: &mut wayland_client::EventQueue<AppData>,
     app_data: &mut AppData,
+    ipc_outage: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut reminded_at = std::time::Instant::now();
     loop {
         event_queue.blocking_dispatch(app_data)?;
+        if let Some(reason) = &ipc_outage
+            && reminded_at.elapsed() >= IPC_OUTAGE_REMINDER
+        {
+            log_err!("still running with no IPC server: {reason}");
+            reminded_at = std::time::Instant::now();
+        }
     }
 }
 

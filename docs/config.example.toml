@@ -27,6 +27,13 @@
 # built-in set — so copying this file wholesale gives you the defaults *and*
 # those four, one of which runs `~/bin/toggle-bluetooth.sh`, a script you
 # almost certainly do not have. Delete what you do not want.
+#
+# If one entry in this file is wrong, that entry is skipped and reported —
+# everything else still applies. A file that is not valid TOML, or a wrong
+# value in [defaults], has no single entry to drop and falls back to the
+# built-in defaults in full, keybinds included. Either way a desktop
+# notification names the problem; `journalctl --user -b --identifier=buoy-wm`
+# has the detail.
 
 [defaults]
 # Spawned by the `terminal` action, and used for each tag's pinned terminal.
@@ -58,7 +65,8 @@ pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{sess
 #            single characters are NOT — "a" and "A" are different keysyms,
 #            and an uppercase letter is the *shifted* symbol, so it must be
 #            bound with "Shift" or it can never fire. Write "q", not "Q",
-#            for Super+q. (This is validated at load.)
+#            for Super+q. (Checked at load; a binding that fails is skipped
+#            and reported, not silently dead.)
 #   action = a bare string, or a single-key table for the two that take an
 #            argument.
 #
@@ -67,7 +75,8 @@ pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{sess
 #          { switch_tag = "<name>" }, { exec = "<command line>" }
 # `move` and `resize` drive a pointer drag, so they are mousebind-only.
 #
-# Binding the same mod+key twice is an error rather than a silent race.
+# Binding the same mod+key twice is reported rather than a silent race: the
+# second binding is skipped.
 
 [[keybind]]
 mod = ["Super"]

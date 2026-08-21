@@ -63,6 +63,59 @@ const ASSIGN_PLACEHOLDER: &str = "type to filter";
 /// placeholder is where that is discoverable.
 const SWITCH_PLACEHOLDER: &str = "type to filter, or a new name to create";
 
+/// Reports `message` where the user will actually see it, then exits
+/// non-zero.
+///
+/// This process is spawned by a keybind with no terminal, so its stderr
+/// goes wherever the display manager sends it — from the user's seat, every
+/// failure here was invisible, and the ten `exit(1)` sites made
+/// `Super+A`/`Super+S` look like dead keys (audit finding G-03).
+fn die_visibly(message: &str) -> ! {
+    log_err!("{message}");
+    // Spawned, not waited for: this process is about to exit, and the
+    // notification daemon takes the request over D-Bus before `notify-send`
+    // itself finishes.
+    if let Err(e) = buoy_common::notify::notify_send_command(message).spawn() {
+        log_err!("could not notify the user about the failure above: {e}");
+    }
+    std::process::exit(1);
+}
+
+/// How long to wait before connect attempt `attempt + 1`, or `None` when
+/// there are no attempts left.
+///
+/// The WM binds its IPC socket only after its first Wayland roundtrip, so
+/// there is a real window at login during which the socket does not exist
+/// and a keypress gets `ECONNREFUSED` (audit finding E-05). Connect is the
+/// only step retried, because it is the only one whose retry is
+/// unambiguously safe: `toggle-tag` is not idempotent, so a general retry
+/// layer would need scoping away from it.
+fn retry_delay(attempt: u32) -> Option<Duration> {
+    const ATTEMPTS: u32 = 3;
+    if attempt + 1 >= ATTEMPTS {
+        return None;
+    }
+    Some(Duration::from_millis(50 << attempt))
+}
+
+/// Connects to `socket_path`, retrying a refused connection on
+/// [`retry_delay`]'s schedule.
+fn connect_with_retry(socket_path: &std::path::Path) -> std::io::Result<UnixStream> {
+    let mut attempt = 0;
+    loop {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => match retry_delay(attempt) {
+                Some(delay) => {
+                    std::thread::sleep(delay);
+                    attempt += 1;
+                }
+                None => return Err(e),
+            },
+        }
+    }
+}
+
 /// Writes `request` as one JSON line followed by `\n`, flushing
 /// afterward. Returns `false` if the write failed (peer gone).
 fn send_request(writer: &mut UnixStream, request: &wire::Request) -> bool {
@@ -118,18 +171,18 @@ fn send_switch_tag_or_exit(
     tag_id: u8,
 ) {
     if !send_request(writer, &wire::Request::SwitchTag { output_id, tag_id }) {
-        log_err!("failed to send switch-tag request");
-        std::process::exit(1);
+        die_visibly("buoy-wm stopped listening before the tag switch was sent");
     }
     match read_response(reader) {
         Some(wire::Response::Ok) => {}
         Some(wire::Response::Error { message }) => {
             report_server_error(&message);
-            std::process::exit(1);
+            die_visibly("buoy-wm refused the tag switch; see the journal for its reason");
         }
         other => {
-            log_err!("unexpected response to switch-tag: {other:?}");
-            std::process::exit(1);
+            die_visibly(&format!(
+                "buoy-wm answered the tag switch with something unexpected: {other:?}"
+            ));
         }
     }
 }
@@ -176,11 +229,14 @@ fn send_switch_tag_or_exit(
 /// Wayland connector `wm` resolved as the active output (Story 2.9); `None`
 /// omits the flag entirely, leaving fuzzel's own "let the compositor
 /// choose" default in effect, same as this story's baseline behavior.
-/// Returns
-/// `(exit_success, stdout_as_lossy_utf8)`; a failure to spawn or wait is
-/// treated as a failed/cancelled invocation rather than panicking (never
-/// exercised live in this sandbox — no `fuzzel` binary and no Wayland
-/// session, see the story's Task 8.3 note).
+/// Returns `Ok((exit_success, stdout_as_lossy_utf8))` for an invocation
+/// that ran, and `Err(message)` when it could not be spawned or waited
+/// for. Those used to be the same value: `(false, String::new())` covered
+/// both "`fuzzel` is not installed" and "the user pressed Escape", so a
+/// missing dependency presented as `Super+A` doing nothing at all, with a
+/// zero exit code (audit finding F-02). The `parse_*` functions'
+/// defensive reading of `false` is correct and unchanged — the bug was
+/// upstream, in what `false` had been made to mean.
 ///
 /// Code review follow-up (finding #2): stdin is written from a dedicated
 /// thread, concurrently with the main thread's `wait_with_output()`, rather
@@ -196,8 +252,26 @@ fn run_fuzzel(
     initial_search: Option<&str>,
     output_name: Option<&str>,
     placeholder: &str,
-) -> (bool, String) {
-    let mut command = Command::new("fuzzel");
+) -> Result<(bool, String), String> {
+    run_dmenu(FUZZEL, input, initial_search, output_name, placeholder)
+}
+
+/// The launcher binary. Hardcoded at the one call site above rather than
+/// read from `defaults.launcher` — see [`run_fuzzel`] — and taken as a
+/// parameter by [`run_dmenu`] only so the tests can drive the spawn-failed,
+/// dismissed and accepted paths without a real `fuzzel` or a Wayland
+/// session.
+const FUZZEL: &str = "fuzzel";
+
+/// [`run_fuzzel`] with the program named explicitly.
+fn run_dmenu(
+    program: &str,
+    input: &str,
+    initial_search: Option<&str>,
+    output_name: Option<&str>,
+    placeholder: &str,
+) -> Result<(bool, String), String> {
+    let mut command = Command::new(program);
     command
         .arg("--dmenu")
         // "overlay" (not the default "top") renders above a fullscreen
@@ -228,13 +302,11 @@ fn run_fuzzel(
     if let Some(name) = output_name.filter(|name| !name.is_empty()) {
         command.arg(format!("--output={name}"));
     }
-    let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            log_err!("failed to spawn fuzzel: {e}");
-            return (false, String::new());
-        }
-    };
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run `{program}`: {e}"))?;
 
     // Take stdin and write it on its own thread so this thread is free to
     // call `wait_with_output()` concurrently — if `input` is large enough
@@ -253,16 +325,15 @@ fn run_fuzzel(
         })
     });
 
-    let result = match child.wait_with_output() {
-        Ok(output) => (
-            output.status.success(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-        ),
-        Err(e) => {
-            log_err!("failed to wait for fuzzel: {e}");
-            (false, String::new())
-        }
-    };
+    let result = child
+        .wait_with_output()
+        .map(|output| {
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+            )
+        })
+        .map_err(|e| format!("cannot wait for `{program}`: {e}"));
 
     // `wait_with_output` already implies the write side is done or moot
     // (the child exited), but join anyway so a stdin-write error above is
@@ -290,27 +361,21 @@ fn connect_and_get_state() -> (
     Vec<wire::ViewDto>,
     Option<u64>,
 ) {
-    let socket_path = match buoy_common::socket_path::default_socket_path() {
-        Some(socket_path) => socket_path,
-        None => {
-            log_err!("{NO_RUNTIME_DIR_MESSAGE}");
-            std::process::exit(1);
-        }
+    let Some(socket_path) = buoy_common::socket_path::default_socket_path() else {
+        die_visibly(NO_RUNTIME_DIR_MESSAGE);
     };
-    let stream = match UnixStream::connect(&socket_path) {
+    let stream = match connect_with_retry(&socket_path) {
         Ok(stream) => stream,
-        Err(e) => {
-            log_err!("failed to connect to {socket_path:?}: {e}");
-            std::process::exit(1);
-        }
+        Err(e) => die_visibly(&format!("cannot reach buoy-wm at {socket_path:?}: {e}")),
     };
     // A `wm` that is not running as this user is not this user's `wm`. The
     // mirror of the server's own check, and the reason a squatted socket
     // path is a failed connection rather than a silent capture of every
     // tag name, every window's app id, and every selection made here.
     if let Err(rejection) = buoy_common::peer::authenticate_peer(&stream) {
-        log_err!("refusing to talk to {socket_path:?}: {rejection}");
-        std::process::exit(1);
+        die_visibly(&format!(
+            "refusing to talk to whatever is listening at {socket_path:?}: {rejection}"
+        ));
     }
     // This process had no socket deadline at all, so a wedged or squatted
     // peer left it blocked forever while holding a `--layer=overlay`
@@ -323,22 +388,17 @@ fn connect_and_get_state() -> (
         ("write", stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT))),
     ] {
         if let Err(e) = applied {
-            log_err!("failed to set the socket {label} timeout: {e}");
-            std::process::exit(1);
+            die_visibly(&format!("cannot set the socket {label} timeout: {e}"));
         }
     }
     let mut writer = match stream.try_clone() {
         Ok(writer) => writer,
-        Err(e) => {
-            log_err!("failed to clone connection for writing: {e}");
-            std::process::exit(1);
-        }
+        Err(e) => die_visibly(&format!("cannot split the connection for writing: {e}")),
     };
     let mut reader = BufReader::new(stream);
 
     if !send_request(&mut writer, &wire::Request::GetState) {
-        log_err!("failed to send get-state request");
-        std::process::exit(1);
+        die_visibly("buoy-wm stopped listening before the state request was sent");
     }
     let (tags, views, focused_view) = match read_response(&mut reader) {
         Some(wire::Response::State {
@@ -346,14 +406,10 @@ fn connect_and_get_state() -> (
             views,
             focused_view,
         }) => (tags, views, focused_view),
-        Some(other) => {
-            log_err!("unexpected response to get-state: {other:?}");
-            std::process::exit(1);
-        }
-        None => {
-            log_err!("no usable response to get-state");
-            std::process::exit(1);
-        }
+        Some(other) => die_visibly(&format!(
+            "buoy-wm answered the state request with something unexpected: {other:?}"
+        )),
+        None => die_visibly("buoy-wm sent nothing usable in answer to the state request"),
     };
 
     (writer, reader, tags, views, focused_view)
@@ -411,7 +467,11 @@ fn run_assign_mode(
         // No `initial_search` — that mechanism exists only to restore a
         // name rejected at the tag cap, which is a create-path concept and
         // therefore switch mode's now (Story 2.13).
-        let (exit_success, stdout) = run_fuzzel(&input, None, output_name, ASSIGN_PLACEHOLDER);
+        let (exit_success, stdout) = match run_fuzzel(&input, None, output_name, ASSIGN_PLACEHOLDER)
+        {
+            Ok(outcome) => outcome,
+            Err(message) => die_visibly(&message),
+        };
 
         match picker::parse_fuzzel_output(exit_success, &stdout, &known_ids) {
             picker::PickerAction::Cancelled => break,
@@ -496,12 +556,15 @@ fn run_switch_mode(
             input.push_str(&picker::render_rejection_row());
         }
         input.push_str(&picker::render_switch_list(&tags));
-        let (exit_success, stdout) = run_fuzzel(
+        let (exit_success, stdout) = match run_fuzzel(
             &input,
             pending_rejected_name.as_deref(),
             output_name,
             SWITCH_PLACEHOLDER,
-        );
+        ) {
+            Ok(outcome) => outcome,
+            Err(message) => die_visibly(&message),
+        };
 
         match picker::parse_switch_selection(exit_success, &stdout, &known_ids) {
             picker::SwitchAction::Cancelled => break,
@@ -550,10 +613,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = match mode::parse_args(&args) {
         Ok(mode) => mode,
-        Err(message) => {
-            log_err!("{message}");
-            std::process::exit(1);
-        }
+        Err(message) => die_visibly(&message),
     };
 
     match mode {
@@ -586,5 +646,47 @@ fn main() {
             let (writer, reader, tags, _views, _focused_view) = connect_and_get_state();
             run_switch_mode(writer, reader, tags, output_id, output_name.as_deref());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Audit finding F-02: a launcher that could not be spawned and a user
+    /// who pressed Escape were byte-for-byte identical, so `fuzzel` not
+    /// being installed presented as "`Super+A` does nothing" — including a
+    /// zero exit code, so even a scripted caller could not tell.
+    #[test]
+    fn a_launcher_that_cannot_be_spawned_is_an_error_not_a_cancellation() {
+        let error = run_dmenu("buoy-no-such-launcher-binary", "", None, None, "")
+            .expect_err("a missing launcher must not look like a dismissal");
+        assert!(error.contains("buoy-no-such-launcher-binary"), "{error}");
+    }
+
+    #[test]
+    fn a_launcher_the_user_dismissed_is_a_completed_invocation() {
+        let (accepted, output) =
+            run_dmenu("/bin/false", "", None, None, "").expect("/bin/false ran");
+        assert!(!accepted);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn a_launcher_that_exits_zero_is_an_accepted_invocation() {
+        let (accepted, _output) =
+            run_dmenu("/bin/true", "", None, None, "").expect("/bin/true ran");
+        assert!(accepted);
+    }
+
+    /// Audit finding E-05: the WM binds its socket after its first Wayland
+    /// roundtrip, so a keypress in that window used to give the picker
+    /// ECONNREFUSED and an immediate exit — `Super+A` silently doing
+    /// nothing, once, unreproducibly.
+    #[test]
+    fn the_connect_retry_schedule_backs_off_and_then_gives_up() {
+        assert_eq!(retry_delay(0), Some(Duration::from_millis(50)));
+        assert_eq!(retry_delay(1), Some(Duration::from_millis(100)));
+        assert_eq!(retry_delay(2), None);
     }
 }

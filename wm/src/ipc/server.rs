@@ -309,6 +309,12 @@ fn accept_loop(
             }
         }
     }
+
+    // Documented as unreachable — `UnixListener::incoming()` never yields
+    // `None` — and therefore exactly the kind of thing that would end IPC
+    // for the rest of the login session with no record at all if the
+    // documentation were ever wrong (audit finding B-03).
+    log_err!("the accept loop ended, so IPC is down until buoy-wm restarts");
 }
 
 /// Moves one accepted connection onto its own thread. A failure to create

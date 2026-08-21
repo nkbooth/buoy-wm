@@ -350,6 +350,26 @@ pub enum ConfigError {
     /// An `accel_speed` outside libinput's `-1.0..=1.0`.
     AccelSpeedOutOfRange(f64),
     Io(std::io::Error),
+    /// More than one offending entry in the same file. Reported together
+    /// so four independent mistakes take one edit-and-restart cycle
+    /// instead of four (audit finding G-04).
+    Multiple(Vec<ConfigError>),
+}
+
+impl ConfigError {
+    /// Folds a list of per-entry errors into one, or `None` when the list
+    /// is empty.
+    ///
+    /// A single error is returned as itself rather than wrapped, so
+    /// existing call sites and tests can still match on the variant
+    /// directly; only a genuine plural becomes [`ConfigError::Multiple`].
+    pub fn from_many(mut errors: Vec<ConfigError>) -> Option<Self> {
+        match errors.len() {
+            0 => None,
+            1 => errors.pop(),
+            _ => Some(Self::Multiple(errors)),
+        }
+    }
 }
 
 impl fmt::Display for ConfigError {
@@ -405,6 +425,13 @@ impl fmt::Display for ConfigError {
                  -1.0..=1.0 range"
             ),
             ConfigError::Io(e) => write!(f, "{e}"),
+            ConfigError::Multiple(errors) => {
+                write!(f, "{} problems:", errors.len())?;
+                for error in errors {
+                    write!(f, "\n  - {error}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -524,95 +551,106 @@ struct RawDefaults {
 }
 
 impl Config {
-    /// Parses config file contents.
+    /// Parses config file contents, rejecting the file if anything in it
+    /// is wrong.
     ///
     /// Declaring any `[[keybind]]` replaces the built-in keybind set
     /// outright rather than merging into it — merging would leave a
     /// built-in binding impossible to remove, and would silently
     /// reintroduce a default the user had deliberately rebound elsewhere.
     /// `[[mousebind]]` is an independent list with the same rule.
+    ///
+    /// Every offending entry is reported, not just the first: a file with
+    /// four independent mistakes used to take four edit-and-restart cycles
+    /// to clear (audit finding G-04). [`Config::load`] uses
+    /// [`Config::parse_lenient`] instead — this strict form is what a test
+    /// wants, where "the file is not what the user wrote" has to be a
+    /// failure — including the test that asserts the shipped
+    /// `docs/config.example.toml` has nothing wrong with it at all.
+    /// `#[cfg(test)]` rather than `#[allow(dead_code)]`: nothing in the
+    /// running WM should reject a whole file any more, and a strict entry
+    /// point left reachable is one a future call site can reach by
+    /// accident.
+    #[cfg(test)]
     pub fn parse(contents: &str) -> Result<Self, ConfigError> {
+        let (config, skipped) = Self::parse_lenient(contents)?;
+        match ConfigError::from_many(skipped) {
+            Some(error) => Err(error),
+            None => Ok(config),
+        }
+    }
+
+    /// Parses config file contents, skipping individual `[[keybind]]`,
+    /// `[[mousebind]]` and `[[input]]` entries that are invalid and
+    /// returning one error per skipped entry.
+    ///
+    /// This is what the WM actually loads with, and it is what the
+    /// project's own recorded acceptance criterion always said should
+    /// happen — a bad binding is *"skipped and logged"*. The behaviour it
+    /// replaces threw the whole file away over one typo: every other
+    /// binding, every `[defaults]` value and every `[[input]]` block
+    /// reverted to the built-ins, which for a user who had long since
+    /// rebound `Super+Return` restored a keymap they no longer knew (audit
+    /// finding G-04).
+    ///
+    /// `Err` is reserved for what cannot be skipped: a file that is not
+    /// valid TOML, and a `[defaults]` value that is wrong. There is no
+    /// "this entry" to drop for a `[defaults]` mistake, and quietly
+    /// substituting the built-in value would be the whole-file discard in
+    /// miniature.
+    pub fn parse_lenient(contents: &str) -> Result<(Self, Vec<ConfigError>), ConfigError> {
         let raw: RawConfig = toml::from_str(contents).map_err(ConfigError::Toml)?;
         let built_in = Config::default();
-        // Every check below rejects at load, naming the offender, rather
-        // than letting a binding register and then silently never fire —
-        // the failure mode is invisible from the user's side, so it has to
-        // be caught while there is still something to point at.
+        validate_defaults(&raw.defaults)?;
+
+        let mut skipped: Vec<ConfigError> = Vec::new();
+
+        // Every check below names the offender rather than letting a
+        // binding register and then silently never fire — the failure mode
+        // is invisible from the user's side, so it has to be caught while
+        // there is still something to point at.
         let mut seen: Vec<String> = Vec::new();
-        for keybind in &raw.keybinds {
-            if keybind.keysym().is_none() {
-                return Err(ConfigError::UnknownKey(keybind.key.clone()));
-            }
-            if let Some(key) = shifted_without_shift(keybind) {
-                return Err(ConfigError::ShiftedKeyWithoutShift(key.to_string()));
-            }
-            if keybind.action.is_pointer_only() {
-                return Err(ConfigError::PointerOnlyAction(
-                    keybind.action.config_name().to_string(),
-                ));
-            }
-            let label = binding_label(&keybind.mods, &keybind.key);
-            if seen.contains(&label) {
-                return Err(ConfigError::DuplicateBinding(label));
-            }
-            seen.push(label);
-        }
+        let keybinds: Vec<Keybind> = raw
+            .keybinds
+            .into_iter()
+            .filter(|keybind| match validate_keybind(keybind, &mut seen) {
+                Ok(()) => true,
+                Err(e) => {
+                    skipped.push(e);
+                    false
+                }
+            })
+            .collect();
+
         let mut seen_buttons: Vec<String> = Vec::new();
-        for mousebind in &raw.mousebinds {
-            let label = binding_label(&mousebind.mods, mousebind.button.label());
-            if seen_buttons.contains(&label) {
-                return Err(ConfigError::DuplicateBinding(label));
-            }
-            seen_buttons.push(label);
-        }
-        // Same rule as the bindings above: an `[[input]]` that can never
-        // apply is reported now, while there is still a name to point at.
-        // A misconfigured device is invisible from the user's side — it just
-        // behaves as though the section were never written.
-        let mut seen_inputs: Vec<&str> = Vec::new();
-        for input in &raw.inputs {
-            if input.name.is_empty() {
-                return Err(ConfigError::EmptyInputName);
-            }
-            if input.is_empty() {
-                return Err(ConfigError::InputWithoutSettings(input.name.clone()));
-            }
-            if seen_inputs.contains(&input.name.as_str()) {
-                return Err(ConfigError::DuplicateInput(input.name.clone()));
-            }
-            seen_inputs.push(&input.name);
-            // libinput rejects an out-of-range speed itself, but only at
-            // the point the request is sent — one silent `invalid` result
-            // per device, long after the file was read.
-            if let Some(speed) = input.accel_speed
-                && !(-1.0..=1.0).contains(&speed)
-            {
-                return Err(ConfigError::AccelSpeedOutOfRange(speed));
-            }
-        }
-        // An empty string here would reach `Command::new("")` and fail once
-        // per keypress; an empty tag name would be permanent (ADR-006 has
-        // no delete). Both are far better reported once, at load.
-        for (field, value) in [
-            ("terminal", &raw.defaults.terminal),
-            ("launcher", &raw.defaults.launcher),
-            ("default_tag", &raw.defaults.default_tag),
-        ] {
-            if value.as_deref().is_some_and(str::is_empty) {
-                return Err(ConfigError::EmptyDefault(field));
-            }
-        }
-        // Without `{app_id}` the spawned terminal never carries the app-id
-        // every other part of the WM identifies the pinned terminal by, so
-        // it would map as an ordinary floating window and the tag's
-        // backdrop would never appear — and the spawn claim is idempotent,
-        // so it would never be retried either.
-        if let Some(args) = &raw.defaults.pinned_terminal_args
-            && !args.iter().any(|arg| arg.contains("{app_id}"))
-        {
-            return Err(ConfigError::MissingAppIdPlaceholder);
-        }
-        Ok(Self {
+        let mousebinds: Vec<Mousebind> = raw
+            .mousebinds
+            .into_iter()
+            .filter(
+                |mousebind| match validate_mousebind(mousebind, &mut seen_buttons) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        skipped.push(e);
+                        false
+                    }
+                },
+            )
+            .collect();
+
+        let mut seen_inputs: Vec<String> = Vec::new();
+        let inputs: Vec<InputConfig> = raw
+            .inputs
+            .into_iter()
+            .filter(|input| match validate_input(input, &mut seen_inputs) {
+                Ok(()) => true,
+                Err(e) => {
+                    skipped.push(e);
+                    false
+                }
+            })
+            .collect();
+
+        let config = Self {
             defaults: Defaults {
                 terminal: raw.defaults.terminal.unwrap_or(built_in.defaults.terminal),
                 launcher: raw.defaults.launcher.unwrap_or(built_in.defaults.launcher),
@@ -625,39 +663,136 @@ impl Config {
                     .pinned_terminal_args
                     .unwrap_or(built_in.defaults.pinned_terminal_args),
             },
-            keybinds: if raw.keybinds.is_empty() {
+            // An empty list after skipping lands on the same documented
+            // rule as an empty list in the file: no declaration means the
+            // built-in set.
+            keybinds: if keybinds.is_empty() {
                 built_in.keybinds
             } else {
-                raw.keybinds
+                keybinds
             },
-            mousebinds: if raw.mousebinds.is_empty() {
+            mousebinds: if mousebinds.is_empty() {
                 built_in.mousebinds
             } else {
-                raw.mousebinds
+                mousebinds
             },
-            inputs: if raw.inputs.is_empty() {
+            inputs: if inputs.is_empty() {
                 built_in.inputs
             } else {
-                raw.inputs
+                inputs
             },
-        })
+        };
+        Ok((config, skipped))
     }
 
     /// Loads [`config_path`]'s file, falling back to [`Config::default`]
     /// when it doesn't exist — running without a config file is the
-    /// expected case, not an error. A file that exists but can't be read or
-    /// parsed *is* an error, so a typo never degrades silently into
-    /// "defaults".
-    pub fn load() -> Result<Self, ConfigError> {
+    /// expected case, not an error.
+    ///
+    /// Returns the config together with one error per entry that was
+    /// skipped, so the caller can put them in front of the user. `Err`
+    /// means the file could not be used at all: unreadable, not valid
+    /// TOML, or a bad `[defaults]` value.
+    pub fn load() -> Result<(Self, Vec<ConfigError>), ConfigError> {
         let Some(path) = config_path() else {
-            return Ok(Config::default());
+            return Ok((Config::default(), Vec::new()));
         };
         match std::fs::read_to_string(&path) {
-            Ok(contents) => Config::parse(&contents),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Ok(contents) => Config::parse_lenient(&contents),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok((Config::default(), Vec::new()))
+            }
             Err(e) => Err(ConfigError::Io(e)),
         }
     }
+}
+
+/// The rules one `[[keybind]]` has to satisfy, in the order a reader would
+/// check them. `seen` accumulates the modifier-plus-trigger labels already
+/// accepted, so a duplicate is reported against the entry that came second.
+fn validate_keybind(keybind: &Keybind, seen: &mut Vec<String>) -> Result<(), ConfigError> {
+    if keybind.keysym().is_none() {
+        return Err(ConfigError::UnknownKey(keybind.key.clone()));
+    }
+    if let Some(key) = shifted_without_shift(keybind) {
+        return Err(ConfigError::ShiftedKeyWithoutShift(key.to_string()));
+    }
+    if keybind.action.is_pointer_only() {
+        return Err(ConfigError::PointerOnlyAction(
+            keybind.action.config_name().to_string(),
+        ));
+    }
+    let label = binding_label(&keybind.mods, &keybind.key);
+    if seen.contains(&label) {
+        return Err(ConfigError::DuplicateBinding(label));
+    }
+    seen.push(label);
+    Ok(())
+}
+
+/// As [`validate_keybind`], for a `[[mousebind]]`: only the duplicate rule
+/// applies, since a button is always a real trigger and the pointer-only
+/// actions are the ones that belong here.
+fn validate_mousebind(mousebind: &Mousebind, seen: &mut Vec<String>) -> Result<(), ConfigError> {
+    let label = binding_label(&mousebind.mods, mousebind.button.label());
+    if seen.contains(&label) {
+        return Err(ConfigError::DuplicateBinding(label));
+    }
+    seen.push(label);
+    Ok(())
+}
+
+/// The rules one `[[input]]` has to satisfy. A misconfigured device is
+/// invisible from the user's side — it just behaves as though the section
+/// were never written — so an entry that can never apply is reported while
+/// there is still a name to point at.
+fn validate_input(input: &InputConfig, seen: &mut Vec<String>) -> Result<(), ConfigError> {
+    if input.name.is_empty() {
+        return Err(ConfigError::EmptyInputName);
+    }
+    if input.is_empty() {
+        return Err(ConfigError::InputWithoutSettings(input.name.clone()));
+    }
+    if seen.contains(&input.name) {
+        return Err(ConfigError::DuplicateInput(input.name.clone()));
+    }
+    seen.push(input.name.clone());
+    // libinput rejects an out-of-range speed itself, but only at the point
+    // the request is sent — one silent `invalid` result per device, long
+    // after the file was read.
+    if let Some(speed) = input.accel_speed
+        && !(-1.0..=1.0).contains(&speed)
+    {
+        return Err(ConfigError::AccelSpeedOutOfRange(speed));
+    }
+    Ok(())
+}
+
+/// The `[defaults]` rules, none of which can be satisfied by skipping
+/// something.
+///
+/// An empty program name would reach `Command::new("")` and fail once per
+/// keypress; an empty tag name would be permanent (ADR-006 has no delete).
+/// Without `{app_id}` a spawned terminal never carries the app-id every
+/// other part of the WM identifies a pinned terminal by, so it would map
+/// as an ordinary floating window, the tag's backdrop would never appear,
+/// and the idempotent spawn claim means it would never be retried either.
+fn validate_defaults(defaults: &RawDefaults) -> Result<(), ConfigError> {
+    for (field, value) in [
+        ("terminal", &defaults.terminal),
+        ("launcher", &defaults.launcher),
+        ("default_tag", &defaults.default_tag),
+    ] {
+        if value.as_deref().is_some_and(str::is_empty) {
+            return Err(ConfigError::EmptyDefault(field));
+        }
+    }
+    if let Some(args) = &defaults.pinned_terminal_args
+        && !args.iter().any(|arg| arg.contains("{app_id}"))
+    {
+        return Err(ConfigError::MissingAppIdPlaceholder);
+    }
+    Ok(())
 }
 
 impl Modifier {
@@ -856,6 +991,110 @@ fn usable_base_dir(value: Option<&OsStr>) -> Option<&OsStr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit finding G-04. One typo used to discard the *entire* file:
+    /// every other binding, every `[defaults]` value and every `[[input]]`
+    /// block reverted to the built-ins, which for a user who had rebound
+    /// `Super+Return` months ago restored a keymap they no longer knew.
+    #[test]
+    fn a_single_bad_keybind_is_skipped_rather_than_discarding_the_file() {
+        let contents = r#"
+[[keybind]]
+mod = ["Super"]
+key = "q"
+action = "close"
+
+[[keybind]]
+mod = ["Super"]
+key = "NoSuchKeysym"
+action = "exit"
+
+[[keybind]]
+mod = ["Super"]
+key = "n"
+action = "focus_next"
+"#;
+        let (config, skipped) = Config::parse_lenient(contents).expect("only entries are invalid");
+        assert_eq!(skipped.len(), 1);
+        assert!(matches!(skipped[0], ConfigError::UnknownKey(_)));
+        let keys: Vec<&str> = config.keybinds.iter().map(|k| k.key.as_str()).collect();
+        assert_eq!(keys, vec!["q", "n"]);
+    }
+
+    #[test]
+    fn a_bad_input_block_is_skipped_and_the_others_still_apply() {
+        let contents = r#"
+[[input]]
+name = "good"
+tap = true
+
+[[input]]
+name = ""
+tap = true
+"#;
+        let (config, skipped) = Config::parse_lenient(contents).expect("only entries are invalid");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(config.inputs.len(), 1);
+        assert_eq!(config.inputs[0].name, "good");
+    }
+
+    /// A `[defaults]` mistake is not skippable: there is no "this entry"
+    /// to drop, and substituting the built-in value silently would be the
+    /// whole-file discard in miniature.
+    #[test]
+    fn a_defaults_error_is_still_fatal_under_leniency() {
+        let contents = "[defaults]\nterminal = \"\"\n";
+        let error = Config::parse_lenient(contents).expect_err("[defaults] must stay fatal");
+        assert!(matches!(error, ConfigError::EmptyDefault("terminal")));
+    }
+
+    /// Four independent mistakes used to take four edit-and-restart cycles
+    /// to find, one per restart.
+    #[test]
+    fn strict_parse_reports_every_offending_entry_at_once() {
+        let contents = r#"
+[[keybind]]
+mod = ["Super"]
+key = "NoSuchKeysym"
+action = "exit"
+
+[[keybind]]
+mod = ["Super"]
+key = "AlsoNotAKeysym"
+action = "close"
+"#;
+        let error = Config::parse(contents).expect_err("two bad keybinds");
+        let ConfigError::Multiple(errors) = &error else {
+            panic!("expected Multiple, got {error:?}");
+        };
+        assert_eq!(errors.len(), 2);
+        let rendered = error.to_string();
+        assert!(rendered.contains("NoSuchKeysym"), "{rendered}");
+        assert!(rendered.contains("AlsoNotAKeysym"), "{rendered}");
+    }
+
+    /// A file with exactly one mistake keeps reporting that mistake
+    /// directly, so nothing has to unwrap a one-element list to find out
+    /// what went wrong.
+    #[test]
+    fn strict_parse_reports_a_lone_error_unwrapped() {
+        let contents =
+            "[[keybind]]\nmod = [\"Super\"]\nkey = \"NoSuchKeysym\"\naction = \"exit\"\n";
+        let error = Config::parse(contents).expect_err("one bad keybind");
+        assert!(matches!(error, ConfigError::UnknownKey(_)));
+    }
+
+    /// Dropping every declared keybind lands on the documented
+    /// "no `[[keybind]]` means the built-in set" rule rather than on a WM
+    /// with no bindings at all.
+    #[test]
+    fn skipping_the_only_keybind_falls_back_to_the_built_in_set() {
+        let contents =
+            "[[keybind]]\nmod = [\"Super\"]\nkey = \"NoSuchKeysym\"\naction = \"exit\"\n";
+        let (config, skipped) = Config::parse_lenient(contents).expect("only entries are invalid");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(config.keybinds, Config::default().keybinds);
+    }
 
     /// `Action::Exec` carries the user's own shell command lines, which can
     /// carry tokens. No `{:?}` is applied to `Action`, `Keybind` or

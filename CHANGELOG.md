@@ -22,8 +22,28 @@ Notable changes per release. Format follows
   shared directory. `Super+A`, `Super+S` and the status bar are inert in that
   case; window management is unaffected.
 
+### Added
+
+- Failures the user can act on now raise a desktop notification
+  (`notify-send`, app name `buoy-wm`) as well as a log line: a rejected or
+  partially-skipped config, an IPC server that never started, a tag keybind
+  pressed before any output exists, and — from `buoy-tag-picker` — every
+  reason it gives up, including `fuzzel` not being installed. Until now
+  exactly one failure in the whole product was visible to the user.
+
 ### Changed
 
+- **A bad `[[keybind]]`, `[[mousebind]]` or `[[input]]` entry is now skipped
+  rather than discarding the entire config file.** Everything else in the
+  file still applies, and every skipped entry is reported at once instead of
+  one per restart. Invalid TOML and a wrong `[defaults]` value are still
+  fatal to the whole file, because neither has a single entry to drop. This
+  is what the project's own recorded acceptance criterion always specified.
+- `buoy-tag-picker` retries a refused connection twice, 50 ms then 100 ms,
+  which closes the login-time window where the WM had not yet bound its
+  socket and `Super+A` was a dead key.
+- `fuzzel` failing to start is no longer indistinguishable from the user
+  pressing Escape: the picker reports it and exits non-zero.
 - Log lines carry journald severity, so `journalctl --user -b
   --identifier=buoy-wm -p err` now shows exactly the failures, and the
   subsystem that logged each line is named automatically rather than by a

@@ -244,9 +244,27 @@ key = "p"
 action = { exec = "grim -g \"$(slurp)\" ~/shot.png" }
 ```
 
-A malformed config is reported on stderr and the built-in defaults are used
-instead. Refusing to start would leave you in a session with no way to reach
-the file and fix it.
+### When something in the file is wrong
+
+A bad `[[keybind]]`, `[[mousebind]]` or `[[input]]` entry is **skipped**;
+everything else in the file still applies. Every skipped entry is reported at
+once, so a file with four independent mistakes takes one edit-and-restart
+cycle rather than four.
+
+Two problems are not skippable, because there is no single entry to drop: a
+file that is not valid TOML, and a wrong value in `[defaults]`. Either one
+falls back to the built-in defaults *entirely* — including the built-in
+keybinds, which may be a keymap you have not used in months. Refusing to
+start would leave you in a session with no way to reach the file and fix it,
+so the WM starts either way.
+
+Both cases raise a desktop notification naming the file and the problem, and
+log it. To read the log:
+
+```sh
+journalctl --user -b --identifier=buoy-wm
+journalctl --user -b --identifier=buoy-wm -p err   # failures only
+```
 
 ### Bindings
 
@@ -259,8 +277,8 @@ Keys are keysym names: a single character (`a`, `1`, `?`), a named key
 (`Return`, `Space`, `Tab`, `Escape`, `Left`, `Page_Up`), or `F1`–`F35`. Named
 keys are case-insensitive; **single characters are not**. An uppercase letter
 is the *shifted* symbol, so `Super`+`Q` can never fire — write `key = "q"`,
-or add `"Shift"`. This is rejected at load rather than silently doing
-nothing. `mod` is optional; omit it to bind an unmodified key.
+or add `"Shift"`. That binding is skipped at load, and reported, rather than
+silently doing nothing. `mod` is optional; omit it to bind an unmodified key.
 
 Actions: `terminal`, `launcher`, `close`, `focus_next`, `exit`, `cycle_tag`,
 `tag_picker`, `tag_switch`, `hotkeys`, `{ switch_tag = "<name>" }`, and
@@ -320,11 +338,11 @@ so restate `tap = true` for your touchpad if you add entries for other
 devices. Entries match top to bottom, first match wins — which is what lets a
 specific device sit above a catch-all `name = "*"`.
 
-Rejected at load, rather than looking configured and doing nothing: a pattern
-matching no device, an entry setting nothing, a duplicate pattern, and an
-`accel_speed` outside `-1.0..=1.0`. Configured devices log their tap state
-and click method at startup and after each setting is applied; anything the
-device rejects is named on stderr.
+Skipped at load and reported, rather than looking configured and doing
+nothing: a pattern matching no device, an entry setting nothing, a duplicate
+pattern, and an `accel_speed` outside `-1.0..=1.0`. Configured devices log
+their tap state and click method at startup and after each setting is
+applied; anything the device rejects is named in the log.
 
 Find device names with `libinput list-devices` (needs root) or read them out
 of `/proc/bus/input/devices`.

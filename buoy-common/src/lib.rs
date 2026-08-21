@@ -27,5 +27,6 @@
 
 pub mod framing;
 pub mod log;
+pub mod notify;
 pub mod peer;
 pub mod socket_path;
