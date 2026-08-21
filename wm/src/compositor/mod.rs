@@ -35,5 +35,6 @@
 //! costs nothing, which is why this is a directory and not a second crate.
 
 pub mod child;
+pub mod drag;
 pub mod report;
 pub mod river;
