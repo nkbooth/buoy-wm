@@ -84,6 +84,14 @@ pub enum Response {
 /// mode a malformed/malicious client can trigger (invalid UTF-8, invalid
 /// JSON, wrong shape, unknown `type`, missing/wrong-typed fields,
 /// out-of-range values) is represented here.
+///
+/// Deliberately implements neither `Display` nor `std::error::Error`, and
+/// this is the one exception to audit finding F-04's "every error type gets
+/// a `Display`". A `Display` is an invitation to write `{e}`, and `{e}` on
+/// [`ParseError::InvalidJson`] is a log-injection primitive — see that
+/// variant. Rendering goes through `server::describe_parse_error`, which
+/// escapes and length-caps, and which cannot be bypassed by a call site
+/// that reaches for the obvious formatter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
     InvalidUtf8,

@@ -436,7 +436,21 @@ impl fmt::Display for ConfigError {
     }
 }
 
-impl std::error::Error for ConfigError {}
+impl std::error::Error for ConfigError {
+    /// The two wrapping variants expose their cause; the rest have none.
+    ///
+    /// The default empty body inherited `source() -> None` even for `Toml`
+    /// and `Io`, so anything walking the chain — a `while let Some(src) =
+    /// e.source()` loop, or any error-report crate — silently got nothing
+    /// from an error that demonstrably had a cause (audit finding F-04).
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConfigError::Toml(e) => Some(e),
+            ConfigError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl Default for Config {
     /// The built-in configuration: exactly the bindings and program names
@@ -990,6 +1004,27 @@ fn usable_base_dir(value: Option<&OsStr>) -> Option<&OsStr> {
 
 #[cfg(test)]
 mod tests {
+    /// Audit finding F-04: `ConfigError` implemented `std::error::Error`
+    /// with an empty body, so it inherited the default `source() -> None`
+    /// while `Toml` and `Io` demonstrably wrap real causes — anything that
+    /// walks the chain silently got nothing.
+    #[test]
+    fn a_wrapping_config_error_exposes_the_cause_it_wraps() {
+        use std::error::Error;
+        let wrapped = super::ConfigError::Io(std::io::Error::other("disk gave up"));
+        let source = wrapped.source().expect("Io wraps a real io::Error");
+        assert!(source.to_string().contains("disk gave up"));
+    }
+
+    #[test]
+    fn a_config_error_that_wraps_nothing_has_no_source() {
+        use std::error::Error;
+        assert!(
+            super::ConfigError::MissingAppIdPlaceholder
+                .source()
+                .is_none()
+        );
+    }
     use super::*;
 
     /// Audit finding G-04. One typo used to discard the *entire* file:

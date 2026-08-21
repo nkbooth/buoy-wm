@@ -104,6 +104,33 @@ pub enum WmCoreError {
     InvalidTagName,
 }
 
+/// Journal text, deliberately *not* the wire text.
+///
+/// `ipc::dispatch::describe_wm_core_error` renders the same variants for
+/// the socket, and the two must not be merged: the wire strings are a
+/// stability contract another crate string-matches on (audit finding
+/// E-06), whereas a log line is free to be reworded whenever it reads
+/// badly. Every variant is a unit variant, so nothing here can carry
+/// peer-controlled text into a journal line.
+impl std::fmt::Display for WmCoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WmCoreError::UnknownView => f.write_str("no such view is registered"),
+            WmCoreError::UnknownTag => f.write_str("no such tag is registered"),
+            WmCoreError::UnknownOutput => f.write_str("no such output is registered"),
+            WmCoreError::TagLimitReached => {
+                write!(f, "the tag registry is already full at {MAX_TAGS} tags")
+            }
+            WmCoreError::InvalidTagName => f.write_str(
+                "the tag name is empty, too long, or contains a path \
+                 separator or a control character",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WmCoreError {}
+
 /// A snapshot of one registered tag: its id and name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagSnapshot {
@@ -825,6 +852,31 @@ impl WmCore {
 
 #[cfg(test)]
 mod tests {
+    /// Audit finding F-04: ~17 log sites formatted this error with `{e:?}`,
+    /// so the user read `TagLimitReached` in their journal. `Display` is
+    /// what makes `{e}` say something at them instead.
+    #[test]
+    fn wm_core_error_reads_as_a_sentence_not_a_rust_identifier() {
+        let rendered = super::WmCoreError::TagLimitReached.to_string();
+        assert!(
+            rendered.contains(&super::MAX_TAGS.to_string()),
+            "{rendered}"
+        );
+        assert_ne!(
+            rendered,
+            format!("{:?}", super::WmCoreError::TagLimitReached)
+        );
+    }
+
+    /// Without `std::error::Error`, `WmCoreError` cannot flow into `main`'s
+    /// `Box<dyn std::error::Error>` at all, which is why every `wm_core`
+    /// failure has to be hand-logged.
+    #[test]
+    fn wm_core_error_is_a_std_error() {
+        let boxed: Box<dyn std::error::Error> = Box::new(super::WmCoreError::UnknownView);
+        assert!(boxed.source().is_none());
+    }
+
     use super::super::ids::OutputId;
     use super::{
         WmCore, WmCoreError, is_pinned_term_app_id, pinned_term_app_id, tag_id_from_pinned_app_id,

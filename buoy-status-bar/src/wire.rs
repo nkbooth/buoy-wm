@@ -94,6 +94,15 @@ pub enum Response {
 
 /// Errors returned by [`parse_response`]. Never a panic — mirrors `wm`'s
 /// own `ParseError` (`wm/src/ipc/protocol.rs`).
+///
+/// Implements neither `Display` nor `std::error::Error`, for the same
+/// reason as that one and deliberately against audit finding F-04's
+/// general rule: `InvalidJson` carries `serde_json`'s message, which quotes
+/// the offending input verbatim, and the input is whatever answered on the
+/// socket — which a squatted path makes an unrelated process. A `Display`
+/// would let it write newlines and forged `<3>` severity prefixes straight
+/// into this process's journal. Both call sites discard the value entirely
+/// (`.ok()`, `Err(_)`), so nothing is lost by having no formatter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
     InvalidUtf8,

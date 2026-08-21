@@ -63,6 +63,28 @@ pub enum TagRegistryError {
     InvalidName,
 }
 
+/// Journal text. Same separation as [`WmCoreError`](super::state::WmCoreError)'s
+/// own `Display`: nothing on the wire is rendered from here, so this
+/// wording carries no compatibility obligation.
+impl std::fmt::Display for TagRegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TagRegistryError::Full => {
+                write!(f, "the registry is already full at {MAX_TAGS} tags")
+            }
+            TagRegistryError::UnknownTag => f.write_str("no such tag is registered"),
+            TagRegistryError::InvalidName => write!(
+                f,
+                "the name is empty, whitespace-only, over {MAX_TAG_NAME_BYTES} \
+                 bytes, a bare `.` or `..`, or contains a path separator or a \
+                 control character"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TagRegistryError {}
+
 /// The tag registry: named, arbitrary strings backed by a `u64` bitset of
 /// tag IDs. IDs are assigned sequentially starting at 0 and are never
 /// reused. There is no delete-tag API in v1 (ADR-006).
@@ -202,6 +224,23 @@ fn validate_tag_name(name: &str) -> Result<(), TagRegistryError> {
 
 #[cfg(test)]
 mod tests {
+    /// Audit finding F-04: the registry's own error had no `Display`, so
+    /// anything that logged it printed `Full` at the user.
+    #[test]
+    fn tag_registry_error_reads_as_a_sentence_not_a_rust_identifier() {
+        let rendered = super::TagRegistryError::Full.to_string();
+        assert!(
+            rendered.contains(&crate::wm_core::MAX_TAGS.to_string()),
+            "{rendered}"
+        );
+        assert_ne!(rendered, format!("{:?}", super::TagRegistryError::Full));
+    }
+
+    #[test]
+    fn tag_registry_error_is_a_std_error() {
+        let boxed: Box<dyn std::error::Error> = Box::new(super::TagRegistryError::UnknownTag);
+        assert!(boxed.source().is_none());
+    }
     use super::{MAX_TAG_NAME_BYTES, TagId, TagRegistry, TagRegistryError};
 
     #[test]

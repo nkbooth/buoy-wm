@@ -90,6 +90,14 @@ impl From<WmCoreSnapshot> for Response {
 /// (audit finding J-06). `buoy-tag-picker` cannot import from `wm` and so
 /// keeps its own literal copy, which
 /// `tag_limit_message_matches_the_pickers_hardcoded_copy` pins.
+///
+/// Deliberately *not* collapsed into `e.to_string()` now that
+/// [`WmCoreError`] has a `Display` (audit finding F-04). The two render the
+/// same variants for different audiences under different rules: wire text
+/// is a stability contract another crate string-matches on, so rewording it
+/// is a breaking change, while the `Display` is journal prose that can be
+/// improved whenever it reads badly. Merging them would make every future
+/// log-wording tweak a cross-process protocol change.
 fn describe_wm_core_error(e: WmCoreError) -> String {
     match e {
         WmCoreError::UnknownView => "unknown view".to_string(),
@@ -181,7 +189,7 @@ pub fn handle_request(
                         Ok(None) => None,
                         Err(e) => {
                             log_err!(
-                                "Failed to check pinned-terminal spawn state for tag {tag_id}: {e:?}"
+                                "Failed to check pinned-terminal spawn state for tag {tag_id}: {e}"
                             );
                             None
                         }

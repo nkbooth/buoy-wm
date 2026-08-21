@@ -107,13 +107,13 @@ use wm_core::state::{
 };
 use wm_core::view::{DEFAULT_FLOATING_GEOMETRY, Geometry};
 
-/// Logs `result`'s error (if any) as `"{context}: {e:?}"`, otherwise no-ops.
+/// Logs `result`'s error (if any) as `"{context}: {e}"`, otherwise no-ops.
 /// `wm_core` mutators only fail on invalid/unknown ids that call sites here
 /// already guard against structurally (NFR2) — this exists purely so a
 /// future regression is visible instead of silently discarded.
 fn log_wm_core_err(result: Result<(), WmCoreError>, context: &str) {
     if let Err(e) = result {
-        log_err!("{context}: {e:?}");
+        log_err!("{context}: {e}");
     }
 }
 
@@ -746,7 +746,7 @@ impl WindowManager {
                         Ok(Some(tag_id)) => orphaned_tags.push(tag_id),
                         Ok(None) => {}
                         Err(e) => log_err!(
-                            "Failed to unregister output {:?} from wm_core: {e:?}",
+                            "Failed to unregister output {:?} from wm_core: {e}",
                             output.output_id
                         ),
                     }
@@ -827,7 +827,7 @@ impl WindowManager {
                         // does hit `Err` stays visible (NFR2, error
                         // propagation).
                         if let Err(e) = wm_core.unregister_view(id) {
-                            log_err!("Failed to unregister view {id:?} from wm_core: {e:?}");
+                            log_err!("Failed to unregister view {id:?} from wm_core: {e}");
                         }
                     }
                     return false;
@@ -933,7 +933,7 @@ impl WindowManager {
                     }
                     Err(e) => {
                         log_err!(
-                            "Failed to tag newly-mapped pinned terminal onto {tag_id:?}: {e:?}; leaving untagged"
+                            "Failed to tag newly-mapped pinned terminal onto {tag_id:?}: {e}; leaving untagged"
                         );
                         // Code review follow-up (Story 2.7): an untagged
                         // window is shown by `is_view_visible`'s bootstrap
@@ -1020,9 +1020,7 @@ impl WindowManager {
             let tag_id = match wm_core.view_tags(view_id) {
                 Ok(tags) => tags.first().copied(),
                 Err(e) => {
-                    log_err!(
-                        "Failed to resolve pinned terminal's tags for view {view_id:?}: {e:?}"
-                    );
+                    log_err!("Failed to resolve pinned terminal's tags for view {view_id:?}: {e}");
                     None
                 }
             };
@@ -1070,7 +1068,7 @@ impl WindowManager {
                 Ok(true) => window.proxy.show(),
                 Ok(false) => window.proxy.hide(),
                 Err(e) => {
-                    log_err!("Failed to resolve visibility for view {view_id:?}: {e:?}")
+                    log_err!("Failed to resolve visibility for view {view_id:?}: {e}")
                 }
             }
         }
@@ -1099,7 +1097,7 @@ impl WindowManager {
             ),
             Ok(None) => {}
             Err(e) => {
-                log_err!("Failed to check pinned-terminal spawn state for tag {tag_id:?}: {e:?}")
+                log_err!("Failed to check pinned-terminal spawn state for tag {tag_id:?}: {e}")
             }
         }
     }
@@ -1367,7 +1365,7 @@ impl WindowManager {
                 if let Some(view_id) = window.view_id
                     && let Err(e) = wm_core.raise_view(view_id)
                 {
-                    log_err!("Failed to raise view {view_id:?} in wm_core stacking order: {e:?}");
+                    log_err!("Failed to raise view {view_id:?} in wm_core stacking order: {e}");
                 }
                 if is_pinned_term_app_id(&window.app_id) {
                     // FR4: the pinned terminal must always render at the
@@ -1385,7 +1383,7 @@ impl WindowManager {
                     if let Some(view_id) = window.view_id
                         && let Err(e) = wm_core.set_focus(view_id)
                     {
-                        log_err!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
+                        log_err!("Failed to set focus for view {view_id:?} in wm_core: {e}");
                     }
                     self.windows.insert(i, window);
                     seat.terminal_intentionally_focused = true;
@@ -1737,7 +1735,7 @@ impl Seat {
                     None => match wm_core.create_tag(name.clone()) {
                         Ok(tag_id) => tag_id,
                         Err(e) => {
-                            log_err!("Failed to create tag `{name}`: {e:?}");
+                            log_err!("Failed to create tag `{name}`: {e}");
                             return None;
                         }
                     },
@@ -1748,7 +1746,7 @@ impl Seat {
                     // terminal on first use.
                     Ok(()) => Some(tag_id),
                     Err(e) => {
-                        log_err!("Failed to switch to tag `{name}`: {e:?}");
+                        log_err!("Failed to switch to tag `{name}`: {e}");
                         None
                     }
                 }
@@ -1891,7 +1889,7 @@ impl Seat {
                         self.focused = Some(window.proxy.clone());
                         if let Err(e) = wm_core.set_focus(next_view_id) {
                             log_err!(
-                                "Failed to set focus for view {next_view_id:?} in wm_core: {e:?}"
+                                "Failed to set focus for view {next_view_id:?} in wm_core: {e}"
                             );
                         }
                     } else if let Some(window) = windows.remove(i) {
@@ -1949,7 +1947,7 @@ impl Seat {
                     Ok(Some(tag_id)) => Some(tag_id),
                     Ok(None) => None,
                     Err(e) => {
-                        log_err!("Failed to cycle tag on output {output_id:?}: {e:?}");
+                        log_err!("Failed to cycle tag on output {output_id:?}: {e}");
                         None
                     }
                 },
@@ -2150,7 +2148,7 @@ impl Seat {
                 // error propagation), same pattern as remove_windows'
                 // unregister_view logging.
                 if let Err(e) = wm_core.set_focus(view_id) {
-                    log_err!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
+                    log_err!("Failed to set focus for view {view_id:?} in wm_core: {e}");
                 }
             }
             None => {
@@ -2398,13 +2396,13 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
                         Ok(tag_id) => {
                             if let Err(e) = wm_core_guard.switch_tag(output_id, tag_id) {
                                 log_err!(
-                                    "Failed to switch bootstrap output {output_id:?} to default tag: {e:?}"
+                                    "Failed to switch bootstrap output {output_id:?} to default tag: {e}"
                                 );
                             }
                             Some(tag_id)
                         }
                         Err(e) => {
-                            log_err!("Failed to create bootstrap default tag: {e:?}");
+                            log_err!("Failed to create bootstrap default tag: {e}");
                             None
                         }
                     }
