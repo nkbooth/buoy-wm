@@ -90,6 +90,21 @@ fn the_public_api_is_enough_to_serve_a_switch_tag_end_to_end() {
     let mut writer = stream.try_clone().expect("split for writing");
     let mut reader = BufReader::new(stream);
 
+    // Read the state first, so the switch below has to invalidate an answer
+    // this connection has already been given: `get-state` is served from a
+    // per-connection memo keyed on the core's generation (audit finding
+    // B-02), and a memo that outlived a mutation would show the user a tag
+    // that is no longer current.
+    writeln!(writer, r#"{{"type":"get-state"}}"#)
+        .and_then(|()| writer.flush())
+        .expect("send the first get-state");
+    let mut response = String::new();
+    reader.read_line(&mut response).expect("read the state");
+    assert!(
+        response.contains(r#""current_tag":null"#),
+        "nothing has been switched yet: {response}"
+    );
+
     writeln!(
         writer,
         r#"{{"type":"switch-tag","output_id":{},"tag_id":{}}}"#,
@@ -98,7 +113,7 @@ fn the_public_api_is_enough_to_serve_a_switch_tag_end_to_end() {
     .and_then(|()| writer.flush())
     .expect("send switch-tag");
 
-    let mut response = String::new();
+    response.clear();
     reader.read_line(&mut response).expect("read the response");
     assert_eq!(response.trim_end(), r#"{"type":"ok"}"#);
 

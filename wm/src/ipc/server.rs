@@ -21,6 +21,7 @@ use std::io::{BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -523,6 +524,62 @@ fn log_dispatch_outcome(peer: PeerIdentity, kind: &'static str, response: &Respo
     }
 }
 
+/// One connection's memo of the last `get-state` answer it produced, valid
+/// for as long as [`WmCore::generation`] has not moved.
+///
+/// Per connection, deliberately, and that is the whole design: `get-state`
+/// used to deep-clone every tag name and every view's `app_id` — and do an
+/// O(tags) scan per view — while holding the mutex the Wayland dispatch
+/// thread needs six or seven times per manage/render sequence against a
+/// 50 ms budget, and `buoy-status-bar` asks for it four times a second per
+/// output for the whole login session (audit finding B-02). A cache shared
+/// between connections would need its own lock, and a second lock taken
+/// anywhere near this one is how a deadlock gets written: `lock_recovering`
+/// is not reentrant, and the accept loop's whole purpose is to keep the
+/// compositor's event loop unblocked. A per-connection memo needs no
+/// synchronisation at all, and now that both real clients hold their
+/// connection open across requests it covers the entire steady state.
+struct StateCache {
+    generation: u64,
+    response: Rc<Response>,
+}
+
+/// Dispatches `request`, answering `get-state` from `cache` when nothing has
+/// changed since it was filled.
+///
+/// The mutex is held for the `generation` read and, on a miss, for the
+/// snapshot — and released before the caller writes to the socket, exactly
+/// as the uncached version was. Nothing else is locked, in either order.
+fn dispatch(
+    wm_core: &Arc<Mutex<WmCore>>,
+    request: Request,
+    cache: &mut Option<StateCache>,
+) -> (Rc<Response>, Option<PendingPinnedSpawn>) {
+    if matches!(request, Request::GetState) {
+        let mut core = lock_recovering(wm_core);
+        let generation = core.generation();
+        if let Some(cached) = cache.as_ref().filter(|c| c.generation == generation) {
+            return (Rc::clone(&cached.response), None);
+        }
+        // `handle_request` rather than `snapshot()` directly, so there is one
+        // code path from `Request` to `Response` and this arm cannot drift
+        // from the uncached one. `get-state` never claims a spawn, and
+        // passing whatever it returned through says so without asserting it.
+        let (response, pending_spawn) = handle_request(&mut core, request);
+        drop(core);
+        let response = Rc::new(response);
+        *cache = Some(StateCache {
+            generation,
+            response: Rc::clone(&response),
+        });
+        return (response, pending_spawn);
+    }
+    let mut core = lock_recovering(wm_core);
+    let (response, pending_spawn) = handle_request(&mut core, request);
+    drop(core);
+    (Rc::new(response), pending_spawn)
+}
+
 // 104 code lines against the 100-line gate, and the four over are the
 // authentication preamble that has to run before anything is read. Left
 // whole rather than split for the sake of the number: the read/dispatch/
@@ -571,6 +628,7 @@ fn handle_connection_inner(
     };
     let mut reader = BufReader::new(stream);
     let mut tag_creations: usize = 0;
+    let mut state_cache: Option<StateCache> = None;
 
     loop {
         let line = match read_line_bounded(&mut reader) {
@@ -641,10 +699,7 @@ fn handle_connection_inner(
                         return;
                     }
                 }
-                let (response, pending_spawn) = {
-                    let mut core = lock_recovering(wm_core);
-                    handle_request(&mut core, request)
-                };
+                let (response, pending_spawn) = dispatch(wm_core, request, &mut state_cache);
                 log_dispatch_outcome(peer, kind, &response);
                 if !write_response(&mut writer, &response) {
                     return; // peer gone; nothing more to do
@@ -669,6 +724,67 @@ fn handle_connection_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `get-state` cache, exercised directly rather than through a
+    /// socket: the observable difference between a hit and a miss is which
+    /// allocation comes back, and `Rc::ptr_eq` is the only thing that can
+    /// see that. Through a socket the two are byte-identical by design,
+    /// which is exactly why a round-trip test would assert nothing here
+    /// (audit finding T-02's lesson).
+    #[test]
+    fn a_second_get_state_with_nothing_changed_returns_the_answer_already_built() {
+        let core = Arc::new(Mutex::new(WmCore::default()));
+        let mut cache = None;
+
+        let (first, _) = dispatch(&core, Request::GetState, &mut cache);
+        let (second, _) = dispatch(&core, Request::GetState, &mut cache);
+
+        assert!(
+            Rc::ptr_eq(&first, &second),
+            "the second poll rebuilt the whole world instead of reusing it"
+        );
+    }
+
+    #[test]
+    fn a_mutation_through_the_same_connection_invalidates_the_cached_answer() {
+        let core = Arc::new(Mutex::new(WmCore::default()));
+        let mut cache = None;
+
+        let (before, _) = dispatch(&core, Request::GetState, &mut cache);
+        dispatch(
+            &core,
+            Request::CreateTag {
+                name: "web".to_string(),
+            },
+            &mut cache,
+        );
+        let (after, _) = dispatch(&core, Request::GetState, &mut cache);
+
+        assert!(!Rc::ptr_eq(&before, &after));
+        assert_ne!(*before, *after, "the new tag is not in the answer");
+    }
+
+    /// The one that matters: the Wayland dispatch thread mutates the same
+    /// `WmCore` on every keybind and every manage sequence, and it knows
+    /// nothing about any connection's cache. A cache keyed on anything but
+    /// the core's own generation would keep serving tags that are gone.
+    #[test]
+    fn a_mutation_from_outside_this_connection_invalidates_the_cached_answer() {
+        let core = Arc::new(Mutex::new(WmCore::default()));
+        let mut cache = None;
+
+        let (before, _) = dispatch(&core, Request::GetState, &mut cache);
+        lock_recovering(&core)
+            .create_tag("web")
+            .expect("an empty registry accepts a tag");
+        let (after, _) = dispatch(&core, Request::GetState, &mut cache);
+
+        assert!(
+            !Rc::ptr_eq(&before, &after),
+            "a change nobody told this connection about was served from cache"
+        );
+        assert_ne!(*before, *after);
+    }
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;

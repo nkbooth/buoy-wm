@@ -37,7 +37,7 @@ use buoy_status_bar::{bar_line, wire};
 
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
@@ -122,31 +122,99 @@ fn note_success(last_error: &mut Option<String>) {
     *last_error = None;
 }
 
-/// Connects fresh to `socket_path` (Task 1.4's "reconnect every tick"
-/// design), sends `get-state`, and reads/parses exactly one response line.
+/// The `get-state` connection, kept open across polls.
 ///
-/// Every failure — connect, peer rejection, setting the I/O timeout,
-/// write, flush, read, parse, or an unexpected non-`State` response —
-/// renders as the same disconnected glyph, which is the AC, but each one
-/// now says which it was (audit finding G-05). The read/write timeout
-/// (`SOCKET_IO_TIMEOUT`, applied by `connect_with_timeout`) bounds a
-/// stalled `wm` to the same "fails this tick, retries next tick" path as
-/// every other failure mode.
-fn try_get_state(socket_path: &Path) -> Result<(Vec<wire::TagDto>, Vec<wire::OutputDto>), String> {
-    let mut stream = connect_with_timeout(socket_path)?;
+/// The bar used to connect fresh every tick: four connect / accept / thread
+/// spawn / whole-world-clone / close cycles per second per output, for the
+/// whole login session, against the same mutex the Wayland dispatch thread
+/// needs to render a frame (audit finding B-02). The server's
+/// `handle_connection_inner` already loops on one stream and deliberately
+/// keeps it open, and its idle read deadline is generous for exactly this
+/// reason, so reusing the connection is the cheaper half of that fix and it
+/// needs nothing from the server.
+///
+/// A failed poll drops the connection so the next tick reconnects — which is
+/// what keeps the "fails this tick, retries next tick" behaviour every
+/// failure mode had before, including a `wm` that restarted underneath us.
+struct Poller {
+    socket_path: PathBuf,
+    open: Option<Connection>,
+}
+
+/// One open connection's write and read halves.
+struct Connection {
+    writer: UnixStream,
+    reader: BufReader<UnixStream>,
+}
+
+impl Poller {
+    fn new(socket_path: PathBuf) -> Self {
+        Self {
+            socket_path,
+            open: None,
+        }
+    }
+
+    /// Sends `get-state` — reconnecting first if there is no live
+    /// connection — and reads/parses exactly one response line.
+    ///
+    /// Every failure — connect, peer rejection, setting the I/O timeout,
+    /// write, flush, read, parse, or an unexpected non-`State` response —
+    /// renders as the same disconnected glyph, which is the AC, but each one
+    /// says which it was (audit finding G-05). The read/write timeout
+    /// (`SOCKET_IO_TIMEOUT`, applied by [`connect_with_timeout`]) bounds a
+    /// stalled `wm` to the same "fails this tick, retries next tick" path as
+    /// every other failure mode.
+    fn get_state(&mut self) -> Result<(Vec<wire::TagDto>, Vec<wire::OutputDto>), String> {
+        let result = self.poll_once();
+        if result.is_err() {
+            // Whatever went wrong, this connection is not trusted for the
+            // next tick: a half-read response would desynchronise every
+            // poll after it.
+            self.open = None;
+        }
+        result
+    }
+
+    fn poll_once(&mut self) -> Result<(Vec<wire::TagDto>, Vec<wire::OutputDto>), String> {
+        if self.open.is_none() {
+            let stream = connect_with_timeout(&self.socket_path)?;
+            let writer = stream
+                .try_clone()
+                .map_err(|e| format!("cannot split the connection for writing: {e}"))?;
+            self.open = Some(Connection {
+                writer,
+                reader: BufReader::new(stream),
+            });
+        }
+        match self.open.as_mut() {
+            Some(connection) => request_state(connection),
+            // Unreachable: populated immediately above. Written as a total
+            // match rather than an `expect` because this binary never
+            // panics on any input shape (NFR2), and "unreachable in
+            // practice, still given a defined answer" is the same posture
+            // `bar_line::resolve_bar_line`'s unknown-tag arm takes.
+            None => Err("the polling connection vanished as it was opened".to_string()),
+        }
+    }
+}
+
+/// One `get-state` exchange on an already-open connection.
+fn request_state(
+    connection: &mut Connection,
+) -> Result<(Vec<wire::TagDto>, Vec<wire::OutputDto>), String> {
     let request = wire::serialize_request(&wire::Request::GetState);
     let mut send = || -> std::io::Result<()> {
-        stream.write_all(request.as_bytes())?;
-        stream.write_all(b"\n")?;
-        stream.flush()
+        connection.writer.write_all(request.as_bytes())?;
+        connection.writer.write_all(b"\n")?;
+        connection.writer.flush()
     };
     send().map_err(|e| format!("cannot send get-state: {e}"))?;
 
-    let mut reader = BufReader::new(stream);
     // Bounded, not a bare `read_line`: at 4 polls a second for the whole
     // session, an unbounded read is an unbounded allocation every 250 ms
     // against whatever is actually on the other end (audit finding E-04).
-    let line = match read_line_bounded(&mut reader)
+    let line = match read_line_bounded(&mut connection.reader)
         .map_err(|e| format!("cannot read the get-state response: {e}"))?
     {
         Line::Complete(bytes) => bytes,
@@ -185,6 +253,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let mut poller = Poller::new(socket_path);
     let mut last_printed: Option<String> = None;
 
     // Loops for the lifetime of the process — deliberately never calls
@@ -196,7 +265,7 @@ fn main() {
     let mut last_error: Option<String> = None;
 
     loop {
-        let bar_line = match try_get_state(&socket_path) {
+        let bar_line = match poller.get_state() {
             Ok((tags, outputs)) => {
                 note_success(&mut last_error);
                 Some(bar_line::resolve_bar_line(output_id, &outputs, &tags))

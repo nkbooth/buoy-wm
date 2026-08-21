@@ -173,7 +173,7 @@ pub struct WmCoreSnapshot {
 /// stacking/render order, and terminal-spawned status. Pure state + logic,
 /// no I/O. A freshly constructed `WmCore` starts with no persisted state
 /// (data-model.md: no persistence layer in v1).
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone)]
 pub struct WmCore {
     views: HashMap<ViewId, View>,
     next_view_id: u64,
@@ -189,6 +189,46 @@ pub struct WmCore {
     /// vendored `main.rs` `WindowManager.windows: VecDeque<Window>`
     /// convention).
     stacking_order: VecDeque<ViewId>,
+    /// Monotonic mutation counter, bumped by every `&mut self` method on
+    /// this type. It is not state; it is a cheap answer to "has anything
+    /// changed since you last asked", so a reader can decide whether a
+    /// snapshot it already has is still current without taking a snapshot
+    /// to find out (audit finding B-02).
+    generation: u64,
+}
+
+/// Compares *state*, deliberately ignoring [`WmCore::generation`].
+///
+/// Hand-written rather than derived because the generation counter is not
+/// state: it is the answer to "has anything changed", and folding it into
+/// equality would make every "this error path left the state unchanged"
+/// test in this file pass only while the counter happened to match — which
+/// is to say, would break all of them the moment mutators started bumping
+/// it on entry.
+///
+/// The fields are destructured rather than compared one by one so that a
+/// new field is a compile error here instead of silently dropping out of
+/// equality.
+impl PartialEq for WmCore {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            views,
+            next_view_id,
+            tags,
+            focused_view,
+            outputs,
+            next_output_id,
+            stacking_order,
+            generation: _,
+        } = self;
+        *views == other.views
+            && *next_view_id == other.next_view_id
+            && *tags == other.tags
+            && *focused_view == other.focused_view
+            && *outputs == other.outputs
+            && *next_output_id == other.next_output_id
+            && *stacking_order == other.stacking_order
+    }
 }
 
 impl WmCore {
@@ -209,6 +249,36 @@ impl WmCore {
         WmCore::default()
     }
 
+    /// How many times this `WmCore` has been mutated.
+    ///
+    /// Two calls returning the same value guarantee that nothing in here
+    /// changed between them, which is exactly what a cached `get-state`
+    /// response needs: `buoy-status-bar` polls four times a second per
+    /// output, and answering that by deep-cloning every tag name and every
+    /// view's `app_id` under the mutex the Wayland dispatch thread needs was
+    /// the whole of audit finding B-02.
+    ///
+    /// The converse is deliberately not promised: the counter is bumped on
+    /// entry to every mutator, including the ones that then fail their own
+    /// validation, so a bump does not prove a change. The cost of a
+    /// spurious bump is one recomputed snapshot; the cost of a missing one
+    /// is a client shown state that no longer exists, so this errs the
+    /// cheap way.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Records that something in here is about to change.
+    ///
+    /// `wrapping_add` rather than `saturating_add`: saturating would freeze
+    /// the counter and make every later snapshot look current, which is the
+    /// one failure mode that matters. Wrapping needs 2^64 mutations to
+    /// collide, at which point the collision has to also land on the exact
+    /// value a live reader is holding.
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     /// Creates a tag with the given `name` via the tag registry, or
     /// returns the existing [`TagId`] if a tag with that name is already
     /// registered (idempotent by name; see
@@ -218,6 +288,7 @@ impl WmCore {
     /// fails the registry's validation.
     // Wired into `buoy-tag-picker`'s IPC-driven tag-creation flow (Epic 2).
     pub fn create_tag(&mut self, name: impl Into<String>) -> Result<TagId, WmCoreError> {
+        self.bump_generation();
         let name = name.into();
         self.tags.create_tag(&name).map_err(|err| match err {
             TagRegistryError::Full => WmCoreError::TagLimitReached,
@@ -231,6 +302,7 @@ impl WmCore {
     /// true`, and zeroed [`Geometry`]. It is not
     /// focused; focus lives only in [`WmCore::focused_view`].
     pub fn register_view(&mut self, app_id: &str) -> ViewId {
+        self.bump_generation();
         let id = ViewId(self.next_view_id);
         self.next_view_id += 1;
         self.views.insert(
@@ -253,6 +325,7 @@ impl WmCore {
     /// always live" invariant. Fails with [`WmCoreError::UnknownView`] if
     /// `id` is not currently registered; never panics.
     pub fn unregister_view(&mut self, id: ViewId) -> Result<(), WmCoreError> {
+        self.bump_generation();
         self.views.remove(&id).ok_or(WmCoreError::UnknownView)?;
         self.stacking_order.retain(|&v| v != id);
         if self.focused_view == Some(id) {
@@ -271,6 +344,7 @@ impl WmCore {
     // doesn't exist until later stories; that distinction matters for an
     // accurate comment).
     pub fn toggle_view_tag(&mut self, view_id: ViewId, tag_id: TagId) -> Result<(), WmCoreError> {
+        self.bump_generation();
         if !self.tags.contains(tag_id) {
             return Err(WmCoreError::UnknownTag);
         }
@@ -292,6 +366,7 @@ impl WmCore {
     // applies `DEFAULT_FLOATING_GEOMETRY` to every non-pinned view on
     // registration.
     pub fn set_view_geometry(&mut self, id: ViewId, geometry: Geometry) -> Result<(), WmCoreError> {
+        self.bump_generation();
         let view = self.views.get_mut(&id).ok_or(WmCoreError::UnknownView)?;
         view.geometry = geometry;
         Ok(())
@@ -302,6 +377,7 @@ impl WmCore {
     // Wired into `main.rs`'s `init_new_windows` since Story 1.5, which
     // forces the pinned terminal non-floating on registration.
     pub fn set_view_floating(&mut self, id: ViewId, floating: bool) -> Result<(), WmCoreError> {
+        self.bump_generation();
         let view = self.views.get_mut(&id).ok_or(WmCoreError::UnknownView)?;
         view.floating = floating;
         Ok(())
@@ -312,6 +388,7 @@ impl WmCore {
     /// with [`WmCoreError::UnknownView`] for an unregistered id, leaving
     /// the currently-focused view (if any) unchanged.
     pub fn set_focus(&mut self, id: ViewId) -> Result<(), WmCoreError> {
+        self.bump_generation();
         if !self.views.contains_key(&id) {
             return Err(WmCoreError::UnknownView);
         }
@@ -322,6 +399,7 @@ impl WmCore {
     /// Clears whichever view is currently focused, if any. A no-op if no
     /// view is focused.
     pub fn clear_focus(&mut self) {
+        self.bump_generation();
         self.focused_view = None;
     }
 
@@ -331,6 +409,7 @@ impl WmCore {
     // which registers a fresh `wm-core` output the moment a real output
     // appears.
     pub fn register_output(&mut self) -> OutputId {
+        self.bump_generation();
         let id = OutputId(self.next_output_id);
         self.next_output_id += 1;
         self.outputs.insert(
@@ -363,6 +442,7 @@ impl WmCore {
     // behind, eligible forever after to be selected by `active_output_id`."
     // Wired into `main.rs`'s `remove_outputs` since Story 2.8.
     pub fn unregister_output(&mut self, output_id: OutputId) -> Result<Option<TagId>, WmCoreError> {
+        self.bump_generation();
         let output = self
             .outputs
             .remove(&output_id)
@@ -384,6 +464,7 @@ impl WmCore {
         output_id: OutputId,
         tag_id: Option<TagId>,
     ) -> Result<(), WmCoreError> {
+        self.bump_generation();
         if let Some(tag_id) = tag_id
             && !self.tags.contains(tag_id)
         {
@@ -412,6 +493,7 @@ impl WmCore {
     // `cycle_tag` (which composes this rather than duplicating its
     // enforcement).
     pub fn switch_tag(&mut self, output_id: OutputId, tag_id: TagId) -> Result<(), WmCoreError> {
+        self.bump_generation();
         if !self.tags.contains(tag_id) {
             return Err(WmCoreError::UnknownTag);
         }
@@ -441,6 +523,7 @@ impl WmCore {
     /// than reimplementing it — the same function the IPC `switch-tag`
     /// handler calls, so there is only one place the "next tag" rule lives.
     pub fn cycle_tag(&mut self, output_id: OutputId) -> Result<Option<TagId>, WmCoreError> {
+        self.bump_generation();
         let output = self
             .outputs
             .get(&output_id)
@@ -463,6 +546,7 @@ impl WmCore {
     /// no-op success. Fails with [`WmCoreError::UnknownTag`] for an
     /// unregistered id.
     pub fn mark_terminal_spawned(&mut self, id: TagId) -> Result<(), WmCoreError> {
+        self.bump_generation();
         self.tags
             .mark_terminal_spawned(id)
             .map_err(|_| WmCoreError::UnknownTag)
@@ -492,6 +576,7 @@ impl WmCore {
         &mut self,
         tag_id: TagId,
     ) -> Result<Option<String>, WmCoreError> {
+        self.bump_generation();
         let tag = self.tags.get(tag_id).ok_or(WmCoreError::UnknownTag)?;
         if tag.terminal_spawned {
             return Ok(None);
@@ -517,6 +602,7 @@ impl WmCore {
     // Called from `main.rs`'s `spawn_pinned_terminal_or_release_claim`, the
     // one place that knows whether the spawn actually happened.
     pub fn release_pinned_terminal_claim(&mut self, tag_id: TagId) -> Result<(), WmCoreError> {
+        self.bump_generation();
         self.tags
             .unmark_terminal_spawned(tag_id)
             .map_err(|_| WmCoreError::UnknownTag)
@@ -550,6 +636,7 @@ impl WmCore {
     /// the stacking order is pinned. Fails with
     /// [`WmCoreError::UnknownView`] for an unregistered id.
     pub fn raise_view(&mut self, id: ViewId) -> Result<(), WmCoreError> {
+        self.bump_generation();
         let view = self.views.get(&id).ok_or(WmCoreError::UnknownView)?;
         if is_pinned_term_app_id(&view.app_id) {
             return Ok(());
@@ -566,6 +653,7 @@ impl WmCore {
     /// terminal. Fails with [`WmCoreError::UnknownView`] for an
     /// unregistered id.
     pub fn lower_view(&mut self, id: ViewId) -> Result<(), WmCoreError> {
+        self.bump_generation();
         if !self.views.contains_key(&id) {
             return Err(WmCoreError::UnknownView);
         }
@@ -633,6 +721,7 @@ impl WmCore {
     /// `stacking_order`), so `unwrap_or(false)` on the `Result` is
     /// unreachable in practice, not a silently-wrong fallback.
     pub fn cycle_focus(&mut self) -> Option<ViewId> {
+        self.bump_generation();
         let target = self.stacking_order.iter().copied().find(|&id| {
             self.views
                 .get(&id)
@@ -850,6 +939,158 @@ impl WmCore {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every `&mut self` method has to move the counter, because a reader
+    /// that misses one is served state that no longer exists (audit finding
+    /// B-02). One test rather than nineteen: a missed bump shows up as the
+    /// counter standing still across the call that should have moved it,
+    /// whichever call that is.
+    ///
+    /// The companion to this is `tests/generation_guard.rs`, which catches
+    /// the case this one cannot: a *new* mutator that nobody thought to add
+    /// here.
+    /// Asserts that whatever just ran moved `core`'s generation past
+    /// `before`. A function rather than an inline `assert!` at each of the
+    /// nineteen call sites below, which is what keeps the caller under the
+    /// complexity gate the pipeline now enforces.
+    fn assert_moved(core: &WmCore, before: u64, label: &str) {
+        assert!(
+            core.generation() > before,
+            "{label} did not move the generation forward"
+        );
+    }
+
+    /// Every `&mut self` method has to move the counter, because a reader
+    /// that misses one is served state that no longer exists (audit finding
+    /// B-02). Ordered so each call's ids exist by the time it runs: the
+    /// three registering calls come first.
+    ///
+    /// The companion to this is `tests/generation_guard.rs`, which catches
+    /// the case a hand-written list cannot: a *new* mutator nobody added
+    /// here.
+    #[test]
+    fn every_mutator_moves_the_generation_forward() {
+        let mut core = WmCore::new();
+        let (tag, view, output) = (TagId(0), ViewId(0), OutputId(0));
+
+        let before = core.generation();
+        let _ = core.create_tag("web");
+        assert_moved(&core, before, "create_tag");
+
+        let before = core.generation();
+        let _ = core.register_view("foot");
+        assert_moved(&core, before, "register_view");
+
+        let before = core.generation();
+        let _ = core.register_output();
+        assert_moved(&core, before, "register_output");
+
+        let before = core.generation();
+        let _ = core.toggle_view_tag(view, tag);
+        assert_moved(&core, before, "toggle_view_tag");
+
+        let before = core.generation();
+        let _ = core.set_view_geometry(view, Geometry::default());
+        assert_moved(&core, before, "set_view_geometry");
+
+        let before = core.generation();
+        let _ = core.set_view_floating(view, true);
+        assert_moved(&core, before, "set_view_floating");
+
+        let before = core.generation();
+        let _ = core.set_focus(view);
+        assert_moved(&core, before, "set_focus");
+
+        let before = core.generation();
+        let _ = core.raise_view(view);
+        assert_moved(&core, before, "raise_view");
+
+        let before = core.generation();
+        let _ = core.lower_view(view);
+        assert_moved(&core, before, "lower_view");
+
+        let before = core.generation();
+        let _ = core.cycle_focus();
+        assert_moved(&core, before, "cycle_focus");
+
+        let before = core.generation();
+        core.clear_focus();
+        assert_moved(&core, before, "clear_focus");
+
+        let before = core.generation();
+        let _ = core.switch_tag(output, tag);
+        assert_moved(&core, before, "switch_tag");
+
+        let before = core.generation();
+        let _ = core.cycle_tag(output);
+        assert_moved(&core, before, "cycle_tag");
+
+        let before = core.generation();
+        let _ = core.set_output_current_tag(output, Some(tag));
+        assert_moved(&core, before, "set_output_current_tag");
+
+        let before = core.generation();
+        let _ = core.claim_pinned_terminal_spawn(tag);
+        assert_moved(&core, before, "claim_pinned_terminal_spawn");
+
+        let before = core.generation();
+        let _ = core.release_pinned_terminal_claim(tag);
+        assert_moved(&core, before, "release_pinned_terminal_claim");
+
+        let before = core.generation();
+        let _ = core.mark_terminal_spawned(tag);
+        assert_moved(&core, before, "mark_terminal_spawned");
+
+        let before = core.generation();
+        let _ = core.unregister_output(output);
+        assert_moved(&core, before, "unregister_output");
+
+        let before = core.generation();
+        let _ = core.unregister_view(view);
+        assert_moved(&core, before, "unregister_view");
+    }
+    /// A mutator that fails its own validation still bumps, because the
+    /// counter is bumped on entry — cheap in the direction that only costs a
+    /// recomputed snapshot, rather than in the direction that shows a client
+    /// state that is gone.
+    #[test]
+    fn a_rejected_mutation_still_moves_the_generation_forward() {
+        let mut core = WmCore::new();
+        let before = core.generation();
+
+        assert_eq!(core.set_focus(ViewId(999)), Err(WmCoreError::UnknownView));
+
+        assert!(core.generation() > before);
+    }
+
+    /// The counter is a change signal, not state — so two cores holding the
+    /// same tags, views, outputs and focus are equal however many times
+    /// either of them has been mutated. Every "this error path left the
+    /// state unchanged" test in this file depends on that.
+    #[test]
+    fn equality_ignores_how_many_times_a_core_has_been_mutated() {
+        let mut lightly_used = WmCore::new();
+        let view = lightly_used.register_view("foot");
+
+        let mut heavily_used = WmCore::new();
+        heavily_used.register_view("foot");
+        // Three mutations that leave the state exactly where they found it.
+        heavily_used.clear_focus();
+        heavily_used.clear_focus();
+        heavily_used.clear_focus();
+
+        assert_eq!(
+            lightly_used, heavily_used,
+            "two cores holding the same state must be equal"
+        );
+        assert!(
+            heavily_used.generation() > lightly_used.generation(),
+            "...and they must still disagree about how much has happened"
+        );
+        // Naming what was registered, so the two cores' construction reads
+        // as visibly identical.
+        assert_eq!(view, ViewId(0));
+    }
     /// Audit finding F-04: ~17 log sites formatted this error with `{e:?}`,
     /// so the user read `TagLimitReached` in their journal. `Display` is
     /// what makes `{e}` say something at them instead.

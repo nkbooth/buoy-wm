@@ -193,3 +193,66 @@ fn the_real_binary_prints_the_waybar_line_for_its_own_output() {
         "the line waybar would consume is not the one output 7's current tag calls for"
     );
 }
+
+#[test]
+fn the_real_binary_polls_again_on_the_connection_it_already_has() {
+    // One connect/accept/thread-spawn/close cycle per tick per output, four
+    // times a second for the whole login session, against the same mutex the
+    // Wayland dispatch thread needs — the normal-load half of audit finding
+    // B-02. The server deliberately keeps a connection open across requests,
+    // so the fix is for the bar to use it.
+    let runtime_dir = RuntimeDir::create("connection-reuse");
+    let listener = UnixListener::bind(runtime_dir.socket_path()).expect("bind the fake wm socket");
+
+    let child = Command::new(env!("CARGO_BIN_EXE_buoy-status-bar"))
+        .arg("7")
+        .env("XDG_RUNTIME_DIR", runtime_dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the real buoy-status-bar");
+    let mut child = ChildGuard(child);
+
+    let connection = accept_within(&listener, &mut child, std::time::Duration::from_secs(10));
+    let mut writer = connection
+        .try_clone()
+        .expect("split the fixture connection for writing");
+    let mut reader = BufReader::new(connection);
+
+    // Two full request/response exchanges on the one accepted connection. If
+    // the bar reconnects per tick, the second `read_line` sees EOF on this
+    // stream instead of a request, because the bar closed it.
+    for poll in 1..=2 {
+        let mut request = String::new();
+        let read = reader
+            .read_line(&mut request)
+            .expect("read a request from the connection already accepted");
+        assert!(
+            read > 0,
+            "poll {poll} arrived on a new connection: the bar closed the one it had"
+        );
+        assert_eq!(request.trim_end(), r#"{"type":"get-state"}"#);
+        writeln!(writer, "{STATE_RESPONSE}")
+            .and_then(|()| writer.flush())
+            .unwrap_or_else(|e| panic!("answer poll {poll}: {e}"));
+    }
+
+    // Reuse must not cost recovery: a `wm` that restarted is a closed
+    // connection, and the bar has to reconnect on the next tick rather than
+    // render disconnected forever.
+    drop(writer);
+    drop(reader);
+    let reconnected = accept_within(&listener, &mut child, std::time::Duration::from_secs(10));
+    let mut writer = reconnected
+        .try_clone()
+        .expect("split the reconnected fixture connection");
+    let mut reader = BufReader::new(reconnected);
+    let mut request = String::new();
+    reader
+        .read_line(&mut request)
+        .expect("read the request that followed the reconnect");
+    assert_eq!(request.trim_end(), r#"{"type":"get-state"}"#);
+    writeln!(writer, "{STATE_RESPONSE}")
+        .and_then(|()| writer.flush())
+        .expect("answer the poll after the reconnect");
+}
