@@ -57,8 +57,10 @@ pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{sess
 # Declaring ANY [[keybind]] replaces the entire built-in set, so list every
 # binding you want. Mousebinds are a separate list with the same rule.
 #
-#   mod    = any of "Super" ("Mod4"), "Ctrl" ("Control"), "Alt" ("Mod1"),
-#            "Shift". Optional — omit it for an unmodified key.
+#   mod    = any of "super" ("mod4"), "ctrl" ("control"), "alt" ("mod1"),
+#            "shift". Optional — omit it for an unmodified key. The
+#            PascalCase spellings ("Super", "Ctrl", …) documented before
+#            buoy 0.1 still parse, and always will.
 #   key    = a keysym name: a single character ("a", "1", "?"), a named key
 #            ("Return", "Space", "Tab", "Escape", "Left", "Page_Up"), or a
 #            function key ("F1".."F35"). Named keys are case-insensitive;
@@ -79,47 +81,47 @@ pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{sess
 # second binding is skipped.
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "Space"
 action = "terminal"
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "r"
 action = "launcher"
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "q"
 action = "close"
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "n"
 action = "focus_next"
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "Tab"
 action = "cycle_tag"
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "a"
 action = "tag_picker"
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "s"
 action = "tag_switch"
 
 [[keybind]]
-mod = ["Super", "Shift"]
+mod = ["super", "shift"]
 key = "?"
 action = "hotkeys"
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "Escape"
 action = "exit"
 
@@ -127,12 +129,12 @@ action = "exit"
 # time the bind is pressed, so these work on a fresh session with no setup.
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "1"
 action = { switch_tag = "email" }
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "2"
 action = { switch_tag = "misc" }
 
@@ -140,27 +142,27 @@ action = { switch_tag = "misc" }
 # pipes, arguments and `~` all work as they would in a shell.
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "p"
 action = { exec = "grim -g \"$(slurp)\" ~/screenshot.png" }
 
 [[keybind]]
-mod = ["Super", "Shift"]
+mod = ["super", "shift"]
 key = "B"
 action = { exec = "~/bin/toggle-bluetooth.sh" }
 
 # --- Mousebinds -------------------------------------------------------------
 #
-# button = "Left", "Right" or "Middle"
+# button = "left", "right" or "middle"
 
 [[mousebind]]
-mod = ["Super"]
-button = "Left"
+mod = ["super"]
+button = "left"
 action = "move"
 
 [[mousebind]]
-mod = ["Super"]
-button = "Right"
+mod = ["super"]
+button = "right"
 action = "resize"
 
 # --- Input devices ----------------------------------------------------------

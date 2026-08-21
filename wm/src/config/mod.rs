@@ -30,25 +30,48 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// A modifier key a binding can require. Aliases accept the spellings the
-/// X11/xkb world uses interchangeably, so a user writing `Mod4` or
-/// `Control` isn't told their config is wrong.
+/// A modifier key a binding can require.
+///
+/// `rename_all` because every other enum in this file has it, and a config
+/// block mixing `mod = ["Super"]` with `action = "resize"` made the file
+/// look like it had two casing systems (audit finding C-11). The
+/// PascalCase spellings are aliases rather than removals: they are what
+/// the README and the shipped example documented for two releases, so
+/// every config already on disk is written in them, and dropping one would
+/// empty that user's keymap at their next login. The remaining aliases
+/// accept the spellings the X11/xkb world uses interchangeably, so a user
+/// writing `mod4` or `control` isn't told their config is wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Modifier {
-    #[serde(alias = "Mod4", alias = "Logo", alias = "Win")]
+    #[serde(
+        alias = "Super",
+        alias = "mod4",
+        alias = "Mod4",
+        alias = "logo",
+        alias = "Logo",
+        alias = "win",
+        alias = "Win"
+    )]
     Super,
-    #[serde(alias = "Control")]
+    #[serde(alias = "Ctrl", alias = "control", alias = "Control")]
     Ctrl,
-    #[serde(alias = "Mod1")]
+    #[serde(alias = "Alt", alias = "mod1", alias = "Mod1")]
     Alt,
+    #[serde(alias = "Shift")]
     Shift,
 }
 
-/// A pointer button a binding can require.
+/// A pointer button a binding can require. PascalCase is an alias for the
+/// same reason it is on [`Modifier`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Button {
+    #[serde(alias = "Left")]
     Left,
+    #[serde(alias = "Right")]
     Right,
+    #[serde(alias = "Middle")]
     Middle,
 }
 
@@ -1269,6 +1292,112 @@ action = "close"
                 Modifier::Shift
             ]
         );
+    }
+
+    /// Audit finding C-11 renamed these values to snake_case to match every
+    /// other enum in the file. The PascalCase spellings the README and the
+    /// shipped example advertised for two releases are what every existing
+    /// config on disk contains, so they are aliases, not history — a
+    /// rename that silently emptied a user's keymap would be the whole-file
+    /// discard G-04 exists to prevent, arriving by a different route.
+    #[test]
+    fn every_previously_documented_modifier_and_button_spelling_still_parses() {
+        let config = Config::parse(
+            r#"
+            [[keybind]]
+            mod = ["Super", "Ctrl", "Alt", "Shift"]
+            key = "a"
+            action = "close"
+
+            [[keybind]]
+            mod = ["Mod4", "Control", "Mod1"]
+            key = "b"
+            action = "close"
+
+            [[mousebind]]
+            mod = ["Super"]
+            button = "Left"
+            action = "move"
+
+            [[mousebind]]
+            mod = ["Super"]
+            button = "Right"
+            action = "resize"
+
+            [[mousebind]]
+            mod = ["Super"]
+            button = "Middle"
+            action = "close"
+            "#,
+        )
+        .expect("the previously documented spellings must keep working");
+        assert_eq!(
+            config.keybinds[0].mods,
+            vec![
+                Modifier::Super,
+                Modifier::Ctrl,
+                Modifier::Alt,
+                Modifier::Shift
+            ]
+        );
+        assert_eq!(
+            config.keybinds[1].mods,
+            vec![Modifier::Super, Modifier::Ctrl, Modifier::Alt]
+        );
+        assert_eq!(
+            config
+                .mousebinds
+                .iter()
+                .map(|bind| bind.button)
+                .collect::<Vec<_>>(),
+            vec![Button::Left, Button::Right, Button::Middle]
+        );
+    }
+
+    /// The two casings have to produce the *same* config, not merely both
+    /// parse: an alias that resolved to a different variant would be a
+    /// keybind that fires on the wrong chord.
+    #[test]
+    fn snake_case_and_pascal_case_bindings_parse_to_the_same_config() {
+        let snake_case = Config::parse(
+            r#"
+            [[keybind]]
+            mod = ["super", "shift"]
+            key = "a"
+            action = "close"
+
+            [[keybind]]
+            mod = ["ctrl", "alt"]
+            key = "b"
+            action = "close"
+
+            [[mousebind]]
+            mod = ["super"]
+            button = "middle"
+            action = "move"
+            "#,
+        )
+        .expect("snake_case is the documented spelling");
+        let pascal_case = Config::parse(
+            r#"
+            [[keybind]]
+            mod = ["Super", "Shift"]
+            key = "a"
+            action = "close"
+
+            [[keybind]]
+            mod = ["Ctrl", "Alt"]
+            key = "b"
+            action = "close"
+
+            [[mousebind]]
+            mod = ["Super"]
+            button = "Middle"
+            action = "move"
+            "#,
+        )
+        .expect("PascalCase is what every config written before C-11 uses");
+        assert_eq!(snake_case, pascal_case);
     }
 
     #[test]

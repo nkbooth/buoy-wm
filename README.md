@@ -234,12 +234,12 @@ launcher = "fuzzel"    # the `launcher` action only — see below
 default_tag = "default"
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "1"
 action = { switch_tag = "email" }   # created on first press
 
 [[keybind]]
-mod = ["Super"]
+mod = ["super"]
 key = "p"
 action = { exec = "grim -g \"$(slurp)\" ~/shot.png" }
 ```
@@ -279,6 +279,11 @@ keys are case-insensitive; **single characters are not**. An uppercase letter
 is the *shifted* symbol, so `Super`+`Q` can never fire — write `key = "q"`,
 or add `"Shift"`. That binding is skipped at load, and reported, rather than
 silently doing nothing. `mod` is optional; omit it to bind an unmodified key.
+
+`mod` values are `super` (or `mod4`), `ctrl` (or `control`), `alt` (or
+`mod1`) and `shift`; `button` values are `left`, `right` and `middle`. The
+PascalCase spellings this file used to document (`"Super"`, `"Left"`) are
+still accepted, so an existing config needs no edit.
 
 Actions: `terminal`, `launcher`, `close`, `focus_next`, `exit`, `cycle_tag`,
 `tag_picker`, `tag_switch`, `hotkeys`, `{ switch_tag = "<name>" }`, and
