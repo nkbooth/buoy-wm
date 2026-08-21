@@ -26,8 +26,9 @@ pub mod glob;
 pub mod keysym;
 
 use serde::Deserialize;
+use std::ffi::OsStr;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A modifier key a binding can require. Aliases accept the spellings the
 /// X11/xkb world uses interchangeably, so a user writing `Mod4` or
@@ -771,20 +772,48 @@ impl Config {
 }
 
 /// `$XDG_CONFIG_HOME/buoy/config.toml`, or `~/.config/buoy/config.toml`
-/// when that isn't set.
+/// when that isn't usable.
 ///
-/// `None` when neither variable is set, rather than a relative path.
-/// Code-review follow-up: this previously fell back to an empty base,
-/// yielding the *relative* `buoy/config.toml`, which `load` would then
-/// resolve against the WM's working directory — so a `buoy/config.toml`
-/// sitting in whatever directory the session happened to launch from would
-/// be read and its `exec` actions run through `sh -c`. Having no home to
-/// look in means there is no config, not "look here instead".
+/// Thin, untested (I/O-reading, not logic) wrapper that reads the real
+/// environment variables; [`resolve_config_path`] holds the decision and
+/// the guard that keeps this from ever returning a relative path.
 pub fn config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    resolve_config_path(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+/// Resolves the config file's path from explicit, injectable parameters —
+/// the same "test the decision, not the I/O" split
+/// [`resolve_socket_path`](crate::ipc::server::resolve_socket_path) uses.
+///
+/// `None` when neither directory is usable, rather than a relative path.
+/// Audit finding C-01: an earlier fix closed only the both-variables-unset
+/// case, so a set-but-empty `XDG_CONFIG_HOME` still yielded the *relative*
+/// `buoy/config.toml`, which [`Config::load`] would resolve against the
+/// WM's working directory — a `buoy/config.toml` sitting in whatever
+/// directory the session happened to launch from would be read and its
+/// `exec` actions run through `sh -c`. Having no usable base means there is
+/// no config, not "look here instead", which is why this returns `None`
+/// rather than guessing.
+pub fn resolve_config_path(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<PathBuf> {
+    let base = usable_base_dir(xdg_config_home)
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+        .or_else(|| usable_base_dir(home).map(|home| PathBuf::from(home).join(".config")))?;
     Some(base.join("buoy").join("config.toml"))
+}
+
+// A set-but-empty or set-but-relative base (both real systemd/container
+// patterns) must fall through rather than produce the relative
+// `buoy/config.toml`, which `load` would resolve against the WM's working
+// directory. The XDG Base Directory spec requires a relative value be
+// ignored, so `is_absolute` covers both variants.
+fn usable_base_dir(value: Option<&OsStr>) -> Option<&OsStr> {
+    value.filter(|dir| Path::new(dir).is_absolute())
 }
 
 #[cfg(test)]
@@ -1651,5 +1680,44 @@ mod tests {
         let config = Config::default();
         let touchpad = config.input_for("PIXA3854:00 093A:0274 Touchpad").unwrap();
         assert_eq!(touchpad.settings(), vec![LibinputSetting::Tap(true)]);
+    }
+
+    #[test]
+    fn resolve_config_path_is_none_when_neither_variable_is_set() {
+        assert_eq!(resolve_config_path(None, None), None);
+    }
+
+    #[test]
+    fn resolve_config_path_treats_empty_xdg_config_home_as_unset() {
+        // A set-but-empty XDG_CONFIG_HOME (a real systemd/container
+        // pattern) must not join onto an empty base and yield the relative
+        // "buoy/config.toml", which `load` would resolve against the WM's
+        // working directory.
+        assert_eq!(resolve_config_path(Some(OsStr::new("")), None), None);
+    }
+
+    #[test]
+    fn resolve_config_path_rejects_a_relative_xdg_config_home() {
+        // The XDG Base Directory spec requires a relative value be ignored.
+        assert_eq!(
+            resolve_config_path(Some(OsStr::new("relative")), None),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_home_when_xdg_config_home_is_empty() {
+        assert_eq!(
+            resolve_config_path(Some(OsStr::new("")), Some(OsStr::new("/home/x"))),
+            Some(PathBuf::from("/home/x/.config/buoy/config.toml"))
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_xdg_config_home_over_home() {
+        assert_eq!(
+            resolve_config_path(Some(OsStr::new("/xdg")), Some(OsStr::new("/home/x"))),
+            Some(PathBuf::from("/xdg/buoy/config.toml"))
+        );
     }
 }
