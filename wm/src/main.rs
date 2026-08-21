@@ -32,6 +32,10 @@ use wayland_client::{
 
 mod compositor;
 
+use crate::compositor::child::{reap_finished_children, spawn_tracked, track_child};
+use crate::compositor::report::{
+    install_panic_reporter, log_wm_core_err, notify_user, wenum_label,
+};
 use crate::compositor::river;
 use crate::compositor::river::{
     river_input_device_v1::RiverInputDeviceV1,
@@ -55,37 +59,9 @@ use buoy_wm::{config, ipc, wm_core};
 use config::{Action, Config};
 use wm_core::ids::{OutputId, TagId, ViewId};
 use wm_core::state::{
-    WmCore, WmCoreError, is_pinned_term_app_id, pinned_term_app_id, tag_id_from_pinned_app_id,
+    WmCore, is_pinned_term_app_id, pinned_term_app_id, tag_id_from_pinned_app_id,
 };
 use wm_core::view::{DEFAULT_FLOATING_GEOMETRY, Geometry};
-
-/// Logs `result`'s error (if any) as `"{context}: {e}"`, otherwise no-ops.
-/// `wm_core` mutators only fail on invalid/unknown ids that call sites here
-/// already guard against structurally (NFR2) — this exists purely so a
-/// future regression is visible instead of silently discarded.
-fn log_wm_core_err(result: Result<(), WmCoreError>, context: &str) {
-    if let Err(e) = result {
-        log_err!("{context}: {e}");
-    }
-}
-
-/// Formats a protocol enum for a log line without `WEnum`'s wrapper.
-///
-/// `{:?}` on a `WEnum` prints `Value(Disabled)`, leaking a detail of how
-/// wayland-rs models "this could be a value the client's copy of the
-/// protocol has never heard of" into output a person reads. An unknown
-/// value still has to say so — it means river and this binary disagree
-/// about the protocol — but it says it in words rather than a wrapper.
-fn wenum_label<T: Debug>(value: wayland_client::WEnum<T>) -> String {
-    // Matched on the variants rather than via `into_result`, whose `Err`
-    // carries a pre-formatted "Unknown numeric value N for enum ..." string
-    // — the raw number is the useful half, and the type name is already
-    // implied by the log line it lands in.
-    match value {
-        wayland_client::WEnum::Value(known) => format!("{known:?}"),
-        wayland_client::WEnum::Unknown(raw) => format!("unknown ({raw})"),
-    }
-}
 
 /// Records `action` as the binding press the next manage sequence will act
 /// on, returning whichever press it displaced.
@@ -193,152 +169,6 @@ fn requested_resize_edges(edges: wayland_client::WEnum<Edges>) -> Option<Edges> 
             None
         }
     }
-}
-
-/// The one line a panic leaves behind, whichever thread raised it.
-///
-/// `[profile.release] strip = true` leaves backtraces symbol-poor, so a
-/// stable, greppable sentence naming the source location is the only thing
-/// that will identify the next unforeseen panic in a journal from a
-/// session that has already ended (audit finding F-01).
-fn panic_report(location: &str, message: &str) -> String {
-    format!("buoy-wm panicked at {location}: {message}")
-}
-
-/// Makes a panic visible to the user before the process dies, then defers
-/// to the default hook so stderr and the exit path are unchanged.
-///
-/// Deliberately a hook rather than a `catch_unwind` around the dispatch
-/// loop. A panic part-way through a manage sequence leaves `WmCore`,
-/// `WindowManager::windows` and river's own in-flight transaction
-/// half-updated with no way to tell which; resuming the loop over that
-/// state would trade a visible crash for silently wrong window management,
-/// which is the worse of the two outcomes for a session leader. Reporting
-/// and dying is honest — the hook only makes sure the user finds out why
-/// their desktop vanished (audit finding F-01).
-fn install_panic_reporter() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let location = info
-            .location()
-            .map(|location| location.to_string())
-            .unwrap_or_else(|| "an unknown location".to_string());
-        notify_user(&panic_report(&location, ipc::panic_message(info.payload())));
-        default_hook(info);
-    }));
-}
-
-/// Every child this WM spawns is fire-and-forget — nothing ever reads an
-/// exit status. Without a `wait` each finished child lingers as a zombie
-/// for the lifetime of the session, and this process is a long-lived
-/// session daemon, so they accumulate (code-review follow-up). Rather than
-/// tracking children per call site, keep one list and opportunistically
-/// reap whatever has finished each time a new child is spawned.
-static SPAWNED_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
-
-/// Records `child` for reaping and clears out any that have already
-/// exited. Recovers from a poisoned lock the same way [`ipc::
-/// lock_recovering`] does — losing track of a child leaks a zombie, which
-/// is never worth taking down the session for (NFR2).
-fn track_child(child: std::process::Child) {
-    let mut children = SPAWNED_CHILDREN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    children.retain_mut(child_is_still_running);
-    children.push(child);
-}
-
-/// Reaps whatever has exited since the last call.
-///
-/// Called once per manage sequence as well as on every spawn, because
-/// reaping only on spawn meant a session that launched thirty pickers and
-/// then idled held thirty zombies until the next keypress (audit finding
-/// F-05). Recovers from a poisoned lock for the same reason
-/// [`track_child`] does.
-fn reap_finished_children() {
-    let mut children = SPAWNED_CHILDREN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    children.retain_mut(child_is_still_running);
-}
-
-/// Whether `tracked` is still running, reporting anything its exit had to
-/// say on the way past.
-///
-/// The status used to be matched and thrown away. `Command::spawn` succeeds
-/// for anything on `$PATH`, so a misconfigured `defaults.terminal` that
-/// starts and immediately fails was indistinguishable from one that worked,
-/// and nothing said so (audit finding F-05). The reaping design is right;
-/// the observation is free.
-fn child_is_still_running(tracked: &mut std::process::Child) -> bool {
-    match tracked.try_wait() {
-        Ok(Some(status)) => {
-            if let Some(complaint) = child_exit_complaint(status) {
-                log_err!("A child of this WM {complaint}");
-            }
-            false
-        }
-        Ok(None) => true,
-        Err(e) => {
-            // Keep it in the list: an unreadable status is not evidence the
-            // process is gone, and dropping the handle would leak the zombie
-            // permanently instead of retrying next pass.
-            log_err!("Could not check on child process {}: {e}", tracked.id());
-            true
-        }
-    }
-}
-
-/// What a finished child's exit status is worth saying, or `None` when it
-/// exited cleanly.
-fn child_exit_complaint(status: std::process::ExitStatus) -> Option<String> {
-    (!status.success()).then(|| format!("exited unsuccessfully ({status})"))
-}
-
-/// Spawns `command` fire-and-forget, logging a failure as `"Failed to spawn
-/// {what}: {e}"`. `WAYLAND_DEBUG` is removed from every child's environment
-/// — the added noise makes debugging the window manager itself impractical.
-///
-/// Returns whether the child was actually created. Most callers spawn
-/// something whose failure costs the user one keypress and ignore this; the
-/// pinned terminal is the exception, because its spawn has already been
-/// recorded as having happened (audit finding D-01).
-fn spawn_tracked(command: &mut std::process::Command, what: &str) -> bool {
-    match command.env_remove("WAYLAND_DEBUG").spawn() {
-        Ok(child) => {
-            track_child(child);
-            true
-        }
-        Err(e) => {
-            log_err!("Failed to spawn {what}: {e}");
-            false
-        }
-    }
-}
-
-/// Puts `message` in front of the user — as a desktop notification as well
-/// as in the journal.
-///
-/// This WM is `exec`'d by river with no attached TTY, so whether a log line
-/// reaches the journal, `~/.xsession-errors` or `/dev/null` depends on the
-/// display manager: from the user's seat every one of them is
-/// conditionally invisible (audit finding G-03). Reserved for failures the
-/// user can actually act on — a dead keybind, a rejected config, an IPC
-/// server that never started. Structurally-unreachable developer
-/// tripwires, such as the `log_wm_core_err` sites, stay on plain logging;
-/// a notification the user cannot act on trains them to dismiss the ones
-/// they can.
-///
-/// Routed through [`spawn_tracked`] like every other child: this process
-/// lives for the whole session and would otherwise accumulate one zombie
-/// per notification. There is no recursion risk in doing so —
-/// `spawn_tracked`'s own failure path only logs.
-fn notify_user(message: &str) {
-    spawn_tracked(
-        &mut buoy_common::notify::notify_send_command(message),
-        "notify-send",
-    );
-    log_err!("{message}");
 }
 
 /// Sends the one `river_libinput_device_v1` request `setting` stands for.
@@ -3235,26 +3065,6 @@ mod tests {
         assert_eq!(slot, Some(Action::FocusNext));
     }
 
-    /// Audit finding F-05: `Command::spawn` succeeds for anything on
-    /// `$PATH`, so a misconfigured `defaults.terminal` that starts and
-    /// immediately fails was indistinguishable from one that worked — the
-    /// exit status was matched and discarded.
-    #[test]
-    fn a_child_that_exited_badly_has_something_to_report() {
-        let failed = std::process::Command::new("/bin/false")
-            .status()
-            .expect("/bin/false ran");
-        assert!(child_exit_complaint(failed).is_some());
-    }
-
-    #[test]
-    fn a_child_that_exited_cleanly_has_nothing_to_report() {
-        let succeeded = std::process::Command::new("/bin/true")
-            .status()
-            .expect("/bin/true ran");
-        assert_eq!(child_exit_complaint(succeeded), None);
-    }
-
     /// Audit finding F-03: `dx`/`dy` arrive over the wire, `[profile
     /// .release]` sets no `overflow-checks`, and the `MIN_WINDOW_EXTENT`
     /// floor is applied *after* the arithmetic — so a wrap turns a drag
@@ -3372,34 +3182,6 @@ mod tests {
                 Edges::Left.union(Edges::Bottom)
             )),
             Some(Edges::Left.union(Edges::Bottom))
-        );
-    }
-
-    #[test]
-    fn a_panic_report_names_where_it_happened_and_what_it_said() {
-        let report = panic_report("wm/src/main.rs:42:9", "Seat not found");
-        assert!(report.contains("wm/src/main.rs:42:9"), "{report}");
-        assert!(report.contains("Seat not found"), "{report}");
-    }
-
-    #[test]
-    fn wenum_label_prints_a_known_value_without_the_wrapper() {
-        use river::river_libinput_device_v1::TapState;
-        assert_eq!(
-            wenum_label(wayland_client::WEnum::Value(TapState::Disabled)),
-            "Disabled"
-        );
-    }
-
-    /// An unrecognized value means river and this binary disagree about the
-    /// protocol, which has to stay visible rather than being smoothed into
-    /// something that looks like a real setting.
-    #[test]
-    fn wenum_label_names_an_unknown_value_and_keeps_the_raw_number() {
-        use river::river_libinput_device_v1::TapState;
-        assert_eq!(
-            wenum_label::<TapState>(wayland_client::WEnum::Unknown(7)),
-            "unknown (7)"
         );
     }
 

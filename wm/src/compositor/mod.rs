@@ -34,4 +34,6 @@
 //! without losing exhaustive matching. Within one crate a file boundary
 //! costs nothing, which is why this is a directory and not a second crate.
 
+pub mod child;
+pub mod report;
 pub mod river;
