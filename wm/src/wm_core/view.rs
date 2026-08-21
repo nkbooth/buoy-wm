@@ -15,8 +15,8 @@
 // PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 // language governing rights and limitations under the RPL.
 
-//! `View`: an in-memory record of a window's tag membership, geometry,
-//! floating state, and focus.
+//! `View`: an in-memory record of a window's tag membership, geometry and
+//! floating state.
 
 use super::ids::ViewId;
 use super::tag_set::TagSet;
@@ -46,6 +46,14 @@ pub const DEFAULT_FLOATING_GEOMETRY: Geometry = Geometry {
 };
 
 /// An in-memory record for a registered window (view).
+///
+/// Deliberately carries no focus flag of its own. It used to, mirroring
+/// [`WmCore::focused_view`](super::state::WmCore) — two representations of
+/// one fact, one write path, and every production read went to the other
+/// one. `unregister_view` cleared the core's field but not the removed
+/// `View`'s, which was harmless only because the `View` was dropped in the
+/// same statement; the first future path that moved or cloned a `View`
+/// would have inherited a stale `focused: true` (audit finding K-02).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
     pub id: ViewId,
@@ -53,5 +61,4 @@ pub struct View {
     pub tags: TagSet,
     pub floating: bool,
     pub geometry: Geometry,
-    pub focused: bool,
 }

@@ -178,8 +178,10 @@ pub struct WmCore {
     views: HashMap<ViewId, View>,
     next_view_id: u64,
     tags: TagRegistry,
-    /// The single WM-wide focused view, if any (data-model.md: `View` has
-    /// one `focused: bool` field, not a per-seat focus set).
+    /// The single WM-wide focused view, if any — one WM-wide focus, not a
+    /// per-seat focus set (data-model.md). The sole representation of
+    /// focus: `View` deliberately carries no flag that could disagree with
+    /// it (audit finding K-02).
     focused_view: Option<ViewId>,
     outputs: HashMap<OutputId, Output>,
     next_output_id: u64,
@@ -221,7 +223,8 @@ impl WmCore {
 
     /// Registers a new view for `app_id`, returning a fresh, unique
     /// [`ViewId`]. The new view starts with empty tags, `floating ==
-    /// true`, `focused == false`, and zeroed [`Geometry`](super::view::Geometry).
+    /// true`, and zeroed [`Geometry`](super::view::Geometry). It is not
+    /// focused; focus lives only in [`WmCore::focused_view`].
     pub fn register_view(&mut self, app_id: &str) -> ViewId {
         let id = ViewId(self.next_view_id);
         self.next_view_id += 1;
@@ -233,7 +236,6 @@ impl WmCore {
                 tags: Default::default(),
                 floating: true,
                 geometry: Default::default(),
-                focused: false,
             },
         );
         self.stacking_order.push_back(id);
@@ -308,11 +310,6 @@ impl WmCore {
         if !self.views.contains_key(&id) {
             return Err(WmCoreError::UnknownView);
         }
-        self.clear_focus();
-        self.views
-            .get_mut(&id)
-            .expect("presence checked above")
-            .focused = true;
         self.focused_view = Some(id);
         Ok(())
     }
@@ -320,11 +317,7 @@ impl WmCore {
     /// Clears whichever view is currently focused, if any. A no-op if no
     /// view is focused.
     pub fn clear_focus(&mut self) {
-        if let Some(id) = self.focused_view.take()
-            && let Some(view) = self.views.get_mut(&id)
-        {
-            view.focused = false;
-        }
+        self.focused_view = None;
     }
 
     /// Registers a new output, returning a fresh, unique [`OutputId`].
@@ -903,8 +896,8 @@ mod tests {
         assert_eq!(view.app_id, "app-one");
         assert!(view.tags == Default::default());
         assert!(view.floating);
-        assert!(!view.focused);
         assert_eq!(view.geometry, Geometry::default());
+        assert_eq!(core.focused_view, None);
     }
 
     #[test]
@@ -954,7 +947,6 @@ mod tests {
         core.set_focus(first).unwrap();
         core.unregister_view(second).unwrap();
         assert_eq!(core.focused_view, Some(first));
-        assert!(core.views.get(&first).unwrap().focused);
     }
 
     #[test]
@@ -1076,11 +1068,11 @@ mod tests {
     }
 
     #[test]
-    fn set_focus_sets_focused_true_on_target_view() {
+    fn set_focus_records_the_target_view_as_focused() {
         let mut core = WmCore::new();
         let view_id = core.register_view("app-one");
         core.set_focus(view_id).unwrap();
-        assert!(core.views.get(&view_id).unwrap().focused);
+        assert_eq!(core.focused_view, Some(view_id));
     }
 
     #[test]
@@ -1090,8 +1082,11 @@ mod tests {
         let second = core.register_view("app-two");
         core.set_focus(first).unwrap();
         core.set_focus(second).unwrap();
-        assert!(!core.views.get(&first).unwrap().focused);
-        assert!(core.views.get(&second).unwrap().focused);
+        assert_eq!(
+            core.focused_view,
+            Some(second),
+            "at most one view is focused, and it is the last one focused"
+        );
     }
 
     #[test]
@@ -1100,7 +1095,7 @@ mod tests {
         let view_id = core.register_view("app-one");
         core.set_focus(view_id).unwrap();
         core.clear_focus();
-        assert!(!core.views.get(&view_id).unwrap().focused);
+        assert_eq!(core.focused_view, None);
     }
 
     #[test]
@@ -1110,7 +1105,7 @@ mod tests {
         core.set_focus(view_id).unwrap();
         let bogus_view = ViewId(999);
         assert_eq!(core.set_focus(bogus_view), Err(WmCoreError::UnknownView));
-        assert!(core.views.get(&view_id).unwrap().focused);
+        assert_eq!(core.focused_view, Some(view_id));
     }
 
     #[test]
@@ -2128,7 +2123,7 @@ mod tests {
 
         assert_eq!(core.cycle_focus(), Some(a));
         assert_eq!(core.stacking_order(), vec![b, c, a]);
-        assert!(core.views.get(&a).unwrap().focused);
+        assert_eq!(core.focused_view, Some(a));
     }
 
     #[test]
@@ -2154,7 +2149,7 @@ mod tests {
         let id = core.register_view("only");
         assert_eq!(core.cycle_focus(), Some(id));
         assert_eq!(core.stacking_order(), vec![id]);
-        assert!(core.views.get(&id).unwrap().focused);
+        assert_eq!(core.focused_view, Some(id));
     }
 
     /// Regression guard for the Story 1.4 code-review follow-up
@@ -2320,7 +2315,7 @@ mod tests {
         // not any order predating the raise_view call.
         assert_eq!(core.cycle_focus(), Some(a));
         assert_eq!(core.stacking_order(), vec![c, b, a]);
-        assert!(core.views.get(&a).unwrap().focused);
+        assert_eq!(core.focused_view, Some(a));
     }
 
     // Story 2.7 Task 1 RED: `is_view_visible` is the pure visibility
