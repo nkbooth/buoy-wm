@@ -281,19 +281,35 @@ mod tests {
     fn connect_with_timeout_sets_the_configured_read_and_write_timeouts() {
         use std::os::unix::net::UnixListener;
 
-        let socket_path = std::env::temp_dir().join(format!(
+        let socket = SocketGuard(std::env::temp_dir().join(format!(
             "buoy-status-bar-connect-with-timeout-test-{}.sock",
             std::process::id()
-        ));
-        let _ = std::fs::remove_file(&socket_path);
-        let _listener = UnixListener::bind(&socket_path).expect("failed to bind test socket");
+        )));
+        let _ = std::fs::remove_file(socket.path());
+        let _listener = UnixListener::bind(socket.path()).expect("failed to bind test socket");
 
         let stream =
-            connect_with_timeout(&socket_path).expect("connect_with_timeout should succeed");
+            connect_with_timeout(socket.path()).expect("connect_with_timeout should succeed");
 
         assert_eq!(stream.read_timeout().unwrap(), Some(SOCKET_IO_TIMEOUT));
         assert_eq!(stream.write_timeout().unwrap(), Some(SOCKET_IO_TIMEOUT));
+    }
 
-        let _ = std::fs::remove_file(&socket_path);
+    /// Removes a test socket inode when the test ends, including on a
+    /// panicking assertion — the trailing `remove_file` this replaces did
+    /// not run on the one path that most needs the cleanup (audit finding
+    /// T-03).
+    struct SocketGuard(std::path::PathBuf);
+
+    impl SocketGuard {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for SocketGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 }

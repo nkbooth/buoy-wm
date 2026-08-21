@@ -253,25 +253,6 @@ fn panic_report(location: &str, message: &str) -> String {
     format!("buoy-wm panicked at {location}: {message}")
 }
 
-/// The human-readable half of a panic payload.
-///
-/// `panic!("literal")` yields a `&'static str` and `panic!("{x}")` yields a
-/// `String`; a reporter that reads only one of them is blank for half the
-/// panics this codebase can raise.
-///
-/// `ipc::server::describe_panic` is the same decode for the `catch_unwind`
-/// around each IPC connection — see its doc comment for why the two are
-/// deliberately not one.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
-    if let Some(literal) = payload.downcast_ref::<&'static str>() {
-        literal
-    } else if let Some(owned) = payload.downcast_ref::<String>() {
-        owned
-    } else {
-        "a non-string panic payload"
-    }
-}
-
 /// Makes a panic visible to the user before the process dies, then defers
 /// to the default hook so stderr and the exit path are unchanged.
 ///
@@ -290,7 +271,7 @@ fn install_panic_reporter() {
             .location()
             .map(|location| location.to_string())
             .unwrap_or_else(|| "an unknown location".to_string());
-        notify_user(&panic_report(&location, panic_message(info.payload())));
+        notify_user(&panic_report(&location, ipc::panic_message(info.payload())));
         default_hook(info);
     }));
 }
@@ -3069,9 +3050,39 @@ fn start_ipc_server(
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", socket_path.display()))?;
     buoy_common::socket_path::verify_private_dir(parent).map_err(|e| e.to_string())?;
-    ipc::server::spawn(Arc::clone(wm_core), &socket_path, defaults.clone())
-        .map(|_accept_thread| socket_path.clone())
-        .map_err(|e| format!("cannot listen on {}: {e}", socket_path.display()))
+    ipc::server::spawn(
+        Arc::clone(wm_core),
+        &socket_path,
+        pinned_terminal_spawner(wm_core, defaults),
+    )
+    .map(|_accept_thread| socket_path.clone())
+    .map_err(|e| format!("cannot listen on {}: {e}", socket_path.display()))
+}
+
+/// The pinned-terminal spawn the IPC server performs when a dispatched
+/// `switch-tag` has claimed one, as a closure over the config and the
+/// shared core.
+///
+/// This is the composition-root half of audit finding J-02: `ipc::server`
+/// used to call `crate::spawn_pinned_terminal_or_release_claim` directly,
+/// which made a leaf transport module depend on the module that owns the
+/// whole WM. Building the closure here instead puts the knowledge of *what*
+/// a spawn is where the config already lives, and leaves the server holding
+/// only a `Fn`.
+fn pinned_terminal_spawner(
+    wm_core: &Arc<Mutex<wm_core::state::WmCore>>,
+    defaults: &config::Defaults,
+) -> ipc::server::SpawnPinnedTerminal {
+    let wm_core = Arc::clone(wm_core);
+    let defaults = defaults.clone();
+    Arc::new(move |pending: &ipc::dispatch::PendingPinnedSpawn| {
+        spawn_pinned_terminal_or_release_claim(
+            &wm_core,
+            pending.tag_id,
+            &defaults,
+            &pending.session_name,
+        )
+    })
 }
 
 /// How long between reminders that this session has no IPC server. Long
@@ -3272,23 +3283,6 @@ mod tests {
         let report = panic_report("wm/src/main.rs:42:9", "Seat not found");
         assert!(report.contains("wm/src/main.rs:42:9"), "{report}");
         assert!(report.contains("Seat not found"), "{report}");
-    }
-
-    /// `panic!("literal")` and `panic!("{x}")` produce payloads of two
-    /// different types, and a report that can only read one of them is
-    /// blank for half of the panics this codebase can actually raise.
-    #[test]
-    fn a_panic_message_is_read_from_either_payload_type() {
-        assert_eq!(panic_message(&"a string literal"), "a string literal");
-        assert_eq!(
-            panic_message(&String::from("a formatted panic")),
-            "a formatted panic"
-        );
-    }
-
-    #[test]
-    fn an_unreadable_panic_payload_still_produces_a_message() {
-        assert!(!panic_message(&7u32).is_empty());
     }
 
     #[test]

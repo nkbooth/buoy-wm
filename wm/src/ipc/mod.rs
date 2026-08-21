@@ -28,6 +28,34 @@ pub mod dispatch;
 pub mod protocol;
 pub mod server;
 
+/// The human-readable half of a caught panic's payload.
+///
+/// `panic!("literal")` yields a `&'static str` and `panic!("{x}")` yields a
+/// `String`, so a reporter that reads only one of them is blank for half
+/// the panics this codebase can raise; `Debug for dyn Any` renders the
+/// literal `Any { .. }`, so printing the payload directly is worse still
+/// (audit finding G-05).
+///
+/// One copy, used by both of this binary's panic barriers: the
+/// process-wide hook that reports before the session dies, and
+/// [`server`]'s per-connection `catch_unwind`. They were deliberately two
+/// copies while `ipc::server` still reached up into the crate root for its
+/// process spawn — merging them then would have added a fourth reach-up
+/// instead of removing three (audit finding J-02). It lives here, beside
+/// [`lock_recovering`], because this module is already where the helpers
+/// that keep one thread's failure from ending the session live, and
+/// because nothing here depends on the crate root — which is what lets
+/// `ipc` move to a library crate later (audit finding T-04).
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(literal) = payload.downcast_ref::<&'static str>() {
+        literal
+    } else if let Some(owned) = payload.downcast_ref::<String>() {
+        owned
+    } else {
+        "a non-string panic payload"
+    }
+}
+
 /// Locks `mutex`, recovering the last-known-good inner value instead of
 /// panicking if the mutex is poisoned. A panic inside one client
 /// connection's request handling (however unlikely, given `wm-core`'s own
@@ -69,7 +97,7 @@ fn should_report_poisoning(reported: &AtomicBool) -> bool {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{lock_recovering, should_report_poisoning};
+    use super::{lock_recovering, panic_message, should_report_poisoning};
 
     /// The recovery is right, but silently proceeding on possibly
     /// inconsistent shared state forever is not — and one line per lock
@@ -83,6 +111,35 @@ mod tests {
         assert!(should_report_poisoning(&reported));
         assert!(!should_report_poisoning(&reported));
         assert!(!should_report_poisoning(&reported));
+    }
+
+    /// `panic!("literal")` and `panic!("{x}")` produce payloads of two
+    /// different types, and a reporter that can only read one of them is
+    /// blank for half the panics this codebase can actually raise.
+    #[test]
+    fn a_panic_message_is_read_from_either_payload_type() {
+        assert_eq!(panic_message(&"a string literal"), "a string literal");
+        assert_eq!(
+            panic_message(&String::from("a formatted panic")),
+            "a formatted panic"
+        );
+    }
+
+    /// A payload that is neither still has to produce something a journal
+    /// reader can act on, because this is the one place the code
+    /// deliberately reaches for crash telemetry.
+    #[test]
+    fn an_unreadable_panic_payload_still_produces_a_message() {
+        assert_eq!(panic_message(&7u32), "a non-string panic payload");
+    }
+
+    /// The shape `catch_unwind` hands back, rather than a bare payload
+    /// reference: the per-connection barrier gets a `Box<dyn Any + Send>`,
+    /// and it has to decode through it.
+    #[test]
+    fn a_boxed_payload_from_catch_unwind_decodes_the_same_way() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(format!("boom {}", 7));
+        assert_eq!(panic_message(&*payload), "boom 7");
     }
 
     #[test]

@@ -30,15 +30,30 @@ use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
 use buoy_common::peer::{PeerIdentity, authenticate_peer};
 use buoy_common::{log_err, log_info};
 
-use crate::config::Defaults;
-use crate::ipc::dispatch::handle_request;
-use crate::ipc::lock_recovering;
+use crate::ipc::dispatch::{PendingPinnedSpawn, handle_request};
 use crate::ipc::protocol::{ParseError, Request, Response, parse_request, serialize_response};
+use crate::ipc::{lock_recovering, panic_message};
 use crate::wm_core::state::WmCore;
 
 /// The longest peer-supplied detail this module will put in one log line.
 /// Bounds the journal cost of a malformed request to a constant.
 const MAX_LOGGED_DETAIL_BYTES: usize = 512;
+
+/// Performs the pinned-terminal spawn a dispatched `switch-tag` claimed.
+///
+/// An injected effect rather than a call up into the crate root, which was
+/// the workspace's one bidirectional module dependency: a leaf transport
+/// module reaching into the composition root to launch a process (audit
+/// finding J-02). Three things follow. The dependency is now visible in
+/// [`spawn`]'s signature instead of hiding inside a function body; this
+/// module no longer needs `crate::config` or anything from the Wayland
+/// root, so it can move to a library crate; and the tests can assert that
+/// a spawn was *requested* without a process ever being created.
+///
+/// `Arc` because one accept loop hands the same effect to every connection
+/// thread, and it outlives all of them. Called with the shared `wm-core`
+/// mutex released — see the call site.
+pub type SpawnPinnedTerminal = Arc<dyn Fn(&PendingPinnedSpawn) + Send + Sync>;
 
 /// Consecutive accept failures between log lines. The first failure of a
 /// run is always logged; after that, `EMFILE` is a condition, not an
@@ -222,9 +237,9 @@ fn clear_socket_path(socket_path: &Path) -> std::io::Result<()> {
 /// module does not distinguish a stale file from a second, still-running
 /// WM instance).
 ///
-/// `defaults` carries the pinned terminal's program and argv — the config
-/// values, passed in rather than read here so this module keeps its only
-/// dependency on the WM being the shared `wm_core` handle.
+/// `spawn_pinned_terminal` is the one effect this module has that is not
+/// reading or writing the socket; see [`SpawnPinnedTerminal`] for why it
+/// arrives as a parameter.
 ///
 /// The accept loop is resource-bounded: at most [`Limits::max_connections`]
 /// connections are served at once, excess connections are dropped, a
@@ -236,9 +251,14 @@ fn clear_socket_path(socket_path: &Path) -> std::io::Result<()> {
 pub fn spawn(
     wm_core: Arc<Mutex<WmCore>>,
     socket_path: &Path,
-    defaults: Defaults,
+    spawn_pinned_terminal: SpawnPinnedTerminal,
 ) -> std::io::Result<JoinHandle<()>> {
-    spawn_with_limits(wm_core, socket_path, defaults, Limits::PRODUCTION)
+    spawn_with_limits(
+        wm_core,
+        socket_path,
+        spawn_pinned_terminal,
+        Limits::PRODUCTION,
+    )
 }
 
 /// [`spawn`] with the resource limits supplied explicitly, so the tests can
@@ -247,7 +267,7 @@ pub fn spawn(
 fn spawn_with_limits(
     wm_core: Arc<Mutex<WmCore>>,
     socket_path: &Path,
-    defaults: Defaults,
+    spawn_pinned_terminal: SpawnPinnedTerminal,
     limits: Limits,
 ) -> std::io::Result<JoinHandle<()>> {
     clear_socket_path(socket_path)?;
@@ -270,7 +290,7 @@ fn spawn_with_limits(
     // the middle of WM startup.
     std::thread::Builder::new()
         .name("buoy-ipc-accept".to_string())
-        .spawn(move || accept_loop(listener, wm_core, defaults, limits))
+        .spawn(move || accept_loop(listener, wm_core, spawn_pinned_terminal, limits))
 }
 
 /// Accepts connections forever, handing each to its own thread while the
@@ -279,7 +299,7 @@ fn spawn_with_limits(
 fn accept_loop(
     listener: UnixListener,
     wm_core: Arc<Mutex<WmCore>>,
-    defaults: Defaults,
+    spawn_pinned_terminal: SpawnPinnedTerminal,
     limits: Limits,
 ) {
     let connections = Arc::new(ConnectionCount::new());
@@ -290,7 +310,9 @@ fn accept_loop(
             Ok(stream) => {
                 consecutive_errors = 0;
                 match connections.try_acquire(limits.max_connections) {
-                    Some(slot) => launch_connection(stream, slot, &wm_core, &defaults, limits),
+                    Some(slot) => {
+                        launch_connection(stream, slot, &wm_core, &spawn_pinned_terminal, limits)
+                    }
                     // Dropping `stream` closes it, which both real clients
                     // handle: the status bar retries next poll, the picker
                     // reports and exits.
@@ -325,11 +347,11 @@ fn launch_connection(
     stream: UnixStream,
     slot: ConnectionSlot,
     wm_core: &Arc<Mutex<WmCore>>,
-    defaults: &Defaults,
+    spawn_pinned_terminal: &SpawnPinnedTerminal,
     limits: Limits,
 ) {
     let wm_core = Arc::clone(wm_core);
-    let defaults = defaults.clone();
+    let spawn_pinned_terminal = Arc::clone(spawn_pinned_terminal);
     let spawned = std::thread::Builder::new()
         .name("buoy-ipc-conn".to_string())
         .stack_size(limits.connection_stack_size)
@@ -337,7 +359,7 @@ fn launch_connection(
             // `slot` lives in the thread body so its release survives
             // `handle_connection`'s `catch_unwind`.
             let _slot = slot;
-            handle_connection(stream, wm_core, &defaults, limits);
+            handle_connection(stream, wm_core, &spawn_pinned_terminal, limits);
         });
     if let Err(e) = spawned {
         log_err!("cannot spawn connection thread, dropping connection: {e}");
@@ -354,49 +376,31 @@ fn launch_connection(
 /// default `panic = "unwind"` already confine an unhandled panic to its
 /// own thread, and [`lock_recovering`] is
 /// what actually keeps a poisoned mutex from crashing the *next* locker.
+///
+/// The `Err` arm below is deliberately uncovered, and this note is the
+/// record of that decision rather than an oversight (audit finding T-05).
+/// Reaching it needs a panic inside `handle_connection_inner`, and the only
+/// ways to arrange one are a `#[cfg(test)]` [`Request`] variant that panics
+/// — a test-only branch in a cross-process protocol, which this codebase
+/// does not do anywhere — or a fault injection point in the read path that
+/// would itself be the untested code. The payload decode is covered on its
+/// own ([`panic_message`]), so what is untested here is `catch_unwind`
+/// returning `Err`, which is `std`'s contract rather than this module's.
 fn handle_connection(
     stream: UnixStream,
     wm_core: Arc<Mutex<WmCore>>,
-    defaults: &Defaults,
+    spawn_pinned_terminal: &SpawnPinnedTerminal,
     limits: Limits,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        handle_connection_inner(stream, &wm_core, defaults, limits);
+        handle_connection_inner(stream, &wm_core, spawn_pinned_terminal, limits);
     }));
     if let Err(payload) = result {
         log_err!(
             "connection handler panicked (contained): {}",
-            describe_panic(&payload)
+            panic_message(&*payload)
         );
     }
-}
-
-/// Recovers the message from a caught panic's payload.
-///
-/// `Debug for dyn Any` renders the literal `Any { .. }`, so logging the
-/// payload directly produced a contentless line at the one point in this
-/// code that deliberately reaches for crash telemetry (audit finding
-/// G-05); the real message and its `file:line` arrived separately from the
-/// panic hook, unlinked and interleavable across concurrent connection
-/// threads.
-///
-/// `panic!` payloads are `&'static str` when the message has no arguments
-/// and `String` when it does, which is why both are checked.
-///
-/// Deliberately a second copy of `crate::panic_message`, which the
-/// process-wide panic hook uses. Collapsing them would mean a fourth
-/// `crate::` reach-up from this module into the composition root, and
-/// audit finding J-02 is about removing the three that are already here so
-/// this module can move to a library crate. Two occurrences is inside this
-/// project's own three-strike DRY threshold; a third is where they merge.
-fn describe_panic(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        return (*message).to_string();
-    }
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-    "a non-string panic payload".to_string()
 }
 
 /// Writes `response` as one JSON line followed by `\n`, flushing
@@ -522,7 +526,7 @@ fn log_dispatch_outcome(peer: PeerIdentity, kind: &'static str, response: &Respo
 fn handle_connection_inner(
     stream: UnixStream,
     wm_core: &Arc<Mutex<WmCore>>,
-    defaults: &Defaults,
+    spawn_pinned_terminal: &SpawnPinnedTerminal,
     limits: Limits,
 ) {
     // Before anything is read, let alone dispatched: the socket's mode was
@@ -638,25 +642,15 @@ fn handle_connection_inner(
                 if !write_response(&mut writer, &response) {
                     return; // peer gone; nothing more to do
                 }
-                // Code-review follow-up (Story 2.4): the real
-                // `crate::spawn_pinned_terminal` process spawn happens
-                // here — after the response is already on the wire and the
-                // `wm-core` mutex released — rather than inside
-                // `handle_request` itself, so a slow or failing spawn can
-                // never block the client waiting on its response, and so
-                // `dispatch::handle_request`'s own unit tests stay free of
-                // real process spawns. `crate::spawn_pinned_terminal` is a
-                // private fn at the binary crate's root module; this module
-                // (a descendant of the crate root) may call it directly
-                // with no visibility changes, same as `dispatch.rs`
-                // previously did.
+                // The spawn happens here — after the response is already
+                // on the wire and after the `wm-core` mutex was released —
+                // rather than inside `handle_request`, so a slow or failing
+                // spawn can never block the client waiting on its response.
+                // The released mutex is load-bearing twice over: the effect
+                // re-locks it to roll back a claim whose spawn failed, and
+                // `lock_recovering` is not reentrant.
                 if let Some(pending) = pending_spawn {
-                    crate::spawn_pinned_terminal_or_release_claim(
-                        wm_core,
-                        pending.tag_id,
-                        defaults,
-                        &pending.session_name,
-                    );
+                    spawn_pinned_terminal(&pending);
                 }
                 // well-formed request, wm-core-level Ok/Error: connection
                 // stays open for further requests.
@@ -720,6 +714,15 @@ mod tests {
             self.write.write_all(bytes).unwrap();
         }
 
+        /// [`TestClient::read_line`] parsed as JSON, for the assertions
+        /// that are about a response's *fields* rather than its type
+        /// discriminant — a substring match on serialized output pins the
+        /// field order too (audit finding T-05).
+        fn read_json(&mut self) -> serde_json::Value {
+            let line = self.read_line().expect("expected a response line");
+            serde_json::from_str(&line).expect("every response is one JSON object")
+        }
+
         /// Reads one newline-delimited line. `None` means EOF (the
         /// connection was closed by the server).
         fn read_line(&mut self) -> Option<String> {
@@ -745,39 +748,83 @@ mod tests {
         std::env::temp_dir().join(format!("buoy-wm-test-{}-{}.sock", std::process::id(), n))
     }
 
-    fn spawn_test_server_with_core(core: WmCore) -> (std::path::PathBuf, Arc<Mutex<WmCore>>) {
-        let socket_path = unique_socket_path();
-        let wm_core = Arc::new(Mutex::new(core));
-        // `/bin/true` rather than a real terminal: a request that claims a
-        // pinned-terminal spawn reaches a real `Command::spawn` from these
-        // tests, and an inert no-op keeps that from opening windows on the
-        // machine running the suite.
-        spawn(
-            Arc::clone(&wm_core),
-            &socket_path,
-            Defaults {
-                terminal: "/bin/true".to_string(),
-                ..Defaults::default()
-            },
-        )
-        .expect("server must spawn successfully");
-        (socket_path, wm_core)
+    /// A pinned-terminal spawn effect that records what it was asked for
+    /// instead of doing it.
+    ///
+    /// The previous fixture passed `terminal = "/bin/true"` so that the
+    /// real `Command::spawn` these tests reach would at least not open a
+    /// window on the machine running the suite — which meant the spawn path
+    /// was exercised but nothing could be asserted about it, and the whole
+    /// `switch-tag` follow-up sat uncovered (audit findings T-05 and J-02).
+    #[derive(Clone, Default)]
+    struct SpawnRecorder(Arc<Mutex<Vec<PendingPinnedSpawn>>>);
+
+    impl SpawnRecorder {
+        fn effect(&self) -> SpawnPinnedTerminal {
+            let recorded = Arc::clone(&self.0);
+            Arc::new(move |pending: &PendingPinnedSpawn| {
+                recorded
+                    .lock()
+                    .expect("the recorder mutex is only ever held to push one value")
+                    .push(pending.clone())
+            })
+        }
+
+        fn requested(&self) -> Vec<PendingPinnedSpawn> {
+            self.0
+                .lock()
+                .expect("the recorder mutex is only ever held to push one value")
+                .clone()
+        }
     }
 
-    fn spawn_test_server() -> (std::path::PathBuf, Arc<Mutex<WmCore>>) {
-        spawn_test_server_with_core(WmCore::new())
+    /// A running test server: the socket it listens on, the core it
+    /// mutates, and every spawn it asked for.
+    ///
+    /// One value rather than a tuple, so the socket inode's removal is tied
+    /// to the test's scope — eight sockets used to survive every suite run
+    /// (audit finding T-03) — and so reaching the spawn record does not
+    /// need a third tuple element at every call site.
+    struct TestServer {
+        socket: SocketGuard,
+        wm_core: Arc<Mutex<WmCore>>,
+        spawns: SpawnRecorder,
     }
 
-    /// [`spawn_test_server`] with the socket inode cleaned up when the test
-    /// ends — for tests that do not otherwise need the path itself.
-    fn spawn_test_server_guarded() -> (SocketGuard, Arc<Mutex<WmCore>>) {
-        let (socket_path, wm_core) = spawn_test_server();
-        (SocketGuard(socket_path), wm_core)
+    impl TestServer {
+        fn start() -> Self {
+            Self::with_core(WmCore::new())
+        }
+
+        fn with_core(core: WmCore) -> Self {
+            Self::with_limits(core, Limits::PRODUCTION)
+        }
+
+        /// [`TestServer::start`] with the resource limits supplied
+        /// explicitly, so the connection cap, the write timeout, the idle
+        /// read deadline and the thread-spawn failure path can be exercised
+        /// with values that fit inside a test run.
+        fn with_limits(core: WmCore, limits: Limits) -> Self {
+            let socket = SocketGuard(unique_socket_path());
+            let wm_core = Arc::new(Mutex::new(core));
+            let spawns = SpawnRecorder::default();
+            spawn_with_limits(Arc::clone(&wm_core), socket.path(), spawns.effect(), limits)
+                .expect("server must spawn successfully");
+            Self {
+                socket,
+                wm_core,
+                spawns,
+            }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            self.socket.path()
+        }
     }
 
     /// Removes a test server's socket inode when the test ends, including
-    /// on a panicking assertion, so a resource-limit test run does not
-    /// litter the temp directory with one socket per case.
+    /// on a panicking assertion, so a suite run does not litter the temp
+    /// directory with one socket per case.
     struct SocketGuard(std::path::PathBuf);
 
     impl SocketGuard {
@@ -790,25 +837,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
-    }
-
-    fn spawn_test_server_with_limits(
-        core: WmCore,
-        limits: Limits,
-    ) -> (SocketGuard, Arc<Mutex<WmCore>>) {
-        let socket_path = unique_socket_path();
-        let wm_core = Arc::new(Mutex::new(core));
-        spawn_with_limits(
-            Arc::clone(&wm_core),
-            &socket_path,
-            Defaults {
-                terminal: "/bin/true".to_string(),
-                ..Defaults::default()
-            },
-            limits,
-        )
-        .expect("server must spawn successfully");
-        (SocketGuard(socket_path), wm_core)
     }
 
     /// What a one-shot `get-state` probe on a fresh connection observed.
@@ -905,11 +933,11 @@ mod tests {
             max_connections: 2,
             ..Limits::PRODUCTION
         };
-        let (socket, _wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+        let server = TestServer::with_limits(WmCore::new(), limits);
 
         // Both slots are held by connections whose handler thread is
         // parked in `read_until` waiting for a second request.
-        let mut first = TestClient::connect(socket.path());
+        let mut first = TestClient::connect(server.path());
         first.send_line(r#"{"type":"get-state"}"#);
         assert!(
             first
@@ -917,7 +945,7 @@ mod tests {
                 .expect("first slot served")
                 .contains(r#""type":"state""#)
         );
-        let mut second = TestClient::connect(socket.path());
+        let mut second = TestClient::connect(server.path());
         second.send_line(r#"{"type":"get-state"}"#);
         assert!(
             second
@@ -927,12 +955,12 @@ mod tests {
         );
 
         assert!(
-            matches!(probe_get_state(socket.path()), ProbeResult::Refused),
+            matches!(probe_get_state(server.path()), ProbeResult::Refused),
             "a connection beyond the cap must be dropped, not queued or served"
         );
 
         drop(first);
-        assert!(wait_for_served_get_state(socket.path()).contains(r#""type":"state""#));
+        assert!(wait_for_served_get_state(server.path()).contains(r#""type":"state""#));
         drop(second);
     }
 
@@ -957,9 +985,9 @@ mod tests {
         for i in 0..64 {
             core.register_view(&format!("{}{i}", "a".repeat(200)));
         }
-        let (socket, _wm_core) = spawn_test_server_with_limits(core, limits);
+        let server = TestServer::with_limits(core, limits);
 
-        let mut greedy = TestClient::connect(socket.path());
+        let mut greedy = TestClient::connect(server.path());
         // The server closing on us part-way through the burst *is* the
         // write timeout working, so a failed write here is a pass.
         for _ in 0..500 {
@@ -971,7 +999,7 @@ mod tests {
         // Without a write timeout the handler blocks in `write_all`
         // forever and never releases the only slot, so this call would
         // exhaust its deadline instead of returning.
-        assert!(wait_for_served_get_state(socket.path()).contains(r#""type":"state""#));
+        assert!(wait_for_served_get_state(server.path()).contains(r#""type":"state""#));
         drop(greedy);
     }
 
@@ -985,9 +1013,9 @@ mod tests {
             max_tag_creations_per_connection: 2,
             ..Limits::PRODUCTION
         };
-        let (socket, wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+        let server = TestServer::with_limits(WmCore::new(), limits);
 
-        let mut client = TestClient::connect(socket.path());
+        let mut client = TestClient::connect(server.path());
         for i in 0..2 {
             client.send_line(&format!(r#"{{"type":"create-tag","name":"tag{i}"}}"#));
             assert!(
@@ -1010,7 +1038,7 @@ mod tests {
             "the connection must be closed once its quota is spent"
         );
 
-        let core = lock_recovering(&wm_core);
+        let core = lock_recovering(&server.wm_core);
         assert_eq!(
             core.tag_count(),
             2,
@@ -1027,10 +1055,10 @@ mod tests {
             max_tag_creations_per_connection: 1,
             ..Limits::PRODUCTION
         };
-        let (socket, wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+        let server = TestServer::with_limits(WmCore::new(), limits);
 
         for i in 0..3 {
-            let mut client = TestClient::connect(socket.path());
+            let mut client = TestClient::connect(server.path());
             client.send_line(&format!(r#"{{"type":"create-tag","name":"tag{i}"}}"#));
             assert!(
                 client
@@ -1040,7 +1068,7 @@ mod tests {
             );
         }
 
-        assert_eq!(lock_recovering(&wm_core).tag_count(), 3);
+        assert_eq!(lock_recovering(&server.wm_core).tag_count(), 3);
     }
 
     #[test]
@@ -1049,9 +1077,9 @@ mod tests {
             idle_read_timeout: Duration::from_millis(150),
             ..Limits::PRODUCTION
         };
-        let (socket, _wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+        let server = TestServer::with_limits(WmCore::new(), limits);
 
-        let mut client = TestClient::connect(socket.path());
+        let mut client = TestClient::connect(server.path());
         client.send_line(r#"{"type":"get-state"}"#);
         assert!(
             client
@@ -1076,9 +1104,9 @@ mod tests {
             write_timeout: Duration::from_millis(50),
             ..Limits::PRODUCTION
         };
-        let (socket, _wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+        let server = TestServer::with_limits(WmCore::new(), limits);
 
-        let mut client = TestClient::connect(socket.path());
+        let mut client = TestClient::connect(server.path());
         client.send_line(r#"{"type":"get-state"}"#);
         assert!(
             client
@@ -1106,14 +1134,14 @@ mod tests {
             connection_stack_size: 1 << 40,
             ..Limits::PRODUCTION
         };
-        let (socket, _wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+        let server = TestServer::with_limits(WmCore::new(), limits);
 
         assert!(
-            matches!(probe_get_state(socket.path()), ProbeResult::Refused),
+            matches!(probe_get_state(server.path()), ProbeResult::Refused),
             "an unspawnable connection must be dropped, not panic the accept loop"
         );
         assert!(
-            matches!(probe_get_state(socket.path()), ProbeResult::Refused),
+            matches!(probe_get_state(server.path()), ProbeResult::Refused),
             "the accept loop must still be accepting after a spawn failure"
         );
     }
@@ -1179,55 +1207,126 @@ mod tests {
 
     #[test]
     fn get_state_round_trip_returns_state_response() {
-        let (socket_path, _wm_core) = spawn_test_server();
-        let mut client = TestClient::connect(&socket_path);
+        let server = TestServer::start();
+        let mut client = TestClient::connect(server.path());
         client.send_line(r#"{"type":"get-state"}"#);
         let response = client.read_line().expect("expected a response line");
         assert!(response.contains(r#""type":"state""#));
     }
 
+    /// Audit finding T-05: this test used to assert on a substring of the
+    /// serialized line (`"id":3,"app_id":"foot","tags":[0]`) and to scrape
+    /// the created tag id out with `find("\"tag_id\":")` — both of which
+    /// break on a field reorder that changes no behaviour, and the scraper
+    /// panicked unhelpfully when it did. Parsed as JSON instead, which is
+    /// the shape the protocol actually promises.
     #[test]
     fn toggle_tag_round_trip_mutates_shared_wm_core() {
         let mut core = WmCore::new();
         let view_id = core.register_view("foot");
-        let (socket_path, _wm_core) = spawn_test_server_with_core(core);
+        let server = TestServer::with_core(core);
 
-        let mut client = TestClient::connect(&socket_path);
+        let mut client = TestClient::connect(server.path());
         client.send_line(r#"{"type":"create-tag","name":"web"}"#);
-        let create_response = client.read_line().expect("expected tag-created response");
-        assert!(create_response.contains(r#""type":"tag-created""#));
-        let tag_id: u8 = {
-            let marker = "\"tag_id\":";
-            let start = create_response.find(marker).unwrap() + marker.len();
-            let rest = &create_response[start..];
-            let end = rest
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len());
-            rest[..end].parse().unwrap()
-        };
+        let created = client.read_json();
+        assert_eq!(created["type"], "tag-created");
+        let tag_id = created["tag_id"]
+            .as_u64()
+            .expect("tag-created carries the new tag's id");
 
         client.send_line(&format!(
-            r#"{{"type":"toggle-tag","view_id":{},"tag_id":{}}}"#,
-            view_id.0, tag_id
+            r#"{{"type":"toggle-tag","view_id":{},"tag_id":{tag_id}}}"#,
+            view_id.0
         ));
-        let toggle_response = client.read_line().expect("expected ok response");
-        assert!(toggle_response.contains(r#""type":"ok""#));
+        assert_eq!(client.read_json()["type"], "ok");
 
         client.send_line(r#"{"type":"get-state"}"#);
-        let state_response = client.read_line().expect("expected state response");
-        assert!(
-            state_response.contains(&format!(
-                r#""id":{},"app_id":"foot","tags":[{}]"#,
-                view_id.0, tag_id
-            )),
-            "state response must reflect the mutation applied via a separate request: {state_response}"
+        let state = client.read_json();
+        assert_eq!(state["type"], "state");
+        assert_eq!(
+            state["views"],
+            serde_json::json!([{ "id": view_id.0, "app_id": "foot", "tags": [tag_id] }]),
+            "the state must reflect a mutation applied through a separate request"
         );
+    }
+
+    /// Audit findings T-05 and J-02: `switch-tag`'s pinned-terminal
+    /// follow-up is the only effect a socket peer can cause outside
+    /// `wm-core`, and it had no coverage at all — the fixture substituted
+    /// `/bin/true` for the real terminal precisely so that nothing could be
+    /// observed about it.
+    ///
+    /// The second `get-state` is what makes this deterministic rather than
+    /// a poll: one connection is served by one thread, so the spawn — which
+    /// happens after the first response is written — has certainly run by
+    /// the time the second response comes back.
+    #[test]
+    fn a_switch_tag_asks_for_the_tags_pinned_terminal_exactly_once() {
+        let mut core = WmCore::new();
+        let output_id = core.register_output();
+        let tag_id = core.create_tag("web").expect("create the tag to switch to");
+        let server = TestServer::with_core(core);
+        let mut client = TestClient::connect(server.path());
+        let switch = format!(
+            r#"{{"type":"switch-tag","output_id":{},"tag_id":{}}}"#,
+            output_id.0, tag_id.0
+        );
+
+        client.send_line(&switch);
+        assert!(
+            client
+                .read_line()
+                .expect("expected an ok response")
+                .contains(r#""type":"ok""#)
+        );
+        client.send_line(r#"{"type":"get-state"}"#);
+        client.read_line().expect("expected a state response");
+
+        assert_eq!(
+            server.spawns.requested(),
+            vec![PendingPinnedSpawn {
+                tag_id,
+                session_name: "tag-web".to_string(),
+            }],
+            "the claimed spawn must be requested, with the tag that claimed it"
+        );
+
+        // The claim is idempotent by design, so a second switch to the same
+        // tag must not spawn a second terminal into the same zellij session.
+        client.send_line(&switch);
+        client.read_line().expect("expected a second ok response");
+        client.send_line(r#"{"type":"get-state"}"#);
+        client.read_line().expect("expected a state response");
+        assert_eq!(
+            server.spawns.requested().len(),
+            1,
+            "a tag's pinned terminal is spawned at most once per session"
+        );
+    }
+
+    /// A request that changes nothing must not ask for a process either:
+    /// this is the arm that would spawn a terminal for a tag the switch
+    /// itself rejected.
+    #[test]
+    fn a_switch_tag_that_fails_asks_for_no_spawn() {
+        let server = TestServer::start();
+        let mut client = TestClient::connect(server.path());
+        client.send_line(r#"{"type":"switch-tag","output_id":9999,"tag_id":63}"#);
+        assert!(
+            client
+                .read_line()
+                .expect("expected an error response")
+                .contains(r#""type":"error""#)
+        );
+        client.send_line(r#"{"type":"get-state"}"#);
+        client.read_line().expect("expected a state response");
+        assert!(server.spawns.requested().is_empty());
     }
 
     #[test]
     fn malformed_json_gets_error_response_then_connection_closes() {
-        let (socket_path, _wm_core) = spawn_test_server();
-        let mut client = TestClient::connect(&socket_path);
+        let server = TestServer::start();
+        let mut client = TestClient::connect(server.path());
         client.send_line("not json");
         let response = client.read_line().expect("expected an error response");
         assert!(response.contains(r#""type":"error""#));
@@ -1238,17 +1337,28 @@ mod tests {
         );
     }
 
+    /// Audit finding T-02: this assertion used to sit inside an
+    /// `if let Some(line) = &first`, and coverage proved the branch never
+    /// ran — so the regression test for the codebase's oversized-line
+    /// defence asserted nothing about the server's answer, and a
+    /// `panic`-and-drop would have satisfied it equally.
+    ///
+    /// The contract, committed to unconditionally: the peer is told its
+    /// request was refused, and then the connection closes.
     #[test]
     fn oversized_line_without_newline_is_rejected_not_grown_forever() {
-        let (socket_path, _wm_core) = spawn_test_server();
-        let mut client = TestClient::connect(&socket_path);
+        let server = TestServer::start();
+        let mut client = TestClient::connect(server.path());
         let oversized = vec![b'a'; 70 * 1024];
         client.send_raw(&oversized);
 
-        let first = client.read_line();
-        if let Some(line) = &first {
-            assert!(line.contains(r#""type":"error""#));
-        }
+        assert!(
+            client
+                .read_line()
+                .expect("the server must answer before it closes")
+                .contains(r#""type":"error""#),
+            "an oversized line must be refused in words, not by silence"
+        );
         assert_eq!(
             client.read_line(),
             None,
@@ -1256,10 +1366,33 @@ mod tests {
         );
     }
 
+    /// The other half of the same contract, and the reason the test above
+    /// can be unconditional: [`MAX_LINE_BYTES`] is a size cap, not a
+    /// timeout, so a request that fits — right up to the last byte before
+    /// the cap — is still answered normally.
+    #[test]
+    fn a_request_line_just_under_the_cap_is_still_answered() {
+        let server = TestServer::start();
+        let mut client = TestClient::connect(server.path());
+        // Padding inside an unknown JSON field: parseable, ignored by
+        // `parse_request`'s `deny_unknown_fields`-free shape, and sized so
+        // the line plus its newline is exactly at the cap.
+        let request = r#"{"type":"get-state"}"#;
+        let padding = " ".repeat(MAX_LINE_BYTES - request.len() - 1);
+        client.send_line(&format!("{request}{padding}"));
+
+        assert!(
+            client
+                .read_line()
+                .expect("a line under the cap must be answered")
+                .contains(r#""type":"state""#)
+        );
+    }
+
     #[test]
     fn invalid_utf8_bytes_get_error_response_not_a_panic() {
-        let (socket_path, _wm_core) = spawn_test_server();
-        let mut client = TestClient::connect(&socket_path);
+        let server = TestServer::start();
+        let mut client = TestClient::connect(server.path());
         client.send_raw(&[0xFF, 0xFE]);
         client.send_raw(b"\n");
         let response = client.read_line().expect("expected an error response");
@@ -1268,9 +1401,9 @@ mod tests {
 
     #[test]
     fn one_malformed_connection_does_not_affect_a_second_concurrent_good_connection() {
-        let (socket_path, _wm_core) = spawn_test_server();
-        let mut bad_client = TestClient::connect(&socket_path);
-        let mut good_client = TestClient::connect(&socket_path);
+        let server = TestServer::start();
+        let mut bad_client = TestClient::connect(server.path());
+        let mut good_client = TestClient::connect(server.path());
 
         bad_client.send_line("not json");
         good_client.send_line(r#"{"type":"get-state"}"#);
@@ -1284,7 +1417,7 @@ mod tests {
 
         // The server itself (and a subsequent third connection) must still
         // be alive after the malformed connection was closed.
-        let mut third_client = TestClient::connect(&socket_path);
+        let mut third_client = TestClient::connect(server.path());
         third_client.send_line(r#"{"type":"get-state"}"#);
         let third_response = third_client
             .read_line()
@@ -1298,32 +1431,8 @@ mod tests {
         spawn(
             Arc::new(Mutex::new(WmCore::new())),
             socket_path,
-            Defaults {
-                terminal: "/bin/true".to_string(),
-                ..Defaults::default()
-            },
+            SpawnRecorder::default().effect(),
         )
-    }
-
-    /// `Debug for dyn Any` renders the literal `Any { .. }`, so the one
-    /// place this code deliberately reaches for crash telemetry used to
-    /// produce none.
-    #[test]
-    fn describe_panic_recovers_a_str_payload() {
-        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
-        assert_eq!(describe_panic(&payload), "boom");
-    }
-
-    #[test]
-    fn describe_panic_recovers_a_formatted_string_payload() {
-        let payload: Box<dyn std::any::Any + Send> = Box::new("boom 7".to_string());
-        assert_eq!(describe_panic(&payload), "boom 7");
-    }
-
-    #[test]
-    fn describe_panic_says_so_when_the_payload_is_neither() {
-        let payload: Box<dyn std::any::Any + Send> = Box::new(7u32);
-        assert_eq!(describe_panic(&payload), "a non-string panic payload");
     }
 
     #[test]
@@ -1346,13 +1455,13 @@ mod tests {
     /// attached to the second.
     #[test]
     fn a_second_instance_refuses_to_start_and_leaves_the_first_ones_socket_alone() {
-        let (guard, _wm_core) = spawn_test_server_guarded();
+        let server = TestServer::start();
 
-        let error = try_spawn_at(guard.path())
+        let error = try_spawn_at(server.path())
             .expect_err("a live instance's socket must not be taken over");
         assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
 
-        let mut client = TestClient::connect(guard.path());
+        let mut client = TestClient::connect(server.path());
         client.send_line(r#"{"type":"get-state"}"#);
         assert!(
             client
@@ -1394,8 +1503,8 @@ mod tests {
 
     #[test]
     fn socket_file_has_owner_only_permissions_after_spawn() {
-        let (socket_path, _wm_core) = spawn_test_server();
-        let mode = std::fs::metadata(&socket_path)
+        let server = TestServer::start();
+        let mode = std::fs::metadata(server.path())
             .unwrap()
             .permissions()
             .mode();
@@ -1404,8 +1513,8 @@ mod tests {
 
     #[test]
     fn well_formed_request_referencing_unknown_ids_keeps_connection_open() {
-        let (socket_path, _wm_core) = spawn_test_server();
-        let mut client = TestClient::connect(&socket_path);
+        let server = TestServer::start();
+        let mut client = TestClient::connect(server.path());
         client.send_line(r#"{"type":"toggle-tag","view_id":9999,"tag_id":63}"#);
         let error_response = client.read_line().expect("expected an error response");
         assert!(error_response.contains(r#""type":"error""#));
