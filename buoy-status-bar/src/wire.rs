@@ -19,19 +19,11 @@
 //! `wm/src/ipc/protocol.rs` (ADR-007), following `buoy-tag-picker/src/wire.rs`'s
 //! exact existing shape and doc-comment convention (Story 2.5 Task 1.3).
 //!
-//! **Why this is a third copy while the socket path is not (audit finding
-//! J-01, recorded here in full so a future reader hits the reasoning at
-//! the same place as the code).** The line is behavioural versus
-//! structural. Where the socket lives is behavioural: if the three
-//! binaries disagree, they cannot find each other, so that rule now lives
-//! once in `buoy-common`. The wire *shapes* are structural, and the
-//! satellites' narrower ones are a property worth keeping rather than
-//! debt: this client's `Request` has exactly one variant, so it
-//! structurally cannot send a mutation. Merging to `wm`'s superset would
-//! trade that away for consistency. The triggers for revisiting are a
-//! fourth consumer or the first rename of a `Response` field — and the
-//! cheap insurance until then is a byte-compatibility test per message
-//! shape, not an extraction.
+//! Why this is a third copy while the socket path is not: ADR-009 in
+//! `docs/adrs.md` (audit finding J-01). In short — shared *behaviour* is
+//! extracted because disagreement is silent, shared *shapes* are not
+//! because disagreement is loud, and this client's one-variant `Request`
+//! is a property worth keeping rather than debt to consolidate.
 //!
 //! This client only ever sends `get-state` — it never mutates, so
 //! `Request` has exactly one variant (no `ToggleTag`/`CreateTag`/

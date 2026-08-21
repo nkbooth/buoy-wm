@@ -30,10 +30,10 @@ use super::view::{Geometry, View};
 /// The `app_id` prefix reserved for the lazily-spawned pinned terminals.
 /// Each tag's terminal is spawned with `pinned-term-<tag id>` (see
 /// [`pinned_term_app_id`]), which is how a mapped window is recognised as a
-/// pinned terminal *and* which tag it belongs to. Views recognised this way
-/// are never returned by [`WmCore::closable_focused_view`] — the
-/// architectural constraint that the pinned terminal is never closed via a
-/// routed keybind (`architectural-constraints.md`).
+/// pinned terminal *and* which tag it belongs to. It is also the test the
+/// close keybind applies to the acting seat's own focused window, which is
+/// what enforces the architectural constraint that the pinned terminal is
+/// never closed via a routed keybind (`architectural-constraints.md`).
 ///
 /// This is a convention, not an authenticated identity (audit finding
 /// D-02): `app_id` arrives from the client via `xdg_toplevel.set_app_id`,
@@ -223,7 +223,7 @@ impl WmCore {
 
     /// Registers a new view for `app_id`, returning a fresh, unique
     /// [`ViewId`]. The new view starts with empty tags, `floating ==
-    /// true`, and zeroed [`Geometry`](super::view::Geometry). It is not
+    /// true`, and zeroed [`Geometry`]. It is not
     /// focused; focus lives only in [`WmCore::focused_view`].
     pub fn register_view(&mut self, app_id: &str) -> ViewId {
         let id = ViewId(self.next_view_id);
@@ -433,8 +433,8 @@ impl WmCore {
     /// This is the pure decision `main.rs`'s tag-cycle keybind calls. It
     /// deliberately delegates the actual field write and ADR-005
     /// cross-output reroute enforcement to [`WmCore::switch_tag`] rather
-    /// than reimplementing it — the same functions Epic 2's IPC handlers
-    /// will call, so there is only one place the "next tag" rule can live.
+    /// than reimplementing it — the same function the IPC `switch-tag`
+    /// handler calls, so there is only one place the "next tag" rule lives.
     pub fn cycle_tag(&mut self, output_id: OutputId) -> Result<Option<TagId>, WmCoreError> {
         let output = self
             .outputs
@@ -473,8 +473,8 @@ impl WmCore {
     /// `Ok(None)` without side effects. Deliberately bundled into one
     /// method (mirroring `cycle_focus`'s precedent of composing several
     /// `wm-core`-internal steps into one atomic call) rather than exposing
-    /// separate `tag_terminal_spawned`/`tag_name` queries, so no caller can
-    /// accidentally check without claiming or claim twice. Fails with
+    /// the spawned-flag and the name as two separate queries, so no caller
+    /// can accidentally check without claiming or claim twice. Fails with
     /// [`WmCoreError::UnknownTag`] for an unregistered id.
     ///
     /// The claim is necessarily committed before the process it claims for

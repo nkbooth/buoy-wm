@@ -20,10 +20,9 @@
 //! Every item here is *behavioural* and shared by more than one of the
 //! three binaries: if `buoy-wm` and its companions disagree about it, the
 //! symptom is "the picker does nothing", not a compile error. That is the
-//! whole admission criterion for this crate — the wire *types* stay
-//! deliberately per-crate, because the companions' narrower `Request` and
-//! `Response` shapes are a real property worth keeping (a status bar that
-//! structurally cannot send a mutation) rather than debt to consolidate.
+//! whole admission criterion for this crate, and ADR-009 in
+//! `docs/adrs.md` is where it and its consequences are recorded — notably
+//! that the wire *types* stay deliberately per-crate.
 
 pub mod framing;
 pub mod log;

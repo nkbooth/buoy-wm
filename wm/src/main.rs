@@ -981,31 +981,19 @@ impl WindowManager {
                 // rather than permanently hidden.
                 match wm_core.toggle_view_tag(view_id, tag_id) {
                     Ok(()) => {
-                        // Code review follow-up: no longer uses
-                        // `river_window_v1.fullscreen()` (Story 2.7's
-                        // original mechanism) - live testing found that a
-                        // truly fullscreen window moves into river's own
-                        // `fullscreen_tree` scene layer, which sits ABOVE
-                        // the ordinary `wm_tree` layer every other window
-                        // lives in (confirmed via river's own architecture
-                        // docs). `place_top()`/`place_bottom()` only
-                        // reorder nodes *within* a layer, so no amount of
-                        // WM-side stacking control can make an ordinary
-                        // window (Zen, Chromium, anything) render above a
-                        // truly-fullscreen one - they render behind it,
-                        // always, regardless of `place_top()`. Sizing the
-                        // pinned terminal manually instead
-                        // (`set_position`/`propose_dimensions`, to exactly
-                        // fill the output) keeps it an ordinary `wm_tree`
-                        // window, so `place_bottom()` (already called
-                        // above) and every other window's `place_top()`
-                        // behave exactly as documented. If the tag isn't
-                        // currently shown on any output, do nothing here:
-                        // Task 3's render-sequence visibility pass
-                        // (`recompute_window_visibility`) will hide it via
-                        // the same `is_view_visible` decision every other
-                        // view uses, rather than this call site
-                        // special-casing a hide.
+                        // Sized to fill its output by hand rather than made
+                        // truly fullscreen: river keeps fullscreen windows
+                        // in a higher scene layer than ordinary ones, and
+                        // `place_top()`/`place_bottom()` only reorder within
+                        // a layer — so a fullscreen pinned terminal would
+                        // render above every other window no matter what
+                        // this WM did, which is the opposite of FR4.
+                        //
+                        // A tag not currently shown on any output is left
+                        // alone: the render-sequence visibility pass hides
+                        // it through the same `is_view_visible` decision
+                        // every other view goes through, so no hide needs
+                        // special-casing here.
                         if let Some(output_id) = wm_core.output_showing_tag(tag_id)
                             && let Some(output) = output_for_id(&self.outputs, output_id)
                         {
@@ -1081,17 +1069,13 @@ impl WindowManager {
     /// as this call) or asynchronously via the IPC-driven picker (picked up
     /// the next time any manage sequence runs).
     ///
-    /// Code review follow-up: no longer uses `river_window_v1.fullscreen()`
-    /// (Story 2.7's original mechanism, renamed from
-    /// `recompute_pinned_terminal_fullscreen`) - see `init_new_windows`'s
-    /// pinned-terminal branch for the full explanation of why a truly
-    /// fullscreen window can never render below an ordinary one regardless
-    /// of `place_top()` (river's own scene graph puts fullscreen windows in
-    /// a separate, higher layer). `set_position`/`propose_dimensions` sized
-    /// to exactly fill the output achieve the same visual result (the
-    /// terminal fills the screen) while keeping it an ordinary `wm_tree`
-    /// window other windows correctly render above via their own
-    /// `place_top()`.
+    /// Deliberately not `river_window_v1.fullscreen()`. River puts a truly
+    /// fullscreen window in a separate, higher scene layer, and
+    /// `place_top()`/`place_bottom()` only reorder within a layer — so no
+    /// amount of WM-side stacking could make an ordinary window render
+    /// above the pinned terminal, which FR4 requires. Sizing it manually to
+    /// exactly fill its output looks the same to the user and keeps it an
+    /// ordinary window.
     fn recompute_pinned_terminal_geometry(&mut self) {
         let wm_core = ipc::lock_recovering(&self.wm_core);
         for window in self.windows.iter_mut() {
@@ -1129,7 +1113,7 @@ impl WindowManager {
     /// Story 2.7 Task 3: the broad visibility recomputation pass - for
     /// every mapped window, decides show vs. hide via `WmCore::
     /// is_view_visible` (Task 1's pure decision) and issues the matching
-    /// `river_window_v1` request. `hide`/`show` "modif[y] rendering state
+    /// `river_window_v1` request. `hide`/`show` "modif\[y\] rendering state
     /// and may only be made as part of a render sequence" per the
     /// protocol, so this is called from `handle_render_start`, not
     /// `handle_manage_start` - the same manage-vs-render sequence
@@ -1161,7 +1145,7 @@ impl WindowManager {
     /// Composes Story 1.5's Tasks 2-3: claims the lazy-spawn-once
     /// pinned-terminal slot for `tag_id` and, if this is the first claim,
     /// spawns it. Called from `manage_seats`, once per tag that a seat's
-    /// `Action::TagCycle` just switched an output onto (Story 1.7) —
+    /// `Action::CycleTag` just switched an output onto (Story 1.7) —
     /// deliberately called after (not during) the seat loop that holds
     /// `wm_core`'s mutable borrow.
     fn ensure_pinned_terminal_spawned(&mut self, tag_id: TagId) {
@@ -1506,7 +1490,7 @@ impl WindowManager {
                 seat.focus_top(&self.windows, wm_core, None);
             }
             // `do_action` runs *after* the focus block above, so a binding
-            // that switches tags (`Action::TagCycle`) hides the focused
+            // that switches tags (`Action::CycleTag`) hides the focused
             // window a step too late for this pass's `focus_top` to have
             // noticed. Nothing schedules another pass on its own — the main
             // loop is a `blocking_dispatch`, so focus would stay on the
@@ -1615,11 +1599,12 @@ impl Output {
 /// reasoning as `active_output_id` needing to be computed before such a
 /// loop begins).
 ///
-/// Code review follow-up: renamed from `output_proxy_for_id` (which
-/// returned only the `RiverOutputV1` proxy) - callers need the output's
-/// real `position`/`dimensions` too now that the pinned terminal is sized
-/// to fill its output manually rather than via `river_window_v1.fullscreen`
-/// (see `recompute_pinned_terminal_geometry`'s doc comment for why).
+/// Returns the whole [`Output`], not just its proxy: the pinned terminal is
+/// sized to fill its output by hand rather than via
+/// `river_window_v1.fullscreen`, so callers need the real
+/// `position`/`dimensions` as well — see
+/// [`WindowManager::recompute_pinned_terminal_geometry`] for why that is
+/// the mechanism.
 fn output_for_id(outputs: &HashMap<ObjectId, Output>, output_id: OutputId) -> Option<&Output> {
     outputs
         .values()
@@ -1644,7 +1629,8 @@ fn tag_picker_path(wm_exe: &Path) -> PathBuf {
 }
 
 /// Spawns a tag's pinned terminal as `<terminal> <argv...>`, where `argv`
-/// is [`Config::pinned_terminal_argv`]'s already-substituted result — by
+/// is [`config::Defaults::pinned_terminal_argv`]'s already-substituted
+/// result — by
 /// default foot's `-a pinned-term-<tag id> zellij attach --create
 /// <session>`.
 ///
@@ -1748,7 +1734,7 @@ impl Seat {
     /// `manage_seats` uses, after this seat loop ends, to ensure that tag's
     /// pinned terminal is spawned (`WindowManager::ensure_pinned_terminal_spawned`).
     /// Every other arm returns `None`. `active_output_id` is the
-    /// deterministic "active output" `Action::TagCycle` acts on (see
+    /// deterministic "active output" `Action::CycleTag` acts on (see
     /// `WindowManager::active_output_id`).
     fn do_action(
         &mut self,
@@ -1825,7 +1811,7 @@ impl Seat {
                     },
                 };
                 match wm_core.switch_tag(output_id, tag_id) {
-                    // Mirrors `Action::TagCycle`: the returned tag id is the
+                    // Mirrors `Action::CycleTag`: the returned tag id is the
                     // signal `manage_seats` uses to spawn this tag's pinned
                     // terminal on first use.
                     Ok(()) => Some(tag_id),
@@ -1835,7 +1821,7 @@ impl Seat {
                     }
                 }
             }
-            // `Mod4+R`: same fire-and-forget spawn shape as `SpawnFoot`
+            // `Mod4+R`: same fire-and-forget spawn shape as `Action::Terminal`
             // above. Bare `fuzzel` (no `--dmenu`) runs its own built-in
             // desktop-entry launcher, so no argument wiring is needed.
             Action::Launcher => {
@@ -1846,7 +1832,7 @@ impl Seat {
                 // `recompute_pinned_terminal_geometry`'s doc comment).
                 //
                 // Code review follow-up: also pass `--output=<name>`, the
-                // same real connector name `Action::OpenTagPicker`/
+                // same real connector name `Action::TagPicker`/
                 // `TagSwitch` already pass to `buoy-tag-picker` (Story 2.9) -
                 // this arm spawns `fuzzel` directly, bypassing `buoy-tag-picker`
                 // entirely, so it never got that fix. Without it, `fuzzel`
@@ -2055,7 +2041,7 @@ impl Seat {
             // log and skip spawning rather than guessing a path or
             // panicking (NFR2). Once resolved, the spawn/error-handling
             // shape is otherwise byte-for-byte the same as
-            // `Action::SpawnFoot`'s above.
+            // `Action::Terminal`'s above.
             Action::TagPicker => {
                 match std::env::current_exe() {
                     Ok(wm_exe) => {
@@ -2095,8 +2081,8 @@ impl Seat {
             // `active_output_id` resolution across the process boundary as
             // a CLI argument — `buoy-tag-picker` never re-derives "the active
             // output" itself (Task 1.2). Same fire-and-forget spawn shape
-            // as `Action::OpenTagPicker` above, plus the same
-            // `None`-output defensive no-op shape as `Action::TagCycle`.
+            // as `Action::TagPicker` above, plus the same
+            // `None`-output defensive no-op shape as `Action::CycleTag`.
             // Always returns `None`: this arm never itself mutates
             // `wm_core` or triggers `manage_seats`' pinned-terminal-spawn
             // signal — the eventual `switch-tag` IPC call and its
@@ -2110,7 +2096,7 @@ impl Seat {
                             let mut command = std::process::Command::new(tag_picker_path(&wm_exe));
                             command.arg("switch").arg(output_id.0.to_string());
                             // Story 2.9 Task 3.4: same trailing-name
-                            // convention as `Action::OpenTagPicker` above —
+                            // convention as `Action::TagPicker` above —
                             // appended after the existing two args, only
                             // when known, preserving today's two-arg
                             // `switch <id>` shape exactly when it isn't (AC
@@ -2463,7 +2449,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
                 // output to it + spawn its pinned terminal, the first
                 // time *any* output registers on a completely empty tag
                 // registry (AC 1) — the same three effects
-                // `Action::TagCycle`'s keybind path already produces for
+                // `Action::CycleTag`'s keybind path already produces for
                 // an existing tag, just triggered once automatically at
                 // startup. Gated on the registry being empty rather than
                 // "is this the very first output ever" so a multi-output
@@ -3100,7 +3086,7 @@ mod tests {
     use super::*;
 
     // Code review follow-up (Story 2.2, finding #1): `tag_picker_path` is
-    // the pure path-resolution logic pulled out of `Action::OpenTagPicker`'s
+    // the pure path-resolution logic pulled out of `Action::TagPicker`'s
     // handler so it's testable without actually calling `current_exe()`.
     // The `current_exe()`/`Command::spawn()` call site itself stays
     // untested I/O glue, same carve-out as the rest of this file.

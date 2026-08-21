@@ -20,9 +20,10 @@
 //! the tag registry, stacking/render order, and terminal-spawned status.
 //!
 //! This module is pure state + logic with no I/O (see `components.md`).
-//! It is not yet wired to the vendored Dispatch handlers in `main.rs`
-//! (that wiring is Story 1.4's job) — its public API is exercised
-//! directly by unit tests in this crate.
+//! Every decision it makes is driven either by `main.rs`'s Wayland
+//! dispatch handlers or by `ipc::dispatch`, and it depends on neither — so
+//! its whole public API is exercisable by unit tests with no compositor and
+//! no socket, which is why the test coverage here is what it is.
 
 /// The maximum number of tags a [`tag::TagRegistry`] may hold, and the
 /// exclusive upper bound on any [`ids::TagId`] a [`tag_set::TagSet`] can

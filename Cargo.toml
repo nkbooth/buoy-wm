@@ -53,6 +53,18 @@ categories = ["command-line-utilities", "gui"]
 buoy-common = { path = "buoy-common", version = "0.1.0" }
 
 
+# Comments in this codebase reference identifiers in backticks constantly,
+# and a rename leaves every one of them pointing at nothing with no tool
+# noticing — ten such references had accumulated by the time an audit
+# counted them (finding J-07). `rustdoc` can only see `///`, so this makes
+# the doc-comment half of that index checkable: a `[`Foo::bar`]` link that
+# stops resolving is a CI failure, which is the only version of this rule
+# that cannot rot.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+redundant_explicit_links = "deny"
+
+
 [profile.release]
 lto = "thin"
 strip = true

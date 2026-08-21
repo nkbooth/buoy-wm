@@ -35,7 +35,7 @@
 //! actual `crate::spawn_pinned_terminal` call, after the response has
 //! already been written back to the client and the `wm-core` mutex
 //! released — untested I/O glue, the same carve-out class as
-//! `Action::SpawnFoot`, `Action::OpenTagPicker`, and
+//! `Action::Terminal`, `Action::TagPicker`, and
 //! `ensure_pinned_terminal_spawned` itself.
 
 use buoy_common::log_err;
@@ -85,7 +85,7 @@ impl From<WmCoreSnapshot> for Response {
 /// verbatim, not a duplicated literal.
 ///
 /// The cap in that message is interpolated from
-/// [`MAX_TAGS`](crate::wm_core::MAX_TAGS) rather than typed, so the number
+/// [`MAX_TAGS`] rather than typed, so the number
 /// the user is shown cannot disagree with the number actually enforced
 /// (audit finding J-06). `buoy-tag-picker` cannot import from `wm` and so
 /// keeps its own literal copy, which
@@ -173,7 +173,7 @@ pub fn handle_request(
                     // Story 2.4 Task 2: `switch-tag` is now reachable by a
                     // real user action (the picker's switch mode) for the
                     // first time, so this arm must guarantee the same
-                    // pinned-terminal lazy-spawn `Action::TagCycle`'s
+                    // pinned-terminal lazy-spawn `Action::CycleTag`'s
                     // keybind path already guarantees via `manage_seats` →
                     // `ensure_pinned_terminal_spawned`. `tag_id` was just
                     // proven valid by the successful `switch_tag` call
@@ -420,7 +420,7 @@ mod tests {
 
     /// Story 2.4 Task 2 (code-review follow-up): `switch_tag`'s IPC path is
     /// the second real caller of `claim_pinned_terminal_spawn` (after
-    /// `Action::TagCycle`'s keybind path) — this proves `handle_request`
+    /// `Action::CycleTag`'s keybind path) — this proves `handle_request`
     /// itself consumes the claim as a side effect of a successful switch
     /// AND surfaces the resulting session name as returned data, never by
     /// spawning a real process itself. Two independent checks: (1) the
@@ -578,7 +578,7 @@ mod tests {
     /// Audit finding E-06: `buoy-tag-picker` uses this exact string as
     /// *control flow* — `buoy-tag-picker/src/main.rs` compares a
     /// `create-tag` error response against its own hand-copied
-    /// `checklist::REJECTION_MESSAGE` to decide whether to reopen the
+    /// `picker::REJECTION_MESSAGE` to decide whether to reopen the
     /// picker with the rejected name restored, or to print an opaque line
     /// and give up. The two literals live in crates whose test suites never
     /// meet, so nothing else notices a reword.

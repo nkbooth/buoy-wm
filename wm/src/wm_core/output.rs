@@ -20,9 +20,10 @@
 use super::ids::{OutputId, TagId};
 
 /// An in-memory record for a registered output (display). `current_tag`
-/// is the raw field-level primitive only; the one-tag-per-output
-/// enforcement/reject-or-reroute decision belongs to a later story's
-/// `switch_tag` operation layered on top of this setter.
+/// is the raw field-level primitive only: writing it directly bypasses the
+/// ADR-005 one-tag-per-output reroute, which lives in
+/// [`WmCore::switch_tag`](super::state::WmCore::switch_tag) and is the only
+/// path any caller outside this module should use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Output {
     pub id: OutputId,

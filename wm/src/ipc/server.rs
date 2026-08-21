@@ -352,7 +352,7 @@ fn launch_connection(
 /// closing only this one connection. This is defense-in-depth, not the
 /// primary crash-safety mechanism: thread-per-connection plus Rust's
 /// default `panic = "unwind"` already confine an unhandled panic to its
-/// own thread, and [`lock_recovering`](crate::ipc::lock_recovering) is
+/// own thread, and [`lock_recovering`] is
 /// what actually keeps a poisoned mutex from crashing the *next* locker.
 fn handle_connection(
     stream: UnixStream,

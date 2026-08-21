@@ -125,3 +125,31 @@ co-located planning documents this rationale rested on were removed before
 the first public release; the workspace-subdirectory layout stands on its
 own, and `wm/` is now one of three members alongside `buoy-tag-picker/` and
 `buoy-status-bar/`.
+
+## ADR-009: Shared behaviour is extracted; shared shapes are not
+**Date:** 2026-08-20
+**Status:** Accepted
+**Decision:** A rule the three binaries have to *agree* on lives once, in
+`buoy-common`. A *type* they happen to have in common stays per-crate:
+`wm/src/ipc/protocol.rs`, `buoy-tag-picker/src/wire.rs` and
+`buoy-status-bar/src/wire.rs` keep their own `Request`/`Response`
+definitions.
+**Rationale:** The two cases fail differently. If the binaries disagree
+about where the socket lives, how a line is framed, or how a peer is
+authenticated, they cannot find or trust each other and the symptom is
+"the picker does nothing" — a silent runtime failure no compile step could
+have caught, so it must not be duplicated. A wire *shape*, in contrast,
+fails loudly: a message one end cannot parse shows up in the first test
+that sends it. And the satellites' shapes are deliberately narrower than
+`wm`'s, which is a property worth keeping rather than debt to consolidate —
+`buoy-status-bar`'s `Request` has exactly one variant, so it *structurally
+cannot* send a mutation. Merging to `wm`'s superset would trade that away
+for consistency.
+**Consequences:** `buoy-common` holds behaviour only, and its module docs
+say so, so the next candidate for extraction has a test to meet rather than
+a precedent to point at. Three copies of the wire types are maintained by
+hand; the insurance is a byte-compatibility test per message shape, not an
+extraction. Revisit on a fourth consumer, or on the first rename of a
+`Response` field. Separately, the RPL-1.5 notice block is replicated in
+every source file on purpose — RPL 1.5 §6.4(a) requires it there — and a
+pre-commit hook checks for it rather than any attempt to factor it out.

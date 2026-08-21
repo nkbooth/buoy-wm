@@ -29,7 +29,7 @@
 //! Switch mode is deliberately *not* built on that loop. There is nothing
 //! to toggle — membership is not the concept, and selecting is itself the
 //! terminal action. Expressing it as "toggle then immediately break" would
-//! drag along `pending_rejected_name`, `pending_create_apply_failed` and a
+//! drag along `pending_rejected_name`, a create-then-apply retry flag and a
 //! membership vector that mean nothing here and would need defensively
 //! never touching. Two small independent functions sharing
 //! `connect_and_get_state`/`run_fuzzel` is the better shape. This
@@ -647,7 +647,7 @@ fn main() {
 
     match mode {
         // Story 2.10 Task 5: `run_assign_mode` opens with or without a
-        // focused view now (`wm`'s `Action::OpenTagPicker` no longer
+        // focused view now (`wm`'s `Action::TagPicker` no longer
         // requires one either) — `should_open_picker`'s guard, checked
         // inside `run_assign_mode` itself, only refuses when *neither* a
         // view nor an output is known.

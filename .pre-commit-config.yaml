@@ -46,9 +46,9 @@ repos:
         pass_filenames: false
       # RPL 1.5 §6.4(a) requires the notice in every source file, so the
       # 16-line block is replicated deliberately and must not be
-      # deduplicated. A new file that forgot it is the failure mode a hook
-      # can actually catch. `wm/protocol/*.xml` is excluded: vendored MIT
-      # third-party, see NOTICE.md.
+      # deduplicated (ADR-009). A new file that forgot it is the failure
+      # mode a hook can actually catch. `wm/protocol/*.xml` is excluded:
+      # vendored MIT third-party, see NOTICE.md.
       - id: licence-header
         name: RPL-1.5 licence header present
         language: system

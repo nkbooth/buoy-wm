@@ -38,3 +38,6 @@ description = "Invariants all three buoy-wm binaries must agree on: where the IP
 # unstable (rust-lang/rust#42839), so there is no std-only route to a
 # peer's credentials on stable.
 rustix = { version = "1.1.4", features = ["net", "process"] }
+
+[lints]
+workspace = true

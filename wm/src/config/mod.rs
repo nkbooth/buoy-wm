@@ -120,7 +120,7 @@ pub struct Defaults {
     pub default_tag: String,
     /// Argv passed to `terminal` when spawning a tag's pinned terminal.
     /// `{app_id}` and `{session}` are substituted (see
-    /// [`Config::pinned_terminal_argv`]). Configurable because the flag
+    /// [`Defaults::pinned_terminal_argv`]). Configurable because the flag
     /// that sets a window's app-id is terminal-specific — foot spells it
     /// `-a`, most others `--class` — and hardcoding foot's spelling made
     /// setting `terminal` to anything else break every pinned terminal
@@ -183,7 +183,8 @@ pub struct Keybind {
 
 impl Keybind {
     /// This binding's key name resolved to an X11 keysym, or `None` if the
-    /// name isn't recognized. [`Config::parse`] rejects the latter at load,
+    /// name isn't recognized. [`Config::parse_lenient`] rejects the latter
+    /// at load,
     /// so a `Keybind` reaching the WM always resolves.
     pub fn keysym(&self) -> Option<u32> {
         keysym::from_name(&self.key)

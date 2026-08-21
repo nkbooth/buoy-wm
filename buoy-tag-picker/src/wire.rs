@@ -16,10 +16,10 @@
 // language governing rights and limitations under the RPL.
 
 //! `buoy-tag-picker`'s own minimal mirror of the wire shapes it needs from
-//! `wm/src/ipc/protocol.rs` (ADR-007). This is a deliberate, accepted
-//! duplication, not an oversight — see `buoy-status-bar/src/wire.rs`'s
-//! module doc for why the wire shapes stay per-crate while the socket path
-//! moved into `buoy-common` (audit finding J-01). As of Story 2.3,
+//! `wm/src/ipc/protocol.rs` (ADR-007). A deliberate, accepted duplication,
+//! not an oversight: ADR-009 in `docs/adrs.md` records why shared
+//! behaviour is extracted into `buoy-common` while shared shapes are not
+//! (audit finding J-01). As of Story 2.3,
 //! `buoy-tag-picker` sends `get-state`/`toggle-tag`/`create-tag`/`switch-tag` and
 //! understands the `state`/`ok`/`tag-created`/`error` responses those
 //! produce (Story 2.4 adds `switch-tag`, the switch-mode picker's sole

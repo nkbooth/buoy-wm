@@ -77,6 +77,15 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      # Enforces [workspace.lints.rustdoc]: a backticked identifier in a
+      # doc comment is a checked reference, so a rename cannot leave the
+      # comments pointing at something that no longer exists (audit finding
+      # J-07). `--document-private-items` because almost nothing in these
+      # three binaries is `pub`, so the default would check nearly none of
+      # it.
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps --document-private-items --locked
+
   # Separate job: the MSRV declared in [workspace.package] is a promise to
   # anyone packaging this, and an accidental use of a newer feature would
   # otherwise only surface in a distro build.
