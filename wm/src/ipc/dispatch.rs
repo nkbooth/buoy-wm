@@ -42,6 +42,7 @@ use crate::ipc::protocol::{OutputDto, Request, Response, TagDto, ViewDto};
 use crate::wm_core::MAX_TAGS;
 use crate::wm_core::ids::{OutputId, TagId, ViewId};
 use crate::wm_core::state::{WmCore, WmCoreError, WmCoreSnapshot};
+use crate::wm_core::tag::MAX_TAG_NAME_BYTES;
 
 impl From<WmCoreSnapshot> for Response {
     fn from(snapshot: WmCoreSnapshot) -> Self {
@@ -93,6 +94,9 @@ fn describe_wm_core_error(e: WmCoreError) -> String {
         WmCoreError::UnknownTag => "unknown tag".to_string(),
         WmCoreError::UnknownOutput => "unknown output".to_string(),
         WmCoreError::TagLimitReached => format!("tag limit reached ({MAX_TAGS})"),
+        WmCoreError::InvalidTagName => format!(
+            "invalid tag name (1-{MAX_TAG_NAME_BYTES} bytes, no path separators or control characters)"
+        ),
     }
 }
 
@@ -417,6 +421,31 @@ mod tests {
     /// `claim_pinned_terminal_spawn_is_idempotent_returns_none_after_first_claim`'s
     /// own precedent in `wm_core::state`), proving the claim was genuinely
     /// consumed rather than merely computed and discarded.
+    /// Audit finding E-01: `create-tag` is the one request that turns
+    /// peer-supplied text into permanent state, and the rejection has to
+    /// reach the client as a wire error rather than being registered.
+    #[test]
+    fn create_tag_with_an_invalid_name_is_rejected_over_the_wire() {
+        let mut core = WmCore::new();
+        for name in ["", "  ", "web/dev", "web\nmail", &"a".repeat(65)] {
+            let (response, pending_spawn) = handle_request(
+                &mut core,
+                Request::CreateTag {
+                    name: name.to_string(),
+                },
+            );
+            assert_eq!(pending_spawn, None);
+            match response {
+                Response::Error { message } => assert!(
+                    message.starts_with("invalid tag name"),
+                    "{name:?} produced {message:?}"
+                ),
+                other => panic!("{name:?} was not rejected: {other:?}"),
+            }
+        }
+        assert_eq!(core.tag_count(), 0);
+    }
+
     #[test]
     fn switch_tag_success_claims_pinned_terminal_spawn_for_the_target_tag() {
         let mut core = WmCore::new();

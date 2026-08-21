@@ -28,7 +28,11 @@ terminal has not started yet runs the configured terminal and `zellij`
 from your own config, never from the request — the tag name reaches the child
 only as a `zellij` session argument, passed as argv rather than through a
 shell, so it cannot inject a command. The request set carries no command
-string of its own, reads no file, and writes nowhere.
+string of its own, reads no file, and writes nowhere. A submitted tag name is
+validated where it enters the registry — non-empty, at most 64 bytes, and
+free of path separators and control characters — and one connection may
+create at most eight tags before it is closed, so the 64-slot registry cannot
+be spent in a single burst.
 
 A hostile local process could therefore read your tag names and window
 app-ids, rearrange your workspaces, and cause up to 64 terminal sessions to

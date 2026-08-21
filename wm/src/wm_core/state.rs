@@ -98,6 +98,10 @@ pub enum WmCoreError {
     // Constructible via a live path via `create_tag`, wired into
     // `buoy-tag-picker`'s IPC-driven tag-creation flow.
     TagLimitReached,
+    /// The proposed tag name failed the registry's validation — see
+    /// [`TagRegistry::create_tag`](super::tag::TagRegistry::create_tag)
+    /// for the rules (audit finding E-01).
+    InvalidTagName,
 }
 
 /// A snapshot of one registered tag: its id and name.
@@ -176,13 +180,15 @@ impl WmCore {
     /// registered (idempotent by name; see
     /// [`TagRegistry::create_tag`](super::tag::TagRegistry::create_tag)).
     /// Fails with [`WmCoreError::TagLimitReached`] if the registry already
-    /// holds 64 tags.
+    /// holds 64 tags, and with [`WmCoreError::InvalidTagName`] if the name
+    /// fails the registry's validation.
     // Wired into `buoy-tag-picker`'s IPC-driven tag-creation flow (Epic 2).
     pub fn create_tag(&mut self, name: impl Into<String>) -> Result<TagId, WmCoreError> {
         let name = name.into();
         self.tags.create_tag(&name).map_err(|err| match err {
             TagRegistryError::Full => WmCoreError::TagLimitReached,
             TagRegistryError::UnknownTag => WmCoreError::UnknownTag,
+            TagRegistryError::InvalidName => WmCoreError::InvalidTagName,
         })
     }
 
@@ -1389,6 +1395,17 @@ mod tests {
         let mut core = WmCore::new();
         let id = core.create_tag("web").unwrap();
         assert_eq!(core.tags.get(id).unwrap().name, "web");
+    }
+
+    /// Audit finding E-01: the registry's name validation must surface as a
+    /// distinct `WmCoreError`, not be folded into an existing one, because
+    /// the IPC layer turns it into the message the picker shows.
+    #[test]
+    fn create_tag_maps_an_invalid_name_to_its_own_error() {
+        let mut core = WmCore::new();
+        assert_eq!(core.create_tag(""), Err(WmCoreError::InvalidTagName));
+        assert_eq!(core.create_tag("web/dev"), Err(WmCoreError::InvalidTagName));
+        assert_eq!(core.tag_count(), 0);
     }
 
     #[test]

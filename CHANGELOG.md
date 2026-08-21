@@ -8,6 +8,14 @@ Notable changes per release. Format follows
 
 ### Changed
 
+- Tag names are validated where they enter the registry: non-empty and not
+  whitespace-only, at most 64 bytes, not a bare `.` or `..`, and free of `/`,
+  `\` and control characters. A rejected name is reported as
+  `invalid tag name` instead of becoming a permanent registry entry, a zellij
+  session path component and a waybar label.
+- One IPC connection may create at most eight tags before it is closed, so
+  the 64-slot registry — which by design is never reclaimed — cannot be spent
+  in a single burst.
 - A tag's pinned terminal is spawned with a per-tag `app_id`,
   `pinned-term-<tag id>`, instead of the shared `pinned-term` — a mapped
   window now says which tag it belongs to rather than the WM inferring it

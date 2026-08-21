@@ -78,6 +78,15 @@ struct Limits {
     /// persistent `EMFILE` from a hot loop burning a core inside the
     /// window manager into a slow retry.
     accept_error_backoff: Duration,
+    /// How many `create-tag` requests one connection may make before it is
+    /// closed. The 64-tag registry is finite and, by ADR-006, never
+    /// reclaimed, so it is the one resource a peer can spend permanently
+    /// (audit finding E-02).
+    ///
+    /// Counted per connection rather than per process because the quota
+    /// bounds a burst, not a session: a user who legitimately needs
+    /// another tag presses `Super+S` again, which is a new connection.
+    max_tag_creations_per_connection: usize,
 }
 
 impl Limits {
@@ -88,6 +97,14 @@ impl Limits {
         write_timeout: Duration::from_secs(5),
         idle_read_timeout: Duration::from_secs(600),
         accept_error_backoff: Duration::from_millis(100),
+        // Eight rather than one: no legitimate flow creates more than one
+        // tag per connection — `buoy-tag-picker`'s switch mode creates at
+        // most one and then terminates, assign mode creates none, and the
+        // keybind path never touches the socket — but the picker reopens on
+        // a tag-cap rejection, so the headroom keeps the quota away from
+        // any real sequence while still costing an abuser a fresh
+        // connection for every eight registry slots.
+        max_tag_creations_per_connection: 8,
     };
 }
 
@@ -398,6 +415,7 @@ fn handle_connection_inner(
         }
     };
     let mut reader = BufReader::new(stream);
+    let mut tag_creations: usize = 0;
 
     loop {
         let mut buf = Vec::new();
@@ -464,6 +482,22 @@ fn handle_connection_inner(
             }
             Ok(request) => {
                 let kind = request_kind(&request);
+                if matches!(request, Request::CreateTag { .. }) {
+                    tag_creations = tag_creations.saturating_add(1);
+                    if tag_creations > limits.max_tag_creations_per_connection {
+                        eprintln!(
+                            "ipc: create-tag quota ({}) spent on one connection; closing",
+                            limits.max_tag_creations_per_connection
+                        );
+                        write_response(
+                            &mut writer,
+                            &Response::Error {
+                                message: "create-tag quota exceeded on this connection".into(),
+                            },
+                        );
+                        return;
+                    }
+                }
                 let (response, pending_spawn) = {
                     let mut core = lock_recovering(wm_core);
                     handle_request(&mut core, request)
@@ -798,10 +832,16 @@ mod tests {
         // A fat state makes each `get-state` response large enough that a
         // few hundred unread replies overrun the socket's send buffer,
         // which is the only way to park the handler in `write_all` at all.
+        // The bulk comes from view `app_id`s rather than tag names, which
+        // are capped at `MAX_TAG_NAME_BYTES` (audit finding E-01) and
+        // cannot be padded arbitrarily.
         let mut core = WmCore::new();
         for i in 0..64 {
-            core.create_tag(format!("{}{i}", "t".repeat(200)))
+            core.create_tag(format!("{}{i}", "t".repeat(60)))
                 .expect("fill the tag registry");
+        }
+        for i in 0..64 {
+            core.register_view(&format!("{}{i}", "a".repeat(200)));
         }
         let (socket, _wm_core) = spawn_test_server_with_limits(core, limits);
 
@@ -819,6 +859,74 @@ mod tests {
         // exhaust its deadline instead of returning.
         assert!(wait_for_served_get_state(socket.path()).contains(r#""type":"state""#));
         drop(greedy);
+    }
+
+    /// Audit finding E-02: the 64-tag registry is finite and, by ADR-006,
+    /// never reclaimed, so one connection must not be able to spend it.
+    /// The quota counts attempts, not successes, and closes the connection
+    /// once it is spent.
+    #[test]
+    fn create_tag_requests_beyond_the_per_connection_quota_are_refused() {
+        let limits = Limits {
+            max_tag_creations_per_connection: 2,
+            ..Limits::PRODUCTION
+        };
+        let (socket, wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+
+        let mut client = TestClient::connect(socket.path());
+        for i in 0..2 {
+            client.send_line(&format!(r#"{{"type":"create-tag","name":"tag{i}"}}"#));
+            assert!(
+                client
+                    .read_line()
+                    .expect("within quota")
+                    .contains(r#""type":"tag-created""#)
+            );
+        }
+
+        client.send_line(r#"{"type":"create-tag","name":"one-too-many"}"#);
+        let refusal = client.read_line().expect("a refusal, not a closed socket");
+        assert!(
+            refusal.contains("quota"),
+            "expected a quota refusal, got {refusal:?}"
+        );
+        assert_eq!(
+            client.read_line(),
+            None,
+            "the connection must be closed once its quota is spent"
+        );
+
+        let core = lock_recovering(&wm_core);
+        assert_eq!(
+            core.tag_count(),
+            2,
+            "a refused create-tag must not reach the registry"
+        );
+    }
+
+    /// The quota is per connection, so a client that legitimately needs
+    /// another tag can open one — it bounds a single peer's burst, it does
+    /// not lock the registry.
+    #[test]
+    fn a_fresh_connection_gets_a_fresh_create_tag_quota() {
+        let limits = Limits {
+            max_tag_creations_per_connection: 1,
+            ..Limits::PRODUCTION
+        };
+        let (socket, wm_core) = spawn_test_server_with_limits(WmCore::new(), limits);
+
+        for i in 0..3 {
+            let mut client = TestClient::connect(socket.path());
+            client.send_line(&format!(r#"{{"type":"create-tag","name":"tag{i}"}}"#));
+            assert!(
+                client
+                    .read_line()
+                    .expect("first create-tag on a fresh connection")
+                    .contains(r#""type":"tag-created""#)
+            );
+        }
+
+        assert_eq!(lock_recovering(&wm_core).tag_count(), 3);
     }
 
     #[test]
