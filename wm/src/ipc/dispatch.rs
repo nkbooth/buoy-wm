@@ -38,6 +38,8 @@
 //! `Action::SpawnFoot`, `Action::OpenTagPicker`, and
 //! `ensure_pinned_terminal_spawned` itself.
 
+use buoy_common::log_err;
+
 use crate::ipc::protocol::{OutputDto, Request, Response, TagDto, ViewDto};
 use crate::wm_core::MAX_TAGS;
 use crate::wm_core::ids::{OutputId, TagId, ViewId};
@@ -178,7 +180,7 @@ pub fn handle_request(
                         }),
                         Ok(None) => None,
                         Err(e) => {
-                            eprintln!(
+                            log_err!(
                                 "Failed to check pinned-terminal spawn state for tag {tag_id}: {e:?}"
                             );
                             None

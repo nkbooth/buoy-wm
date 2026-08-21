@@ -19,7 +19,10 @@
 //! and mutation commands (Story 2.1). A sibling module to `wm_core`, inside
 //! the same `wm` binary — no socket/JSON types leak into `wm_core` itself.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
+
+use buoy_common::log_err;
 
 pub mod dispatch;
 pub mod protocol;
@@ -36,16 +39,51 @@ pub mod server;
 /// (NFR2). Used at every lock site that shares a `WmCore` mutex across the
 /// IPC thread family and the pre-existing Wayland-dispatch main thread.
 pub fn lock_recovering<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock().unwrap_or_else(|poisoned| {
+        if should_report_poisoning(&POISONING_REPORTED) {
+            log_err!(
+                "recovered a poisoned wm_core lock: a thread panicked while holding it, \
+                 so shared state may be inconsistent from here on"
+            );
+        }
+        poisoned.into_inner()
+    })
+}
+
+/// Set once the first poisoned lock has been reported.
+static POISONING_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this poisoning is the one worth a log line.
+///
+/// Recovery was previously entirely silent: after one thread panicked
+/// holding the lock, every subsequent lock proceeded on possibly
+/// inconsistent shared state forever with nothing written anywhere (audit
+/// finding G-05). Reported exactly once, because every later locker sees
+/// the same poisoned flag — one line per lock would be the flooding shape
+/// the accept loop's backoff exists to prevent.
+fn should_report_poisoning(reported: &AtomicBool) -> bool {
+    !reported.swap(true, Ordering::AcqRel)
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::lock_recovering;
+    use super::{lock_recovering, should_report_poisoning};
+
+    /// The recovery is right, but silently proceeding on possibly
+    /// inconsistent shared state forever is not — and one line per lock
+    /// after the first panic would be the flooding shape the accept loop's
+    /// backoff exists to prevent, so it is exactly once.
+    #[test]
+    fn poisoning_is_reported_once_and_then_never_again() {
+        use std::sync::atomic::AtomicBool;
+
+        let reported = AtomicBool::new(false);
+        assert!(should_report_poisoning(&reported));
+        assert!(!should_report_poisoning(&reported));
+        assert!(!should_report_poisoning(&reported));
+    }
 
     #[test]
     fn lock_recovering_returns_the_guard_normally_when_not_poisoned() {

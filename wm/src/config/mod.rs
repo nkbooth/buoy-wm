@@ -58,7 +58,13 @@ pub enum Button {
 /// variant be written as a bare string (`action = "close"`) and a
 /// parameterized one as a single-key table (`action = { exec = "..." }`) in
 /// the same field.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+///
+/// `Debug` is hand-written rather than derived so that
+/// [`Action::Exec`]'s command line — the user's own shell text, which can
+/// carry tokens — cannot be printed by accident (audit finding G-05). The
+/// `match` is exhaustive, so a new variant is a compile error here rather
+/// than a variant that quietly prints whatever it holds.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     /// Spawn `defaults.terminal`.
@@ -82,6 +88,26 @@ pub enum Action {
     /// Switch the active output to a tag by name, creating it if it does
     /// not exist yet.
     SwitchTag(String),
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exec(_) => f.write_str("Exec(<redacted>)"),
+            Self::SwitchTag(name) => write!(f, "SwitchTag({name:?})"),
+            Self::Terminal => f.write_str("Terminal"),
+            Self::Launcher => f.write_str("Launcher"),
+            Self::Close => f.write_str("Close"),
+            Self::FocusNext => f.write_str("FocusNext"),
+            Self::Exit => f.write_str("Exit"),
+            Self::CycleTag => f.write_str("CycleTag"),
+            Self::TagPicker => f.write_str("TagPicker"),
+            Self::TagSwitch => f.write_str("TagSwitch"),
+            Self::Hotkeys => f.write_str("Hotkeys"),
+            Self::Move => f.write_str("Move"),
+            Self::Resize => f.write_str("Resize"),
+        }
+    }
 }
 
 /// Program names and values that were compile-time constants before this
@@ -830,6 +856,38 @@ fn usable_base_dir(value: Option<&OsStr>) -> Option<&OsStr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Action::Exec` carries the user's own shell command lines, which can
+    /// carry tokens. No `{:?}` is applied to `Action`, `Keybind` or
+    /// `Config` in non-test code today, so the hazard is one future
+    /// `log_err!("config: {config:?}")` away.
+    #[test]
+    fn debug_for_action_redacts_the_exec_command_line() {
+        let rendered = format!("{:?}", Action::Exec("secret --token abc123".to_string()));
+        assert_eq!(rendered, "Exec(<redacted>)");
+        assert!(!rendered.contains("abc123"));
+    }
+
+    #[test]
+    fn debug_for_action_still_names_every_other_variant() {
+        assert_eq!(format!("{:?}", Action::Terminal), "Terminal");
+        assert_eq!(
+            format!("{:?}", Action::SwitchTag("email".to_string())),
+            r#"SwitchTag("email")"#
+        );
+    }
+
+    /// A `Keybind` reaches `Action`'s own `Debug`, so the redaction has to
+    /// survive being nested inside a derived one.
+    #[test]
+    fn debug_for_a_keybind_redacts_its_exec_action_too() {
+        let keybind = Keybind {
+            mods: Vec::new(),
+            key: "p".to_string(),
+            action: Action::Exec("secret --token abc123".to_string()),
+        };
+        assert!(!format!("{keybind:?}").contains("abc123"));
+    }
 
     #[test]
     fn default_config_reproduces_the_previously_hardcoded_programs() {

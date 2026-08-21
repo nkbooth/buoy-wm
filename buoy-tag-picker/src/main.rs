@@ -49,6 +49,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
+use buoy_common::log_err;
 use buoy_common::socket_path::NO_RUNTIME_DIR_MESSAGE;
 
 /// Assign mode's `fuzzel` placeholder text. Deliberately says nothing about
@@ -84,7 +85,7 @@ fn read_response(reader: &mut BufReader<UnixStream>) -> Option<wire::Response> {
     match read_line_bounded(reader) {
         Ok(Line::Complete(bytes)) => wire::parse_response(&bytes).ok(),
         Ok(Line::Oversize) => {
-            eprintln!("buoy-tag-picker: response line over the {MAX_LINE_BYTES}-byte cap");
+            log_err!("response line over the {MAX_LINE_BYTES}-byte cap");
             None
         }
         Ok(Line::Eof) | Err(_) => None,
@@ -98,7 +99,7 @@ fn read_response(reader: &mut BufReader<UnixStream>) -> Option<wire::Response> {
 /// wm-side error that embeds peer text) write control characters and
 /// forged lines into the terminal or journal.
 fn report_server_error(message: &str) {
-    eprintln!("buoy-tag-picker: {message:?}");
+    log_err!("{message:?}");
 }
 
 /// Sends `switch-tag` for `output_id`/`tag_id` and exits the process on
@@ -117,7 +118,7 @@ fn send_switch_tag_or_exit(
     tag_id: u8,
 ) {
     if !send_request(writer, &wire::Request::SwitchTag { output_id, tag_id }) {
-        eprintln!("buoy-tag-picker: failed to send switch-tag request");
+        log_err!("failed to send switch-tag request");
         std::process::exit(1);
     }
     match read_response(reader) {
@@ -127,7 +128,7 @@ fn send_switch_tag_or_exit(
             std::process::exit(1);
         }
         other => {
-            eprintln!("buoy-tag-picker: unexpected response to switch-tag: {other:?}");
+            log_err!("unexpected response to switch-tag: {other:?}");
             std::process::exit(1);
         }
     }
@@ -230,7 +231,7 @@ fn run_fuzzel(
     let mut child = match command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("buoy-tag-picker: failed to spawn fuzzel: {e}");
+            log_err!("failed to spawn fuzzel: {e}");
             return (false, String::new());
         }
     };
@@ -244,7 +245,7 @@ fn run_fuzzel(
         let input = input.to_owned();
         std::thread::spawn(move || {
             if let Err(e) = stdin.write_all(input.as_bytes()) {
-                eprintln!("buoy-tag-picker: failed to write to fuzzel's stdin: {e}");
+                log_err!("failed to write to fuzzel's stdin: {e}");
             }
             // Explicit drop closes fuzzel's stdin so it sees EOF and can
             // exit its input-reading phase.
@@ -258,7 +259,7 @@ fn run_fuzzel(
             String::from_utf8_lossy(&output.stdout).into_owned(),
         ),
         Err(e) => {
-            eprintln!("buoy-tag-picker: failed to wait for fuzzel: {e}");
+            log_err!("failed to wait for fuzzel: {e}");
             (false, String::new())
         }
     };
@@ -292,14 +293,14 @@ fn connect_and_get_state() -> (
     let socket_path = match buoy_common::socket_path::default_socket_path() {
         Some(socket_path) => socket_path,
         None => {
-            eprintln!("buoy-tag-picker: {NO_RUNTIME_DIR_MESSAGE}");
+            log_err!("{NO_RUNTIME_DIR_MESSAGE}");
             std::process::exit(1);
         }
     };
     let stream = match UnixStream::connect(&socket_path) {
         Ok(stream) => stream,
         Err(e) => {
-            eprintln!("buoy-tag-picker: failed to connect to {socket_path:?}: {e}");
+            log_err!("failed to connect to {socket_path:?}: {e}");
             std::process::exit(1);
         }
     };
@@ -308,7 +309,7 @@ fn connect_and_get_state() -> (
     // path is a failed connection rather than a silent capture of every
     // tag name, every window's app id, and every selection made here.
     if let Err(rejection) = buoy_common::peer::authenticate_peer(&stream) {
-        eprintln!("buoy-tag-picker: refusing to talk to {socket_path:?}: {rejection}");
+        log_err!("refusing to talk to {socket_path:?}: {rejection}");
         std::process::exit(1);
     }
     // This process had no socket deadline at all, so a wedged or squatted
@@ -322,21 +323,21 @@ fn connect_and_get_state() -> (
         ("write", stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT))),
     ] {
         if let Err(e) = applied {
-            eprintln!("buoy-tag-picker: failed to set the socket {label} timeout: {e}");
+            log_err!("failed to set the socket {label} timeout: {e}");
             std::process::exit(1);
         }
     }
     let mut writer = match stream.try_clone() {
         Ok(writer) => writer,
         Err(e) => {
-            eprintln!("buoy-tag-picker: failed to clone connection for writing: {e}");
+            log_err!("failed to clone connection for writing: {e}");
             std::process::exit(1);
         }
     };
     let mut reader = BufReader::new(stream);
 
     if !send_request(&mut writer, &wire::Request::GetState) {
-        eprintln!("buoy-tag-picker: failed to send get-state request");
+        log_err!("failed to send get-state request");
         std::process::exit(1);
     }
     let (tags, views, focused_view) = match read_response(&mut reader) {
@@ -346,11 +347,11 @@ fn connect_and_get_state() -> (
             focused_view,
         }) => (tags, views, focused_view),
         Some(other) => {
-            eprintln!("buoy-tag-picker: unexpected response to get-state: {other:?}");
+            log_err!("unexpected response to get-state: {other:?}");
             std::process::exit(1);
         }
         None => {
-            eprintln!("buoy-tag-picker: no usable response to get-state");
+            log_err!("no usable response to get-state");
             std::process::exit(1);
         }
     };
@@ -393,7 +394,7 @@ fn run_assign_mode(
     output_name: Option<&str>,
 ) {
     if !picker::should_open_picker(view_id, output_id) {
-        eprintln!("buoy-tag-picker: no window focused and no output known");
+        log_err!("no window focused and no output known");
         std::process::exit(0);
     }
 
@@ -417,7 +418,7 @@ fn run_assign_mode(
             picker::PickerAction::Toggled(tag_id) => match view_id {
                 Some(view_id) => {
                     if !send_request(&mut writer, &wire::Request::ToggleTag { view_id, tag_id }) {
-                        eprintln!("buoy-tag-picker: failed to send toggle-tag request");
+                        log_err!("failed to send toggle-tag request");
                         break;
                     }
                     match read_response(&mut reader) {
@@ -429,9 +430,7 @@ fn run_assign_mode(
                             break;
                         }
                         other => {
-                            eprintln!(
-                                "buoy-tag-picker: unexpected response to toggle-tag: {other:?}"
-                            );
+                            log_err!("unexpected response to toggle-tag: {other:?}");
                             break;
                         }
                     }
@@ -515,7 +514,7 @@ fn run_switch_mode(
                     &mut writer,
                     &wire::Request::CreateTag { name: name.clone() },
                 ) {
-                    eprintln!("buoy-tag-picker: failed to send create-tag request");
+                    log_err!("failed to send create-tag request");
                     break;
                 }
                 match read_response(&mut reader) {
@@ -538,7 +537,7 @@ fn run_switch_mode(
                         }
                     }
                     other => {
-                        eprintln!("buoy-tag-picker: unexpected response to create-tag: {other:?}");
+                        log_err!("unexpected response to create-tag: {other:?}");
                         break;
                     }
                 }
@@ -552,7 +551,7 @@ fn main() {
     let mode = match mode::parse_args(&args) {
         Ok(mode) => mode,
         Err(message) => {
-            eprintln!("buoy-tag-picker: {message}");
+            log_err!("{message}");
             std::process::exit(1);
         }
     };

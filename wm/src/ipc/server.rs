@@ -28,6 +28,7 @@ use std::time::Duration;
 
 use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
 use buoy_common::peer::{PeerIdentity, authenticate_peer};
+use buoy_common::{log_err, log_info};
 
 use crate::config::Defaults;
 use crate::ipc::dispatch::handle_request;
@@ -139,7 +140,7 @@ impl ConnectionCount {
     /// cannot be used to write to the journal at connect speed.
     fn report_at_capacity(&self, max: usize) {
         if !self.at_capacity_reported.swap(true, Ordering::AcqRel) {
-            eprintln!("ipc: at capacity ({max} connections); refusing new connections");
+            log_err!("at capacity ({max} connections); refusing new connections");
         }
     }
 }
@@ -299,9 +300,7 @@ fn accept_loop(
             Err(e) => {
                 consecutive_errors = consecutive_errors.saturating_add(1);
                 if consecutive_errors == 1 || consecutive_errors % ACCEPT_ERROR_LOG_INTERVAL == 0 {
-                    eprintln!(
-                        "ipc: accept error (consecutive: {consecutive_errors}), backing off: {e}"
-                    );
+                    log_err!("accept error (consecutive: {consecutive_errors}), backing off: {e}");
                 }
                 // A persistent EMFILE/ENFILE would otherwise make this a
                 // hot loop writing stderr as fast as journald accepts it,
@@ -335,7 +334,7 @@ fn launch_connection(
             handle_connection(stream, wm_core, &defaults, limits);
         });
     if let Err(e) = spawned {
-        eprintln!("ipc: cannot spawn connection thread, dropping connection: {e}");
+        log_err!("cannot spawn connection thread, dropping connection: {e}");
     }
 }
 
@@ -358,9 +357,32 @@ fn handle_connection(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         handle_connection_inner(stream, &wm_core, defaults, limits);
     }));
-    if let Err(e) = result {
-        eprintln!("ipc: connection handler panicked (contained): {e:?}");
+    if let Err(payload) = result {
+        log_err!(
+            "connection handler panicked (contained): {}",
+            describe_panic(&payload)
+        );
     }
+}
+
+/// Recovers the message from a caught panic's payload.
+///
+/// `Debug for dyn Any` renders the literal `Any { .. }`, so logging the
+/// payload directly produced a contentless line at the one point in this
+/// code that deliberately reaches for crash telemetry (audit finding
+/// G-05); the real message and its `file:line` arrived separately from the
+/// default panic hook, unlinked and interleavable across concurrent
+/// connection threads. `panic!` payloads are `&'static str` when the
+/// message has no arguments and `String` when it does, which is why both
+/// are checked.
+fn describe_panic(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "a non-string panic payload".to_string()
 }
 
 /// Writes `response` as one JSON line followed by `\n`, flushing
@@ -444,11 +466,10 @@ fn describe_peer(peer: PeerIdentity) -> String {
 /// become injectable.
 fn log_dispatch_outcome(peer: PeerIdentity, kind: &'static str, response: &Response) {
     match response {
-        Response::Error { message } => eprintln!(
-            "ipc: {kind} from {} rejected: {message:?}",
-            describe_peer(peer)
-        ),
-        Response::Ok | Response::TagCreated { .. } => eprintln!("ipc: {kind} applied"),
+        Response::Error { message } => {
+            log_err!("{kind} from {} rejected: {message:?}", describe_peer(peer))
+        }
+        Response::Ok | Response::TagCreated { .. } => log_info!("{kind} applied"),
         Response::State { .. } => {}
     }
 }
@@ -469,7 +490,7 @@ fn handle_connection_inner(
     let peer = match authenticate_peer(&stream) {
         Ok(peer) => peer,
         Err(rejection) => {
-            eprintln!("ipc: refusing connection: {rejection}");
+            log_err!("refusing connection: {rejection}");
             return;
         }
     };
@@ -477,18 +498,18 @@ fn handle_connection_inner(
     // Set before the `try_clone` below: these are socket-level options, so
     // one call covers the reader and the writer view of the same socket.
     if let Err(e) = stream.set_write_timeout(Some(limits.write_timeout)) {
-        eprintln!("ipc: cannot set connection write timeout, closing: {e}");
+        log_err!("cannot set connection write timeout, closing: {e}");
         return;
     }
     if let Err(e) = stream.set_read_timeout(Some(limits.idle_read_timeout)) {
-        eprintln!("ipc: cannot set connection read deadline, closing: {e}");
+        log_err!("cannot set connection read deadline, closing: {e}");
         return;
     }
 
     let mut writer = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("ipc: failed to clone connection for writing: {e}");
+            log_err!("failed to clone connection for writing: {e}");
             return;
         }
     };
@@ -499,14 +520,14 @@ fn handle_connection_inner(
         let line = match read_line_bounded(&mut reader) {
             Ok(line) => line,
             Err(e) if is_timeout(&e) => {
-                eprintln!(
-                    "ipc: closing connection idle for more than {:?}",
+                log_info!(
+                    "closing connection idle for more than {:?}",
                     limits.idle_read_timeout
                 );
                 return;
             }
             Err(e) => {
-                eprintln!("ipc: connection read error, closing: {e}");
+                log_err!("connection read error, closing: {e}");
                 return;
             }
         };
@@ -516,8 +537,8 @@ fn handle_connection_inner(
             // EOF, cleanly or mid-line: nothing more the client will send.
             Line::Eof => return,
             Line::Oversize => {
-                eprintln!(
-                    "ipc: rejecting a request line from {} over the {MAX_LINE_BYTES}-byte cap; closing connection",
+                log_err!(
+                    "rejecting a request line from {} over the {MAX_LINE_BYTES}-byte cap; closing connection",
                     describe_peer(peer)
                 );
                 write_response(
@@ -532,8 +553,8 @@ fn handle_connection_inner(
 
         match parse_request(&line_bytes) {
             Err(e) => {
-                eprintln!(
-                    "ipc: rejecting a malformed request from {}: {}",
+                log_err!(
+                    "rejecting a malformed request from {}: {}",
                     describe_peer(peer),
                     describe_parse_error(&e)
                 );
@@ -550,8 +571,8 @@ fn handle_connection_inner(
                 if matches!(request, Request::CreateTag { .. }) {
                     tag_creations = tag_creations.saturating_add(1);
                     if tag_creations > limits.max_tag_creations_per_connection {
-                        eprintln!(
-                            "ipc: create-tag quota ({}) spent on one connection by {}; closing",
+                        log_err!(
+                            "create-tag quota ({}) spent on one connection by {}; closing",
                             limits.max_tag_creations_per_connection,
                             describe_peer(peer)
                         );
@@ -1222,6 +1243,27 @@ mod tests {
                 ..Defaults::default()
             },
         )
+    }
+
+    /// `Debug for dyn Any` renders the literal `Any { .. }`, so the one
+    /// place this code deliberately reaches for crash telemetry used to
+    /// produce none.
+    #[test]
+    fn describe_panic_recovers_a_str_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+        assert_eq!(describe_panic(&payload), "boom");
+    }
+
+    #[test]
+    fn describe_panic_recovers_a_formatted_string_payload() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom 7".to_string());
+        assert_eq!(describe_panic(&payload), "boom 7");
+    }
+
+    #[test]
+    fn describe_panic_says_so_when_the_payload_is_neither() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(7u32);
+        assert_eq!(describe_panic(&payload), "a non-string panic payload");
     }
 
     #[test]

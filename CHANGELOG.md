@@ -24,6 +24,16 @@ Notable changes per release. Format follows
 
 ### Changed
 
+- Log lines carry journald severity, so `journalctl --user -b
+  --identifier=buoy-wm -p err` now shows exactly the failures, and the
+  subsystem that logged each line is named automatically rather than by a
+  hand-written prefix. Lines seen in a terminal rather than a journal carry
+  a visible `<3>`/`<6>` severity marker.
+- A `buoy-status-bar` poll failure says which of the seven distinct failures
+  it was, logged when it changes rather than four times a second forever or
+  never.
+- Losing the Wayland connection prints a sentence instead of the `Debug` of a
+  `DispatchError`.
 - A second `buoy-wm` no longer unlinks a running instance's socket. A path
   that answers a connection means a live instance and the newcomer refuses
   to start; a non-socket inode at that path is refused rather than deleted.

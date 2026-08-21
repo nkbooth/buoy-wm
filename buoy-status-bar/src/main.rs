@@ -42,6 +42,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
+use buoy_common::log_err;
 use buoy_common::socket_path::NO_RUNTIME_DIR_MESSAGE;
 
 /// `buoy-status-bar`'s poll cadence (Task 1.4): comfortably under typical
@@ -79,56 +80,87 @@ const SOCKET_IO_TIMEOUT: Duration = Duration::from_millis(100);
 /// read and write halves before handing the stream back — split out of
 /// `try_get_state` so the timeout configuration itself is unit-testable
 /// (code review follow-up) without needing a live `wm` on the other end.
-/// A failure setting either timeout (`.ok()?`) is folded into the same
-/// "connection failed this tick" path as a failed `connect` itself — never
-/// a panic (NFR2).
-fn connect_with_timeout(socket_path: &Path) -> Option<UnixStream> {
-    let stream = UnixStream::connect(socket_path).ok()?;
+/// Every failure is a described `Err`, never a panic (NFR2).
+fn connect_with_timeout(socket_path: &Path) -> Result<UnixStream, String> {
+    let stream = UnixStream::connect(socket_path)
+        .map_err(|e| format!("cannot connect to {}: {e}", socket_path.display()))?;
     // The mirror of the server's own peer check: a `wm` not running as
     // this user is not this user's `wm`, and rendering its idea of the
     // current tag into the desktop's own chrome is exactly the spoof a
     // squatted socket path buys.
-    buoy_common::peer::authenticate_peer(&stream).ok()?;
-    stream.set_read_timeout(Some(SOCKET_IO_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(SOCKET_IO_TIMEOUT)).ok()?;
-    Some(stream)
+    buoy_common::peer::authenticate_peer(&stream)
+        .map_err(|rejection| format!("refusing to talk to {socket_path:?}: {rejection}"))?;
+    stream
+        .set_read_timeout(Some(SOCKET_IO_TIMEOUT))
+        .map_err(|e| format!("cannot set the socket read timeout: {e}"))?;
+    stream
+        .set_write_timeout(Some(SOCKET_IO_TIMEOUT))
+        .map_err(|e| format!("cannot set the socket write timeout: {e}"))?;
+    Ok(stream)
+}
+
+/// Records `error` as the current failure, returning whether it is worth a
+/// log line — that is, whether it differs from the failure already
+/// reported.
+///
+/// `try_get_state` collapsed seven distinct failures into one `None` and
+/// one disconnected glyph, retried four times a second forever with
+/// nothing written anywhere, so a wrong socket path or a wire-schema drift
+/// was undebuggable by design (audit finding G-05). Logging every tick
+/// would be worse than the silence it replaces, so a failure is logged on
+/// transition only.
+fn note_error(last_error: &mut Option<String>, error: &str) -> bool {
+    if last_error.as_deref() == Some(error) {
+        return false;
+    }
+    *last_error = Some(error.to_string());
+    true
+}
+
+/// Clears the recorded failure after a successful poll, so a failure that
+/// comes back after a recovery is logged again rather than swallowed.
+fn note_success(last_error: &mut Option<String>) {
+    *last_error = None;
 }
 
 /// Connects fresh to `socket_path` (Task 1.4's "reconnect every tick"
 /// design), sends `get-state`, and reads/parses exactly one response line.
-/// Any failure at any step — connect, setting the I/O timeout, write,
-/// flush, read, parse, or an unexpected non-`State` response — returns
-/// `None` rather than panicking; the caller treats `None` as "poll failed
-/// this tick," never distinguishing *why* it failed (Task 1.4/AC: the
-/// disconnected state covers every such failure uniformly). The read/write
-/// timeout (`SOCKET_IO_TIMEOUT`, applied by `connect_with_timeout`) bounds
-/// a stalled `wm` (connection accepted but never written to) to the same
-/// "fails this tick, retries next tick" path as every other failure mode,
-/// rather than blocking `read_line` forever.
-fn try_get_state(socket_path: &Path) -> Option<(Vec<wire::TagDto>, Vec<wire::OutputDto>)> {
+///
+/// Every failure — connect, peer rejection, setting the I/O timeout,
+/// write, flush, read, parse, or an unexpected non-`State` response —
+/// renders as the same disconnected glyph, which is the AC, but each one
+/// now says which it was (audit finding G-05). The read/write timeout
+/// (`SOCKET_IO_TIMEOUT`, applied by `connect_with_timeout`) bounds a
+/// stalled `wm` to the same "fails this tick, retries next tick" path as
+/// every other failure mode.
+fn try_get_state(socket_path: &Path) -> Result<(Vec<wire::TagDto>, Vec<wire::OutputDto>), String> {
     let mut stream = connect_with_timeout(socket_path)?;
     let request = wire::serialize_request(&wire::Request::GetState);
-    stream.write_all(request.as_bytes()).ok()?;
-    stream.write_all(b"\n").ok()?;
-    stream.flush().ok()?;
+    let mut send = || -> std::io::Result<()> {
+        stream.write_all(request.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()
+    };
+    send().map_err(|e| format!("cannot send get-state: {e}"))?;
 
     let mut reader = BufReader::new(stream);
     // Bounded, not a bare `read_line`: at 4 polls a second for the whole
     // session, an unbounded read is an unbounded allocation every 250 ms
     // against whatever is actually on the other end (audit finding E-04).
-    let line = match read_line_bounded(&mut reader).ok()? {
+    let line = match read_line_bounded(&mut reader)
+        .map_err(|e| format!("cannot read the get-state response: {e}"))?
+    {
         Line::Complete(bytes) => bytes,
         Line::Oversize => {
-            eprintln!("buoy-status-bar: response line over the {MAX_LINE_BYTES}-byte cap");
-            return None;
+            return Err(format!("response line over the {MAX_LINE_BYTES}-byte cap"));
         }
-        // EOF: peer closed the connection with no response.
-        Line::Eof => return None,
+        Line::Eof => return Err("the connection closed with no response".to_string()),
     };
 
-    match wire::parse_response(&line).ok()? {
-        wire::Response::State { tags, outputs } => Some((tags, outputs)),
-        _ => None,
+    match wire::parse_response(&line) {
+        Ok(wire::Response::State { tags, outputs }) => Ok((tags, outputs)),
+        Ok(other) => Err(format!("unexpected response to get-state: {other:?}")),
+        Err(_) => Err("the get-state response did not parse".to_string()),
     }
 }
 
@@ -137,7 +169,7 @@ fn main() {
     let output_id = match parse_output_id(&args) {
         Ok(output_id) => output_id,
         Err(message) => {
-            eprintln!("buoy-status-bar: {message}");
+            log_err!("{message}");
             std::process::exit(1);
         }
     };
@@ -150,7 +182,7 @@ fn main() {
             // rendering as the disconnected state: a bar that retries a
             // path it does not have, four times a second forever, hides a
             // configuration error instead of reporting it.
-            eprintln!("buoy-status-bar: {NO_RUNTIME_DIR_MESSAGE}");
+            log_err!("{NO_RUNTIME_DIR_MESSAGE}");
             std::process::exit(1);
         }
     };
@@ -162,16 +194,28 @@ fn main() {
     // backoff, and a stdout write/flush failure (e.g. waybar itself
     // restarting) is logged to stderr rather than treated as fatal, so
     // this binary needs no `restart-interval` in the user's waybar config.
+    let mut last_error: Option<String> = None;
+
     loop {
-        let bar_line = try_get_state(&socket_path)
-            .map(|(tags, outputs)| bar_line::resolve_bar_line(output_id, &outputs, &tags));
+        let bar_line = match try_get_state(&socket_path) {
+            Ok((tags, outputs)) => {
+                note_success(&mut last_error);
+                Some(bar_line::resolve_bar_line(output_id, &outputs, &tags))
+            }
+            Err(e) => {
+                if note_error(&mut last_error, &e) {
+                    log_err!("{e}");
+                }
+                None
+            }
+        };
         let line = bar_line::format_waybar_line(bar_line);
 
         if bar_line::changed(last_printed.as_deref(), &line) {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
             if let Err(e) = writeln!(handle, "{line}").and_then(|()| handle.flush()) {
-                eprintln!("buoy-status-bar: failed to write to stdout: {e}");
+                log_err!("failed to write to stdout: {e}");
             } else {
                 last_printed = Some(line);
             }
@@ -184,6 +228,27 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Seven distinct failures used to collapse into one `None` and the
+    /// same disconnected glyph, retried at 4 Hz forever with nothing
+    /// written anywhere. Logging every tick would be worse than silence,
+    /// so a failure is logged when it *changes*.
+    #[test]
+    fn a_failure_is_logged_once_and_not_again_until_it_changes() {
+        let mut last: Option<String> = None;
+        assert!(note_error(&mut last, "connect refused"));
+        assert!(!note_error(&mut last, "connect refused"));
+        assert!(note_error(&mut last, "read timed out"));
+        assert!(!note_error(&mut last, "read timed out"));
+    }
+
+    #[test]
+    fn a_recovery_lets_the_same_failure_be_logged_again() {
+        let mut last: Option<String> = None;
+        assert!(note_error(&mut last, "connect refused"));
+        note_success(&mut last);
+        assert!(note_error(&mut last, "connect refused"));
+    }
 
     #[test]
     fn parse_output_id_accepts_a_single_numeric_argument() {

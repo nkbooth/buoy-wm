@@ -26,5 +26,6 @@
 //! structurally cannot send a mutation) rather than debt to consolidate.
 
 pub mod framing;
+pub mod log;
 pub mod peer;
 pub mod socket_path;

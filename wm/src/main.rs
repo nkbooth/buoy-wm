@@ -22,6 +22,7 @@ use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use buoy_common::{log_err, log_info};
 use wayland_backend::client::ObjectId;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
@@ -111,7 +112,7 @@ use wm_core::view::DEFAULT_FLOATING_GEOMETRY;
 /// future regression is visible instead of silently discarded.
 fn log_wm_core_err(result: Result<(), WmCoreError>, context: &str) {
     if let Err(e) = result {
-        eprintln!("{context}: {e:?}");
+        log_err!("{context}: {e:?}");
     }
 }
 
@@ -168,7 +169,7 @@ fn spawn_tracked(command: &mut std::process::Command, what: &str) -> bool {
             true
         }
         Err(e) => {
-            eprintln!("Failed to spawn {what}: {e}");
+            log_err!("Failed to spawn {what}: {e}");
             false
         }
     }
@@ -586,7 +587,7 @@ impl WindowManager {
                     match wm_core.unregister_output(output.output_id) {
                         Ok(Some(tag_id)) => orphaned_tags.push(tag_id),
                         Ok(None) => {}
-                        Err(e) => eprintln!(
+                        Err(e) => log_err!(
                             "Failed to unregister output {:?} from wm_core: {e:?}",
                             output.output_id
                         ),
@@ -668,7 +669,7 @@ impl WindowManager {
                         // does hit `Err` stays visible (NFR2, error
                         // propagation).
                         if let Err(e) = wm_core.unregister_view(id) {
-                            eprintln!("Failed to unregister view {id:?} from wm_core: {e:?}");
+                            log_err!("Failed to unregister view {id:?} from wm_core: {e:?}");
                         }
                     }
                     return false;
@@ -773,7 +774,7 @@ impl WindowManager {
                         }
                     }
                     Err(e) => {
-                        eprintln!(
+                        log_err!(
                             "Failed to tag newly-mapped pinned terminal onto {tag_id:?}: {e:?}; leaving untagged"
                         );
                         // Code review follow-up (Story 2.7): an untagged
@@ -861,7 +862,7 @@ impl WindowManager {
             let tag_id = match wm_core.view_tags(view_id) {
                 Ok(tags) => tags.first().copied(),
                 Err(e) => {
-                    eprintln!(
+                    log_err!(
                         "Failed to resolve pinned terminal's tags for view {view_id:?}: {e:?}"
                     );
                     None
@@ -911,7 +912,7 @@ impl WindowManager {
                 Ok(true) => window.proxy.show(),
                 Ok(false) => window.proxy.hide(),
                 Err(e) => {
-                    eprintln!("Failed to resolve visibility for view {view_id:?}: {e:?}")
+                    log_err!("Failed to resolve visibility for view {view_id:?}: {e:?}")
                 }
             }
         }
@@ -940,7 +941,7 @@ impl WindowManager {
             ),
             Ok(None) => {}
             Err(e) => {
-                eprintln!("Failed to check pinned-terminal spawn state for tag {tag_id:?}: {e:?}")
+                log_err!("Failed to check pinned-terminal spawn state for tag {tag_id:?}: {e:?}")
             }
         }
     }
@@ -959,7 +960,7 @@ impl WindowManager {
             }
             for keybind in &self.config.keybinds {
                 let Some(keysym) = keybind.keysym() else {
-                    eprintln!("Skipping keybind with unresolvable key `{}`", keybind.key);
+                    log_err!("Skipping keybind with unresolvable key `{}`", keybind.key);
                     continue;
                 };
                 seat.create_xkb_binding(
@@ -1121,7 +1122,7 @@ impl WindowManager {
             let Some(settings) = settings else {
                 continue;
             };
-            eprintln!(
+            log_info!(
                 "libinput {name:?}: applying {} setting(s) from [[input]]",
                 settings.len()
             );
@@ -1170,7 +1171,7 @@ impl WindowManager {
                     .iter()
                     .position(|window| window.proxy == window_proxy)
                 else {
-                    eprintln!(
+                    log_info!(
                         "Ignoring interaction with unmanaged window {:?} (already closed)",
                         window_proxy.id()
                     );
@@ -1188,7 +1189,7 @@ impl WindowManager {
                 if let Some(view_id) = window.view_id
                     && let Err(e) = wm_core.raise_view(view_id)
                 {
-                    eprintln!("Failed to raise view {view_id:?} in wm_core stacking order: {e:?}");
+                    log_err!("Failed to raise view {view_id:?} in wm_core stacking order: {e:?}");
                 }
                 if is_pinned_term_app_id(&window.app_id) {
                     // FR4: the pinned terminal must always render at the
@@ -1206,7 +1207,7 @@ impl WindowManager {
                     if let Some(view_id) = window.view_id
                         && let Err(e) = wm_core.set_focus(view_id)
                     {
-                        eprintln!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
+                        log_err!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
                     }
                     self.windows.insert(i, window);
                     seat.terminal_intentionally_focused = true;
@@ -1547,7 +1548,7 @@ impl Seat {
             // change shape, so a read stays a read.
             Action::SwitchTag(name) => {
                 let Some(output_id) = active_output_id else {
-                    eprintln!("Tag keybind for `{name}` pressed but no output is registered yet");
+                    log_err!("Tag keybind for `{name}` pressed but no output is registered yet");
                     return None;
                 };
                 let tag_id = match wm_core.tag_id_by_name(&name) {
@@ -1555,7 +1556,7 @@ impl Seat {
                     None => match wm_core.create_tag(name.clone()) {
                         Ok(tag_id) => tag_id,
                         Err(e) => {
-                            eprintln!("Failed to create tag `{name}`: {e:?}");
+                            log_err!("Failed to create tag `{name}`: {e:?}");
                             return None;
                         }
                     },
@@ -1566,7 +1567,7 @@ impl Seat {
                     // terminal on first use.
                     Ok(()) => Some(tag_id),
                     Err(e) => {
-                        eprintln!("Failed to switch to tag `{name}`: {e:?}");
+                        log_err!("Failed to switch to tag `{name}`: {e:?}");
                         None
                     }
                 }
@@ -1640,13 +1641,13 @@ impl Seat {
                             std::thread::spawn(move || {
                                 use std::io::Write;
                                 if let Err(e) = writeln!(stdin, "{help}") {
-                                    eprintln!("Failed to write hotkey list to fuzzel: {e}");
+                                    log_err!("Failed to write hotkey list to fuzzel: {e}");
                                 }
                             });
                         }
                         track_child(child);
                     }
-                    Err(e) => eprintln!("Failed to spawn fuzzel for hotkey list: {e}"),
+                    Err(e) => log_err!("Failed to spawn fuzzel for hotkey list: {e}"),
                 }
                 None
             }
@@ -1708,7 +1709,7 @@ impl Seat {
                         self.proxy.focus_window(&window.proxy);
                         self.focused = Some(window.proxy.clone());
                         if let Err(e) = wm_core.set_focus(next_view_id) {
-                            eprintln!(
+                            log_err!(
                                 "Failed to set focus for view {next_view_id:?} in wm_core: {e:?}"
                             );
                         }
@@ -1752,12 +1753,12 @@ impl Seat {
                     Ok(Some(tag_id)) => Some(tag_id),
                     Ok(None) => None,
                     Err(e) => {
-                        eprintln!("Failed to cycle tag on output {output_id:?}: {e:?}");
+                        log_err!("Failed to cycle tag on output {output_id:?}: {e:?}");
                         None
                     }
                 },
                 None => {
-                    eprintln!("Tag-cycle keybind pressed but no output is registered yet");
+                    log_err!("Tag-cycle keybind pressed but no output is registered yet");
                     None
                 }
             },
@@ -1806,7 +1807,7 @@ impl Seat {
                         spawn_tracked(&mut command, "buoy-tag-picker");
                     }
                     Err(e) => {
-                        eprintln!("Failed to resolve wm's own executable path: {e}")
+                        log_err!("Failed to resolve wm's own executable path: {e}")
                     }
                 }
                 None
@@ -1842,11 +1843,11 @@ impl Seat {
                             spawn_tracked(&mut command, "buoy-tag-picker in switch mode");
                         }
                         Err(e) => {
-                            eprintln!("Failed to resolve wm's own executable path: {e}")
+                            log_err!("Failed to resolve wm's own executable path: {e}")
                         }
                     },
                     None => {
-                        eprintln!("Tag-switch keybind pressed but no output is registered yet")
+                        log_err!("Tag-switch keybind pressed but no output is registered yet")
                     }
                 }
                 None
@@ -1958,7 +1959,7 @@ impl Seat {
                 // error propagation), same pattern as remove_windows'
                 // unregister_view logging.
                 if let Err(e) = wm_core.set_focus(view_id) {
-                    eprintln!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
+                    log_err!("Failed to set focus for view {view_id:?} in wm_core: {e:?}");
                 }
             }
             None => {
@@ -2038,7 +2039,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
             match interface.as_str() {
                 "river_window_manager_v1" => {
                     if version < RIVER_WINDOW_MANAGER_V1_VERSION {
-                        eprintln!(
+                        log_err!(
                             "Server river_window_manager_v1 v{version}, but we need at least v{RIVER_WINDOW_MANAGER_V1_VERSION}",
                         );
                         std::process::exit(1);
@@ -2053,7 +2054,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                 }
                 "river_xkb_bindings_v1" => {
                     if version < RIVER_XKB_BINDINGS_V1_VERSION {
-                        eprintln!(
+                        log_err!(
                             "Server supports river_xkb_bindings_v1 v{version}, but we need at least v{RIVER_XKB_BINDINGS_V1_VERSION}"
                         );
                         std::process::exit(1);
@@ -2072,7 +2073,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                     // and fall back to `buoy-wm`'s pre-Story-2.6 behavior
                     // (layer-shell surfaces can't map).
                     if version < RIVER_LAYER_SHELL_V1_VERSION {
-                        eprintln!(
+                        log_err!(
                             "Server supports river_layer_shell_v1 v{version}, but we need at least v{RIVER_LAYER_SHELL_V1_VERSION} - layer-shell surfaces (eg a waybar status bar) will not be able to map"
                         );
                         return;
@@ -2090,7 +2091,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                     // without it just means no `[[input]]` entry can be
                     // applied, which is the pre-`[[input]]` status quo.
                     if version < RIVER_INPUT_MANAGER_V1_VERSION {
-                        eprintln!(
+                        log_err!(
                             "Server supports river_input_manager_v1 v{version}, but we need at least v{RIVER_INPUT_MANAGER_V1_VERSION} - [[input]] device configuration will not be applied"
                         );
                         return;
@@ -2105,7 +2106,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
                 }
                 "river_libinput_config_v1" => {
                     if version < RIVER_LIBINPUT_CONFIG_V1_VERSION {
-                        eprintln!(
+                        log_err!(
                             "Server supports river_libinput_config_v1 v{version}, but we need at least v{RIVER_LIBINPUT_CONFIG_V1_VERSION} - [[input]] device configuration will not be applied"
                         );
                         return;
@@ -2160,7 +2161,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
         use river::river_window_manager_v1::Event;
         match event {
             Event::Unavailable => {
-                eprintln!("Error: Another WM is already running");
+                log_err!("Error: Another WM is already running");
                 std::process::exit(1);
             }
             Event::Finished => std::process::exit(0),
@@ -2198,14 +2199,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
                     match wm_core_guard.create_tag(state.wm.config.defaults.default_tag.clone()) {
                         Ok(tag_id) => {
                             if let Err(e) = wm_core_guard.switch_tag(output_id, tag_id) {
-                                eprintln!(
+                                log_err!(
                                     "Failed to switch bootstrap output {output_id:?} to default tag: {e:?}"
                                 );
                             }
                             Some(tag_id)
                         }
                         Err(e) => {
-                            eprintln!("Failed to create bootstrap default tag: {e:?}");
+                            log_err!("Failed to create bootstrap default tag: {e:?}");
                             None
                         }
                     }
@@ -2553,7 +2554,7 @@ impl Dispatch<RiverLibinputDeviceV1, ()> for AppData {
             // configured device the confirmation that it took effect.
             Event::TapCurrent { state: tap_state } => {
                 if let Some(name) = state.wm.configured_device_name(&proxy.id()) {
-                    eprintln!(
+                    log_info!(
                         "libinput {name:?}: tap-to-click is {}",
                         wenum_label(tap_state)
                     );
@@ -2561,7 +2562,7 @@ impl Dispatch<RiverLibinputDeviceV1, ()> for AppData {
             }
             Event::ClickMethodCurrent { method } => {
                 if let Some(name) = state.wm.configured_device_name(&proxy.id()) {
-                    eprintln!("libinput {name:?}: click method is {}", wenum_label(method));
+                    log_info!("libinput {name:?}: click method is {}", wenum_label(method));
                 }
             }
             _ => {}
@@ -2589,10 +2590,10 @@ impl Dispatch<RiverLibinputResultV1, String> for AppData {
         match event {
             Event::Success => {}
             Event::Unsupported => {
-                eprintln!("{data}: unsupported by this device, ignored");
+                log_err!("{data}: unsupported by this device, ignored");
             }
             Event::Invalid => {
-                eprintln!("{data}: invalid value, ignored");
+                log_err!("{data}: invalid value, ignored");
             }
         }
     }
@@ -2630,7 +2631,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let path = config::config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "the config file".to_string());
-            eprintln!("Failed to load {path}: {e}\nFalling back to built-in defaults.");
+            log_err!("Failed to load {path}: {e}\nFalling back to built-in defaults.");
             Config::default()
         }
     };
@@ -2638,11 +2639,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Roundtrip to process the get_registry event and bind interfaces.
     event_queue.roundtrip(&mut app_data)?;
     if app_data.river_wm.is_none() {
-        eprintln!("river_window_manager_v1 global not found! Is river running?");
+        log_err!("river_window_manager_v1 global not found! Is river running?");
         std::process::exit(1);
     }
     if app_data.river_xkb.is_none() {
-        eprintln!("river_xkb_bindings_v1 global not found! Is river running with xkb support?");
+        log_err!("river_xkb_bindings_v1 global not found! Is river running with xkb support?");
         std::process::exit(1);
     }
 
@@ -2668,11 +2669,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cleared at logout) a leftover inode is cosmetic.
     if let Some(socket_path) = ipc_socket {
         if let Err(e) = std::fs::remove_file(&socket_path) {
-            eprintln!("Failed to remove the IPC socket at {socket_path:?}: {e}");
+            log_err!("Failed to remove the IPC socket at {socket_path:?}: {e}");
         }
     }
 
-    outcome
+    // Reported here rather than returned: `main`'s `Box<dyn Error>` return
+    // makes Rust print `Error: ` followed by the *`Debug`* of a
+    // `DispatchError`, which is how the single most likely way this process
+    // ever ends used to describe itself (audit finding G-02).
+    if let Err(e) = outcome {
+        log_err!("The Wayland connection ended, so buoy-wm is exiting: {e}");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// Resolves, checks and binds the IPC socket, returning the path bound so
@@ -2696,13 +2705,13 @@ fn start_ipc_server(
     // finding C-03).
     let parent = socket_path.parent()?;
     if let Err(e) = buoy_common::socket_path::verify_private_dir(parent) {
-        eprintln!("IPC server disabled: {e}");
+        log_err!("IPC server disabled: {e}");
         return None;
     }
     match ipc::server::spawn(Arc::clone(wm_core), &socket_path, defaults.clone()) {
         Ok(_accept_thread) => Some(socket_path),
         Err(e) => {
-            eprintln!("Failed to start IPC server on {socket_path:?}: {e}");
+            log_err!("Failed to start IPC server on {socket_path:?}: {e}");
             None
         }
     }
