@@ -83,6 +83,37 @@ Notable changes per release. Format follows
 - A pinned terminal whose spawn failed no longer leaves its tag marked as
   spawned for the rest of the session, and no longer mis-tags the next
   pinned terminal that appears.
+- A click, drag or resize whose target window or seat had already gone away
+  no longer ends the session. The compositor promises no ordering between
+  an interaction event and the removal it races, so this was reachable
+  without doing anything unusual; it now costs the one gesture.
+- A resize request naming edges this build's copy of the protocol does not
+  recognise is dropped rather than fatal, so a future river that widens
+  that bitfield costs a drag instead of a login session.
+- Move and resize drags saturate instead of wrapping, so dragging far past
+  a window's opposite edge can no longer produce a nonsense size that the
+  minimum-size floor could not detect.
+- The tag-assignment picker (`Super+A`) re-reads state before each pick
+  instead of trusting a snapshot taken when it opened. Because the
+  operation is a toggle, a membership changed meanwhile by a keybind or a
+  second client used to invert the next pick rather than merely lose it; a
+  tag created meanwhile also now appears.
+
+### Changed
+
+- A panic anywhere in `buoy-wm` now raises a notification and a greppable
+  journal line naming the source location, rather than a stripped
+  backtrace on a stderr nobody reads.
+- Error log lines read as sentences rather than Rust identifiers: "the tag
+  registry is already full at 64 tags", not `TagLimitReached`.
+- A child process this WM spawned that exits unsuccessfully now says so,
+  which is the difference between a misconfigured `terminal` and a working
+  one. Finished children are also reclaimed once per window-management
+  pass rather than only on the next spawn.
+- A keybind press discarded because a second binding fired before the
+  first was acted on is now reported instead of vanishing.
+- A failed response write is logged unless it is just the peer having hung
+  up.
 
 ## [0.1.0] — first public release
 
