@@ -18,7 +18,15 @@
 # buoy-wm example configuration.
 #
 # Copy to ~/.config/buoy/config.toml. Every section is optional — with no
-# config file at all, buoy-wm uses exactly the defaults shown here.
+# config file at all, buoy-wm uses the built-in defaults.
+#
+# This file is those defaults PLUS four illustrative extras that are NOT
+# built in: the two `switch_tag` binds on Super+1/Super+2 and the two `exec`
+# binds on Super+p / Super+Shift+B. They are marked in place below. That
+# distinction matters because declaring any [[keybind]] replaces the whole
+# built-in set — so copying this file wholesale gives you the defaults *and*
+# those four, one of which runs `~/bin/toggle-bluetooth.sh`, a script you
+# almost certainly do not have. Delete what you do not want.
 
 [defaults]
 # Spawned by the `terminal` action, and used for each tag's pinned terminal.
@@ -105,8 +113,8 @@ mod = ["Super"]
 key = "Escape"
 action = "exit"
 
-# Named tags. The tag is created the first time the bind is pressed, so
-# these work on a fresh session with no setup.
+# NOT A DEFAULT — illustrative. Named tags: the tag is created the first
+# time the bind is pressed, so these work on a fresh session with no setup.
 
 [[keybind]]
 mod = ["Super"]
@@ -118,8 +126,8 @@ mod = ["Super"]
 key = "2"
 action = { switch_tag = "misc" }
 
-# Arbitrary commands. Run through `sh -c`, so pipes, arguments and `~` all
-# work as they would in a shell.
+# NOT A DEFAULT — illustrative. Arbitrary commands, run through `sh -c`, so
+# pipes, arguments and `~` all work as they would in a shell.
 
 [[keybind]]
 mod = ["Super"]

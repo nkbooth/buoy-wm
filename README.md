@@ -194,7 +194,9 @@ than freezing on a stale tag name.
 Optional, at `~/.config/buoy/config.toml` (or under `$XDG_CONFIG_HOME`). With
 no config file the built-in defaults apply unchanged.
 [`docs/config.example.toml`](docs/config.example.toml) is a fully commented
-copy of exactly those defaults — start there.
+copy of those defaults plus four clearly-marked illustrative extras — start
+there, and delete what you do not want. Remember that declaring any
+`[[keybind]]` replaces the whole built-in set.
 
 ```toml
 [defaults]
