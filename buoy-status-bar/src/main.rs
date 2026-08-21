@@ -363,6 +363,69 @@ mod tests {
         assert_eq!(stream.write_timeout().unwrap(), Some(SOCKET_IO_TIMEOUT));
     }
 
+    /// The connection is reused across polls (audit finding B-02), so the
+    /// poller has to keep one and reconnect only after a failure. Driven
+    /// against a real listener on this thread: the exchange is sequential,
+    /// so a server thread would only move a failed assertion somewhere it
+    /// cannot fail the test.
+    #[test]
+    fn the_poller_reuses_one_connection_and_reconnects_after_a_failure() {
+        use std::io::BufRead;
+        use std::os::unix::net::UnixListener;
+
+        const STATE: &str = r#"{"type":"state","tags":[{"id":0,"name":"web"}],"outputs":[{"id":7,"current_tag":0}]}"#;
+
+        let socket = SocketGuard(std::env::temp_dir().join(format!(
+            "buoy-status-bar-poller-test-{}.sock",
+            std::process::id()
+        )));
+        let _ = std::fs::remove_file(socket.path());
+        let listener = UnixListener::bind(socket.path()).expect("bind the fixture socket");
+        let mut poller = Poller::new(socket.path().to_path_buf());
+
+        // Poll once: this is what opens the connection.
+        let served = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept the poller");
+            let mut writer = stream.try_clone().expect("split for writing");
+            let mut reader = BufReader::new(stream);
+            // Two requests on this one connection, then hang up.
+            for _ in 0..2 {
+                let mut request = String::new();
+                if reader.read_line(&mut request).unwrap_or(0) == 0 {
+                    return 0;
+                }
+                if writeln!(writer, "{STATE}")
+                    .and_then(|()| writer.flush())
+                    .is_err()
+                {
+                    return 0;
+                }
+            }
+            2
+        });
+
+        let (tags, outputs) = poller.get_state().expect("the first poll");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(outputs.len(), 1);
+        let (tags, outputs) = poller.get_state().expect("the second poll");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(
+            served.join().expect("the fixture served both polls"),
+            2,
+            "both polls must arrive on the one connection"
+        );
+
+        // The fixture has hung up and the listener is gone, so the next poll
+        // must fail — and must have dropped the dead connection rather than
+        // reusing it, which is what makes a restarted `wm` recoverable.
+        assert!(poller.get_state().is_err());
+        assert!(
+            poller.open.is_none(),
+            "a failed poll must drop the connection so the next tick reconnects"
+        );
+    }
+
     /// Removes a test socket inode when the test ends, including on a
     /// panicking assertion — the trailing `remove_file` this replaces did
     /// not run on the one path that most needs the cleanup (audit finding

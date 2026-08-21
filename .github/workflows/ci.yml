@@ -81,17 +81,31 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
-      # Reporting only, deliberately: no --fail-under-lines yet. Nothing
-      # in this pipeline would have flagged wm/src/main.rs sliding to
-      # 2.55% line coverage (audit finding T-06), so the first job is to
-      # make the number visible in every run; a floor can only be set
-      # honestly once the test seam it depends on exists (T-01).
+      # Nothing in this pipeline would have flagged wm/src/main.rs sliding
+      # to 2.55% line coverage (audit finding T-06), so the whole-workspace
+      # number is printed on every run.
       - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
         with:
           tool: cargo-llvm-cov
 
       - name: cargo llvm-cov
         run: cargo llvm-cov --workspace --locked --summary-only
+
+      # The floor, and deliberately not on that whole-workspace number: the
+      # three `src/main.rs` files are the composition roots — Wayland
+      # `Dispatch` glue, the poll loop, the process's one exit — and a
+      # workspace-wide floor set low enough to accommodate them would gate
+      # nothing, while one set high enough to be meaningful would fail on
+      # code that is deliberately covered across a process boundary instead
+      # (audit finding T-01 phase 4). So the floor covers everything *below*
+      # those roots, which is where the decisions live and where the test
+      # seam is supposed to hold: 97.33% at the time this was set, gated at
+      # 95% so an honest refactor has room and a slide does not.
+      - name: cargo llvm-cov (floor below the composition roots)
+        run: >-
+          cargo llvm-cov --workspace --locked --summary-only
+          --ignore-filename-regex 'src/main\.rs$'
+          --fail-under-lines 95
 
       # Enforces [workspace.lints.rustdoc]: a backticked identifier in a
       # doc comment is a checked reference, so a rename cannot leave the
