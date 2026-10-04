@@ -17,7 +17,8 @@
 
 //! The Unix domain socket accept loop and per-connection handling.
 
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
+use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -25,7 +26,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
 use buoy_common::peer::{PeerIdentity, authenticate_peer};
@@ -88,6 +89,11 @@ struct Limits {
     /// `fuzzel` invocations in assign mode, so this deadline has to cover
     /// human think-time or the picker breaks mid-use.
     idle_read_timeout: Duration,
+    /// How long a refused connection is drained before it is closed
+    /// outright. Long enough for a well-behaved peer to see EOF and hang
+    /// up; short enough that a peer which never does cannot keep the
+    /// handler thread it was refused on.
+    refusal_drain_timeout: Duration,
     /// How long the accept loop sleeps after a failed `accept`. Turns a
     /// persistent `EMFILE` from a hot loop burning a core inside the
     /// window manager into a slow retry.
@@ -110,6 +116,7 @@ impl Limits {
         connection_stack_size: 256 * 1024,
         write_timeout: Duration::from_secs(5),
         idle_read_timeout: Duration::from_secs(600),
+        refusal_drain_timeout: Duration::from_secs(1),
         accept_error_backoff: Duration::from_millis(100),
         // Eight rather than one: no legitimate flow creates more than one
         // tag per connection — `buoy-tag-picker`'s switch mode creates at
@@ -432,6 +439,56 @@ fn write_response(stream: &mut UnixStream, response: &Response) -> bool {
     true
 }
 
+/// Sends `refusal` as the connection's last response, then closes it so
+/// the peer reads EOF after the refusal rather than a reset.
+///
+/// Dropping the socket outright is what this replaces. Linux turns a close
+/// with bytes still unread in the receive queue into `ECONNRESET` on the
+/// peer's next read, and a refused peer has often sent more than was read:
+/// the tail of an oversized line, or requests pipelined behind a malformed
+/// one. So the write side is shut first — the peer sees EOF straight after
+/// the refusal — and whatever the peer already sent is discarded until it
+/// hangs up or `drain_timeout` passes.
+fn refuse_and_close(
+    writer: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
+    refusal: &Response,
+    drain_timeout: Duration,
+) {
+    if !write_response(writer, refusal) {
+        return;
+    }
+    if let Err(e) = writer.shutdown(Shutdown::Write) {
+        log_err!("could not half-close a refused connection: {e}");
+        return;
+    }
+    if let Err(e) = discard_until_eof(reader, Instant::now() + drain_timeout)
+        && !is_timeout(&e)
+    {
+        log_err!("refused connection read error while draining: {e}");
+    }
+}
+
+/// Reads and throws away everything until EOF or `deadline`, whichever
+/// comes first. A deadline expiring surfaces as an error [`is_timeout`]
+/// recognises.
+fn discard_until_eof(reader: &mut BufReader<UnixStream>, deadline: Instant) -> std::io::Result<()> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // `set_read_timeout(Some(ZERO))` is rejected outright, so an
+        // already-passed deadline has to be caught here.
+        if remaining.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        reader.get_ref().set_read_timeout(Some(remaining))?;
+        let discarded = reader.fill_buf()?.len();
+        if discarded == 0 {
+            return Ok(());
+        }
+        reader.consume(discarded);
+    }
+}
+
 /// Logs a failed response write unless it is just the peer having hung up.
 fn report_write_failure(error: &std::io::Error) {
     if !is_peer_hangup(error) {
@@ -658,11 +715,13 @@ fn handle_connection_inner(
                     "rejecting a request line from {} over the {MAX_LINE_BYTES}-byte cap; closing connection",
                     describe_peer(peer)
                 );
-                write_response(
+                refuse_and_close(
                     &mut writer,
+                    &mut reader,
                     &Response::Error {
                         message: "malformed request".into(),
                     },
+                    limits.refusal_drain_timeout,
                 );
                 return;
             }
@@ -675,13 +734,15 @@ fn handle_connection_inner(
                     describe_peer(peer),
                     describe_parse_error(&e)
                 );
-                write_response(
+                refuse_and_close(
                     &mut writer,
+                    &mut reader,
                     &Response::Error {
                         message: "malformed request".into(),
                     },
+                    limits.refusal_drain_timeout,
                 );
-                return; // malformed/unparseable input: reset the connection
+                return; // malformed/unparseable input: close the connection
             }
             Ok(request) => {
                 let kind = request_kind(&request);
@@ -693,11 +754,13 @@ fn handle_connection_inner(
                             limits.max_tag_creations_per_connection,
                             describe_peer(peer)
                         );
-                        write_response(
+                        refuse_and_close(
                             &mut writer,
+                            &mut reader,
                             &Response::Error {
                                 message: "create-tag quota exceeded on this connection".into(),
                             },
+                            limits.refusal_drain_timeout,
                         );
                         return;
                     }
@@ -1460,6 +1523,86 @@ mod tests {
             client.read_line(),
             None,
             "connection must be closed after a malformed request"
+        );
+    }
+
+    /// Closing a Unix socket with bytes still unread in its receive queue
+    /// makes Linux hand the peer `ECONNRESET` instead of EOF — after the
+    /// refusal, in the same read that should have reported the close. The
+    /// trailing lines are sent in the same write as the malformed one, so
+    /// they are already queued when the server refuses it.
+    #[test]
+    fn a_refusal_ends_in_a_clean_close_even_with_requests_still_unread() {
+        let server = TestServer::start();
+        let mut client = TestClient::connect(server.path());
+        let pipelined = r#"{"type":"get-state"}"#.to_owned() + "\n";
+        client.send_raw(format!("not json\n{}", pipelined.repeat(1024)).as_bytes());
+
+        let response = client.read_line().expect("expected an error response");
+        assert!(response.contains(r#""type":"error""#));
+        assert_eq!(
+            client.read_line(),
+            None,
+            "the close after a refusal must read as EOF, not a reset"
+        );
+    }
+
+    /// Draining after a refusal waits for the peer to hang up, so a peer
+    /// that never does must not keep the handler thread: once the drain
+    /// deadline passes the socket is closed outright, which the peer sees
+    /// as its writes starting to fail.
+    #[test]
+    fn a_peer_that_never_hangs_up_after_a_refusal_is_closed_at_the_drain_deadline() {
+        let limits = Limits {
+            refusal_drain_timeout: Duration::from_millis(100),
+            ..Limits::PRODUCTION
+        };
+        let server = TestServer::with_limits(WmCore::new(), limits);
+        let mut client = TestClient::connect(server.path());
+        client.send_line("not json");
+        assert!(
+            client
+                .read_line()
+                .expect("a refusal")
+                .contains(r#""type":"error""#)
+        );
+        assert_eq!(client.read_line(), None, "the refusal is followed by EOF");
+
+        let give_up = std::time::Instant::now() + Duration::from_secs(5);
+        let closed = loop {
+            if client.try_send_line("still here").is_err() {
+                break true;
+            }
+            if std::time::Instant::now() > give_up {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(closed, "the server kept draining past its deadline");
+    }
+
+    /// The oversized-line variant of
+    /// `a_refusal_ends_in_a_clean_close_even_with_requests_still_unread`.
+    /// Well past the cap, so the server's buffered reader cannot happen to
+    /// slurp the tail in the fill that crosses it — which is what let
+    /// `oversized_line_without_newline_is_rejected_not_grown_forever` pass
+    /// most of the time and reset some of the time.
+    #[test]
+    fn an_oversized_line_refusal_ends_in_a_clean_close_with_its_tail_unread() {
+        let server = TestServer::start();
+        let mut client = TestClient::connect(server.path());
+        client.send_raw(&vec![b'a'; MAX_LINE_BYTES + 64 * 1024]);
+
+        assert!(
+            client
+                .read_line()
+                .expect("the server must answer before it closes")
+                .contains(r#""type":"error""#)
+        );
+        assert_eq!(
+            client.read_line(),
+            None,
+            "the close after a refusal must read as EOF, not a reset"
         );
     }
 
