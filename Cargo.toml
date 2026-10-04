@@ -31,9 +31,10 @@ members = ["buoy-common", "wm", "buoy-tag-picker", "buoy-status-bar"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# Let chains (`if let … && …`) stabilised in Rust 1.88, on top of the
-# edition 2024 they require.
-rust-version = "1.88"
+# Tracks the stable release current when it was last raised, not the oldest
+# toolchain that happens to compile: clippy reads this, so a stale floor
+# keeps the newer idioms its lints would suggest switched off.
+rust-version = "1.99"
 authors = ["Nick Booth <n1cck@onlyhams.radio>"]
 license = "RPL-1.5"
 repository = "https://github.com/nkbooth/buoy-wm"
