@@ -36,7 +36,7 @@ Source2:        buoy.desktop
 ExclusiveArch:  x86_64 aarch64
 
 BuildRequires:  cargo
-BuildRequires:  rust >= 1.85
+BuildRequires:  rust >= 1.88
 BuildRequires:  gcc
 BuildRequires:  pkgconfig(wayland-client)
 

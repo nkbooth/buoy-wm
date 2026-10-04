@@ -322,7 +322,9 @@ fn accept_loop(
             }
             Err(e) => {
                 consecutive_errors = consecutive_errors.saturating_add(1);
-                if consecutive_errors == 1 || consecutive_errors % ACCEPT_ERROR_LOG_INTERVAL == 0 {
+                if consecutive_errors == 1
+                    || consecutive_errors.is_multiple_of(ACCEPT_ERROR_LOG_INTERVAL)
+                {
                     log_err!("accept error (consecutive: {consecutive_errors}), backing off: {e}");
                 }
                 // A persistent EMFILE/ENFILE would otherwise make this a

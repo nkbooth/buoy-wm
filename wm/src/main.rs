@@ -152,10 +152,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // out. Still skipped by `std::process::exit` and by signals, which
     // this binary handles nowhere; under `$XDG_RUNTIME_DIR` (tmpfs,
     // cleared at logout) a leftover inode is cosmetic.
-    if let Some(socket_path) = ipc_socket {
-        if let Err(e) = std::fs::remove_file(&socket_path) {
-            log_err!("Failed to remove the IPC socket at {socket_path:?}: {e}");
-        }
+    if let Some(socket_path) = ipc_socket
+        && let Err(e) = std::fs::remove_file(&socket_path)
+    {
+        log_err!("Failed to remove the IPC socket at {socket_path:?}: {e}");
     }
 
     // Reported here rather than returned: `main`'s `Box<dyn Error>` return

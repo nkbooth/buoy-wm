@@ -196,14 +196,14 @@ pub fn run_dmenu(program: &str, request: &LauncherRequest<'_>) -> Result<Launche
     // that used to sit here claimed the join was what kept it from being
     // silently dropped, which `let _ = handle.join()` was never doing
     // (audit finding F-05).
-    if let Some(handle) = stdin_writer {
-        if handle.join().is_err() {
-            // The payload is not decoded here: this process installs no
-            // panic hook, so the default one has already written the
-            // message and its `file:line` to stderr. What was missing was
-            // any statement that the *input* is therefore incomplete.
-            log_err!("the thread feeding `{program}` its input panicked; its input is incomplete");
-        }
+    if let Some(handle) = stdin_writer
+        && handle.join().is_err()
+    {
+        // The payload is not decoded here: this process installs no
+        // panic hook, so the default one has already written the
+        // message and its `file:line` to stderr. What was missing was
+        // any statement that the *input* is therefore incomplete.
+        log_err!("the thread feeding `{program}` its input panicked; its input is incomplete");
     }
 
     result

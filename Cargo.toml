@@ -31,8 +31,9 @@ members = ["buoy-common", "wm", "buoy-tag-picker", "buoy-status-bar"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# Edition 2024 stabilised in Rust 1.85; nothing here needs anything newer.
-rust-version = "1.85"
+# Let chains (`if let … && …`) stabilised in Rust 1.88, on top of the
+# edition 2024 they require.
+rust-version = "1.88"
 authors = ["Nick Booth <n1cck@onlyhams.radio>"]
 license = "RPL-1.5"
 repository = "https://github.com/nkbooth/buoy-wm"
