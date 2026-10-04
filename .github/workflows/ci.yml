@@ -55,7 +55,7 @@ jobs:
 
       # Pinned to a SHA, so the toolchain has to be named explicitly —
       # `@stable` used to carry that meaning in the ref itself.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
           # `llvm-tools-preview` is what `cargo llvm-cov` reads the raw
@@ -148,7 +148,7 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: ./.github/actions/setup-build-deps
