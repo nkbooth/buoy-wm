@@ -35,6 +35,10 @@ if [ ! -f "$UNIT" ]; then
     echo "$UNIT: missing" >&2
     exit 1
 fi
+if [ ! -r "$UNIT" ]; then
+    echo "$UNIT: unreadable" >&2
+    exit 1
+fi
 
 # BindsTo= is what lets a manually started buoy-session.target pull in
 # graphical-session.target (RefuseManualStart=yes), and what lets stopping
@@ -46,30 +50,49 @@ BindsTo=graphical-session.target
 Wants=graphical-session-pre.target
 After=graphical-session-pre.target'
 
-# Everything that is not a `#` comment or a blank line: the RPL header is
-# comments, systemd ignores both, so this is what the manager actually reads.
+# Deliberately stricter than systemd's parser: only `#` comment lines and
+# blank lines are set aside (the RPL header is the former), and everything
+# else has to match the expected body byte for byte. `;` comments, indented
+# comments, trailing whitespace and line continuations are all legal to
+# systemd and all rejected here, because the unit is ours and there is no
+# reason for it to contain any of them. `|| true` because grep exits 1 when
+# nothing is left, as on a comments-only file, and that case should fall
+# through to the diff rather than die silently.
 actual="$(grep -v -e '^#' -e '^$' "$UNIT" || true)"
 
-if ! diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"); then
-    echo "$UNIT: directives differ from the expected unit (expected < > actual)" >&2
+if ! diff -u --label expected --label actual \
+    <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2; then
+    echo "$UNIT: directives differ from the expected unit" >&2
     exit 1
 fi
 
 if ! command -v systemd-analyze >/dev/null 2>&1; then
     echo "systemd-analyze not found; line check passed, verify --user skipped"
+    # Surfaced in the Actions summary so a runner image that drops systemd
+    # does not switch this half of the test off silently.
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        echo "::warning file=tests/buoy-session-target.sh::systemd-analyze not found; verify --user skipped"
+    fi
     exit 0
 fi
 
-# verify refuses to run without a runtime directory ("Failed to lookup
-# RuntimeDirectory path"), and GitHub runners do not set one. An empty
-# temporary directory is enough: no user manager and no bus are needed.
-if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+# verify refuses to run without a usable runtime directory ("Failed to
+# lookup RuntimeDirectory path" when unset, "Failed to create directory"
+# when set to a path that does not exist), and GitHub runners do not set
+# one. An empty temporary directory is enough: no user manager and no bus
+# are needed.
+if [ ! -d "${XDG_RUNTIME_DIR:-}" ]; then
     runtime_dir="$(mktemp -d)"
     trap 'rm -rf "$runtime_dir"' EXIT
     export XDG_RUNTIME_DIR="$runtime_dir"
 fi
 
-if ! output="$(systemd-analyze verify --user "$UNIT" 2>&1)" || [ -n "$output" ]; then
+# Log level and colour are pinned because any output fails the test: an
+# inherited SYSTEMD_LOG_LEVEL=debug prints hundreds of lines for a valid
+# unit, while the "ignoring" lines this check relies on are warnings and
+# still appear at this level.
+if ! output="$(SYSTEMD_LOG_LEVEL=warning SYSTEMD_LOG_COLOR=false \
+    systemd-analyze verify --user "$UNIT" 2>&1)" || [ -n "$output" ]; then
     printf '%s\n' "$output" >&2
     echo "$UNIT: systemd-analyze verify --user reported a problem" >&2
     exit 1
