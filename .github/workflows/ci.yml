@@ -196,7 +196,16 @@ jobs:
         run: zizmor --offline .github/workflows .github/actions
 
       - name: shellcheck
-        run: shellcheck scripts/install.sh .devcontainer/post-create.sh
+        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh
+
+      # The session target is one directive away from a login that never
+      # starts the portals. The line-by-line assert is the gate;
+      # `systemd-analyze verify --user` runs behind it on this runner but
+      # exits 0 on most mistakes (an unknown key, a bad dependency), so the
+      # script treats any output from it as a failure rather than trusting
+      # its status.
+      - name: buoy-session.target
+        run: tests/buoy-session-target.sh
 
       # Runs the same pinned gitleaks revision the pre-commit config uses,
       # so there is one version of this check rather than two that drift.
