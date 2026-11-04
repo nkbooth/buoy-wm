@@ -157,9 +157,12 @@ pre-commit hook checks for it rather than any attempt to factor it out.
 ## ADR-010: The session entry supervises buoy-wm; it does not exec it
 **Date:** 2026-11-03
 **Status:** Accepted
-**Decision:** `wayland-sessions/buoy.desktop` runs `buoy-session`, a POSIX
-sh supervisor, rather than `river -c buoy-wm` directly. The supervisor
-imports `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`,
+**Decision:** `wayland-sessions/buoy.desktop` runs
+`river -c /usr/libexec/buoy-wm/buoy-session`. River is still what the
+display manager starts; what changes is its init child, which becomes
+`buoy-session`, a POSIX sh supervisor installed beside the three binaries
+and resolving `buoy-wm` as its sibling, rather than `buoy-wm` itself. The
+supervisor imports `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`,
 `XDG_SESSION_TYPE` and `XDG_SESSION_DESKTOP` into the systemd user manager
 and the D-Bus activation environment, starts `buoy-session.target` (bound to
 `graphical-session.target`), runs the WM as a child, forwards termination
@@ -269,15 +272,20 @@ costs nothing today. Fedora 44 and 45 ship 1.99.1 and are unaffected.
 `Cargo.toml`, so the guard follows the manifest. A dependency bump that
 raises the lockfile's effective MSRV above the floor fails that job, which
 is the intended signal: either find a version that fits or make a conscious
-decision to drop a distribution. Release packages are still built with a
-pinned rustup toolchain in CI; this ADR is about what a *user's* toolchain
-can rebuild.
+decision to drop a distribution. Distribution packages — the RPM and the
+`.deb` — are built inside their distribution's container with that
+distribution's own rustc, which is exactly what this floor guarantees;
+only the release tarball uses a pinned rustup toolchain, so that what ships
+as a bare binary is reproducible independent of any distribution's
+packaging cadence.
 
 ## ADR-015: The glibc floor is set by a container, never a runner label
 **Date:** 2026-11-03
 **Status:** Accepted
 **Decision:** `release.yml` jobs run on the current Ubuntu LTS runner label
-(`ubuntu-24.04` today) purely as a host. The release tarball is built inside
+(`ubuntu-24.04` at the time of this decision; the move off `ubuntu-22.04`
+is Story 5.4 of the release plan and had not landed when this was written)
+purely as a host. The release tarball is built inside
 the oldest-glibc container in the supported matrix (`ubuntu:26.04`, glibc
 2.43), and `docs/PACKAGING.md` states that floor. Each distribution package
 is built in its own distribution's container.
