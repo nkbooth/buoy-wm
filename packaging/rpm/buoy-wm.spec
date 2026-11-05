@@ -31,7 +31,6 @@ License:        RPL-1.5
 URL:            https://github.com/nkbooth/buoy-wm
 Source0:        %{url}/archive/refs/tags/v%{version}/%{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.gz
-Source2:        buoy.desktop
 
 ExclusiveArch:  x86_64 aarch64
 
@@ -39,16 +38,30 @@ BuildRequires:  cargo
 BuildRequires:  rust >= 1.99
 BuildRequires:  gcc
 BuildRequires:  pkgconfig(wayland-client)
+# %%{_userunitdir} (escaped: rpm expands macros even in comments); the
+# macros package also carries the file triggers that reload the user
+# manager when a unit is installed or removed.
+BuildRequires:  systemd-rpm-macros
 
-# Every runtime program is a Recommends, not a Requires, deliberately.
-# river 0.4 (the version speaking river-window-management-v1) is not in
-# Fedora at the time of writing, and a hard Requires on a `river` that
-# resolves to river-classic 0.3 would make this package both uninstallable
-# and wrong. The README lists the same set for users installing by hand.
-Recommends:     river >= 0.4
+# river is a hard dependency: the session entry runs `river -c` and the
+# package is meaningless without it. Fedora 44 and 45 ship river 0.5.0 in
+# the archive (0.4 is the first release speaking
+# river-window-management-v1). The supervisor calls systemctl and
+# dbus-update-activation-environment on every login, so their packages are
+# required too. Everything else the WM drives is a Recommends: each can be
+# swapped through the config file, and the README lists the same set for
+# users installing by hand.
+Requires:       river >= 0.4
+Requires:       systemd
+Requires:       dbus-tools
 Recommends:     foot
 Recommends:     zellij
 Recommends:     fuzzel
+# The two backends buoy-portals.conf names. Without them the portal only
+# logs "Requested backend wlr does not exist" at info level and screen
+# sharing is silently absent.
+Recommends:     xdg-desktop-portal-wlr
+Recommends:     xdg-desktop-portal-gtk
 Suggests:       waybar
 
 %description
@@ -60,6 +73,11 @@ the keyboard and every binding is rebindable through one TOML file.
 
 Ships three binaries: the window manager, a fuzzel-driven tag picker, and a
 waybar buoy-status-bar feeder.
+
+Also installs a `buoy` session for the display manager: river starts a
+supervisor that imports the session into systemd and D-Bus, keeps
+buoy-session.target up exactly as long as the window manager runs, and
+routes screen capture through the wlroots portal backend.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -87,12 +105,19 @@ install -m 0755 -t %{buildroot}%{_libexecdir}/%{name} \
     target/release/buoy-wm \
     target/release/buoy-tag-picker \
     target/release/buoy-status-bar
+# The supervisor sits beside the binaries because it resolves buoy-wm as
+# its own sibling (ADR-010); it is deliberately not on PATH.
+install -Dpm 0755 packaging/buoy-session %{buildroot}%{_libexecdir}/%{name}/buoy-session
 
 install -d %{buildroot}%{_bindir}
 ln -s %{_libexecdir}/%{name}/buoy-wm %{buildroot}%{_bindir}/buoy-wm
 
-install -Dpm 0644 %{SOURCE2} \
-    %{buildroot}%{_datadir}/wayland-sessions/buoy.desktop
+# The session files come from the unpacked source tree rather than
+# separate Source files, so the spec has one input besides the vendored
+# crates and release.yml has one archive to produce.
+install -Dpm 0644 packaging/buoy.desktop %{buildroot}%{_datadir}/wayland-sessions/buoy.desktop
+install -Dpm 0644 packaging/buoy-session.target %{buildroot}%{_userunitdir}/buoy-session.target
+install -Dpm 0644 packaging/buoy-portals.conf %{buildroot}%{_datadir}/xdg-desktop-portal/buoy-portals.conf
 
 install -Dpm 0644 docs/config.example.toml \
     %{buildroot}%{_datadir}/%{name}/config.example.toml
@@ -108,7 +133,13 @@ cargo test --workspace --release --offline --locked
 %{_libexecdir}/%{name}/buoy-wm
 %{_libexecdir}/%{name}/buoy-tag-picker
 %{_libexecdir}/%{name}/buoy-status-bar
+%{_libexecdir}/%{name}/buoy-session
 %{_datadir}/wayland-sessions/buoy.desktop
+%{_userunitdir}/buoy-session.target
+# Co-owned with xdg-desktop-portal, as sway does: that package is only a
+# Recommends away, so the directory would otherwise be unowned.
+%dir %{_datadir}/xdg-desktop-portal
+%{_datadir}/xdg-desktop-portal/buoy-portals.conf
 %dir %{_datadir}/%{name}
 %{_datadir}/%{name}/config.example.toml
 
