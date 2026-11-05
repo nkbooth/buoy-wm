@@ -38,9 +38,9 @@ BuildRequires:  cargo
 BuildRequires:  rust >= 1.99
 BuildRequires:  gcc
 BuildRequires:  pkgconfig(wayland-client)
-# %%{_userunitdir} (escaped: rpm expands macros even in comments); the
-# macros package also carries the file triggers that reload the user
-# manager when a unit is installed or removed.
+# %%{_userunitdir} (escaped: rpm expands macros even in comments). The
+# file triggers that reload the user manager when a unit is installed or
+# removed are in the systemd package itself, which is Required below.
 BuildRequires:  systemd-rpm-macros
 
 # river is a hard dependency: the session entry runs `river -c` and the

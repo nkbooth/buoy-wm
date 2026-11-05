@@ -95,8 +95,14 @@ forbid '^Recommends:[[:space:]]+river' 'river is a hard dependency: the session 
 forbid '^Source2:' 'the session entry comes from the source tree, not a separate Source'
 forbid '%\{SOURCE2\}' 'the session entry comes from the source tree, not a separate Source'
 forbid 'not in Fedora' 'stale: Fedora 44 and 45 ship river 0.5.0'
+# The comment that justified `Recommends: river` wrapped "not in Fedora"
+# across two lines, so the forbid above never saw it; this phrase from the
+# same paragraph sits on one line.
+forbid 'river-classic' 'stale: the river in Fedora 44 and 45 is 0.5.0, not river-classic'
 
-# Only buoy-wm is on PATH; the supervisor and the helpers are libexec-only.
+# Only buoy-wm is on PATH, and it must stay there: the supervisor and the
+# helpers are libexec-only.
+require_line '%{_bindir}/buoy-wm'
 # `|| true`: the second grep exits 1 when nothing is left, which is the
 # passing case.
 extra_bindir="$(grep -E '^%\{_bindir\}/' "$SPEC" | grep -vx '%{_bindir}/buoy-wm' || true)"
