@@ -22,7 +22,7 @@
 class BuoyWm < Formula
   desc "Keyboard-driven window manager for the river Wayland compositor"
   homepage "https://github.com/nkbooth/buoy-wm"
-  url "https://github.com/nkbooth/buoy-wm/archive/refs/tags/v0.1.0.tar.gz"
+  url "https://github.com/nkbooth/buoy-wm/archive/refs/tags/v1.0.0-rc.1.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "RPL-1.5"
   head "https://github.com/nkbooth/buoy-wm.git", branch: "main"

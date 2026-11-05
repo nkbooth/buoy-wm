@@ -19,8 +19,14 @@
 # vendored-crates tarball as Source1. See docs/PACKAGING.md for how to
 # produce it.
 
+# The git tag archive unpacks as %%{name}-%%{upstream_version}/ and the tag
+# keeps its hyphen; rpm Version cannot carry one (ADR-012: 1.0.0-rc.1 is
+# packaged as 1.0.0~rc.1, which sorts before 1.0.0), so Source0 and
+# %%autosetup use the upstream form and Version the tilde form.
+%global upstream_version 1.0.0-rc.1
+
 Name:           buoy-wm
-Version:        0.1.0
+Version:        1.0.0~rc.1
 Release:        1%{?dist}
 Summary:        Keyboard-driven window manager for the river Wayland compositor
 
@@ -29,8 +35,8 @@ Summary:        Keyboard-driven window manager for the river Wayland compositor
 # proper; see docs/PACKAGING.md.
 License:        RPL-1.5
 URL:            https://github.com/nkbooth/buoy-wm
-Source0:        %{url}/archive/refs/tags/v%{version}/%{name}-%{version}.tar.gz
-Source1:        %{name}-%{version}-vendor.tar.gz
+Source0:        %{url}/archive/refs/tags/v%{upstream_version}/%{name}-%{upstream_version}.tar.gz
+Source1:        %{name}-%{upstream_version}-vendor.tar.gz
 
 ExclusiveArch:  x86_64 aarch64
 
@@ -80,7 +86,7 @@ buoy-session.target up exactly as long as the window manager runs, and
 routes screen capture through the wlroots portal backend.
 
 %prep
-%autosetup -n %{name}-%{version}
+%autosetup -n %{name}-%{upstream_version}
 tar -xzf %{SOURCE1}
 mkdir -p .cargo
 cat > .cargo/config.toml <<'EOF'
@@ -144,5 +150,9 @@ cargo test --workspace --release --offline --locked
 %{_datadir}/%{name}/config.example.toml
 
 %changelog
+* Thu Nov 05 2026 Nick Booth <n1cck@onlyhams.radio> - 1.0.0~rc.1-1
+- First release candidate: the packaged buoy session (supervisor, user
+  target, portal routing) and the RC version mapping
+
 * Thu Aug 20 2026 Nick Booth <n1cck@onlyhams.radio> - 0.1.0-1
 - Initial package

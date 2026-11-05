@@ -68,6 +68,14 @@ require_line 'install -Dpm 0644 packaging/buoy.desktop %{buildroot}%{_datadir}/w
 require_line 'install -Dpm 0644 packaging/buoy-session.target %{buildroot}%{_userunitdir}/buoy-session.target'
 require_line 'install -Dpm 0644 packaging/buoy-portals.conf %{buildroot}%{_datadir}/xdg-desktop-portal/buoy-portals.conf'
 
+# Two version forms (ADR-012): Version: carries the tilde (1.0.0~rc.1
+# sorts before 1.0.0), but the tag archive unpacks as buoy-wm-1.0.0-rc.1/,
+# so Source0, Source1 and %autosetup must use the upstream (hyphen) form
+# or %prep fails on the first release candidate.
+require_tag Source0 '%\{url\}/archive/refs/tags/v%\{upstream_version\}/%\{name\}-%\{upstream_version\}\.tar\.gz'
+require_tag Source1 '%\{name\}-%\{upstream_version\}-vendor\.tar\.gz'
+require_line '%autosetup -n %{name}-%{upstream_version}'
+
 # %files: the installed paths, and the portal directory co-owned with
 # xdg-desktop-portal because that package is only a Recommends away.
 require_line '%{_libexecdir}/%{name}/buoy-session'
@@ -99,6 +107,7 @@ forbid 'not in Fedora' 'stale: Fedora 44 and 45 ship river 0.5.0'
 # across two lines, so the forbid above never saw it; this phrase from the
 # same paragraph sits on one line.
 forbid 'river-classic' 'stale: the river in Fedora 44 and 45 is 0.5.0, not river-classic'
+forbid '%\{name\}-%\{version\}' 'the tag archive unpacks with the upstream (hyphen) form, not the tilde Version'
 
 # Only buoy-wm is on PATH, and it must stay there: the supervisor and the
 # helpers are libexec-only.

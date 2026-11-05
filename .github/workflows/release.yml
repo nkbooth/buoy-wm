@@ -55,12 +55,15 @@ jobs:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       # First, before the tag is used as a ref, a filename or a shell word.
-      # `workflow_dispatch` input is arbitrary text; the `v*` filter on tag
-      # pushes is not a version check.
-      - name: Validate the tag
+      # The grammar lives in scripts/release-version.sh, which ci.yml tests
+      # on every push and which is not checked out yet, so this only
+      # refuses text that is not even tag-shaped. `workflow_dispatch` input
+      # is arbitrary text; the `v*` filter on tag pushes is not a version
+      # check.
+      - name: Refuse a tag that is not tag-shaped
         run: |
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::tag '$TAG' is not of the form v1.2.3"
+          if [[ ! "$TAG" =~ ^v[0-9A-Za-z.-]+$ ]]; then
+            echo "::error::tag '$TAG' is not tag-shaped"
             exit 1
           fi
 
@@ -72,38 +75,31 @@ jobs:
           # whole job — including for third-party build scripts.
           persist-credentials: false
 
+      # vX.Y.Z or vX.Y.Z-rc.N and nothing else (ADR-012). Prints the Cargo,
+      # RPM, Debian and formula forms into the log.
+      - name: Validate the tag
+        run: scripts/release-version.sh "$TAG"
+
+      # A tag whose version disagrees with a manifest produces a release
+      # that installs as a different version than it claims to be. The
+      # script is the one grammar and the one compare: it checks every
+      # manifest and reports every mismatch, and ci.yml runs it on every
+      # push with the tag derived from Cargo.toml, so this step only fails
+      # on a tag that disagrees with a tree that agrees with itself. The
+      # values are extracted with sed, never `eval`: this job holds
+      # `contents: write` and `id-token: write`.
+      - name: Check tag matches every packaged version
+        run: |
+          scripts/release-version.sh --check "$TAG"
+          mapping="$(scripts/release-version.sh "$TAG")"
+          echo "VERSION=$(sed -n 's/^cargo=//p' <<<"$mapping")" >> "$GITHUB_ENV"
+          echo "PRERELEASE=$(sed -n 's/^prerelease=//p' <<<"$mapping")" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
 
       - uses: ./.github/actions/setup-build-deps
-
-      # A tag whose version disagrees with a manifest produces a release
-      # that installs as a different version than it claims to be. All
-      # three manifests are checked, not just Cargo.toml: only the git tag
-      # was guarded before, which left the RPM spec and the Homebrew
-      # formula free to drift.
-      - name: Check tag matches every packaged version
-        run: |
-          version="${TAG#v}"
-          manifest="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
-          spec="$(grep -m1 '^Version:' packaging/rpm/buoy-wm.spec | awk '{print $2}')"
-          formula="$(grep -m1 -oE 'tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' packaging/homebrew/buoy-wm.rb \
-            | sed -E 's:tags/v(.*)\.tar\.gz:\1:')"
-          mismatch=0
-          # Report every mismatch, not just the first: a version bump that
-          # missed two files should take one fix, not two failed releases.
-          check_version() {
-            if [[ "$2" != "$version" ]]; then
-              echo "::error::tag $TAG does not match $1 version '$2'"
-              mismatch=1
-            fi
-          }
-          check_version Cargo.toml "$manifest"
-          check_version packaging/rpm/buoy-wm.spec "$spec"
-          check_version packaging/homebrew/buoy-wm.rb "$formula"
-          [[ "$mismatch" -eq 0 ]] || exit 1
-          echo "VERSION=$manifest" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --workspace --release --locked
@@ -140,8 +136,10 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" --clobber "$ARCHIVE" "$ARCHIVE.sha256"
           else
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --generate-notes \
-              "$ARCHIVE" "$ARCHIVE.sha256"
+            flags=(--title "$TAG" --generate-notes)
+            # An rc.N tag is a pre-release on GitHub too (ADR-012, Story 4.9).
+            if [[ "$PRERELEASE" == yes ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$TAG" "${flags[@]}" "$ARCHIVE" "$ARCHIVE.sha256"
           fi
