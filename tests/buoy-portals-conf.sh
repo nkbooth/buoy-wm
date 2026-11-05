@@ -57,15 +57,18 @@ org.freedesktop.impl.portal.Screenshot=wlr'
 # should fall through to the diff rather than die silently.
 actual="$(grep -v -e '^#' -e '^$' "$CONF" || true)"
 
-if ! diff -u --label expected --label actual \
-    <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2; then
-    echo "$CONF: routing differs from the expected body" >&2
+# Checked before the diff so that the failure names the cause: the diff
+# below would reject `none` too, but only as "routing differs". `-w` so
+# that `;` and `=` count as word boundaries. A here-string rather than a
+# pipe: `grep -q` closes its input on the first match, and under
+# `pipefail` the writer's SIGPIPE would turn a found `none` into "absent".
+if grep -qw none <<<"$actual"; then
+    echo "$CONF: 'none' disables an interface in xdg-desktop-portal >= 1.22; remove it" >&2
     exit 1
 fi
 
-# The diff above already rejects `none`; this check exists so that the
-# failure says why. `-w` so that `;` and `=` count as word boundaries.
-if printf '%s\n' "$actual" | grep -qw none; then
-    echo "$CONF: 'none' disables an interface in xdg-desktop-portal >= 1.22; remove it" >&2
+if ! diff -u --label expected --label actual \
+    <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2; then
+    echo "$CONF: routing differs from the expected body" >&2
     exit 1
 fi
