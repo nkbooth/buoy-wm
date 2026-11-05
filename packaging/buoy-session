@@ -1,0 +1,83 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: RPL-1.5
+#
+# Unless explicitly acquired and licensed from Licensor under another
+# license, the contents of this file are subject to the Reciprocal Public
+# License ("RPL") Version 1.5, or subsequent versions as allowed by the
+# RPL, and You may not copy or use this file in either source code or
+# executable form, except in compliance with the terms and conditions of
+# the RPL.
+#
+# All software distributed under the RPL is provided strictly on an "AS
+# IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+# LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+# LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+# language governing rights and limitations under the RPL.
+#
+# The packaged session's init: river runs this file (`river -c
+# /usr/libexec/buoy-wm/buoy-session`) as a process-group leader once its
+# Wayland socket exists, so WAYLAND_DISPLAY is already set here.
+#
+# It supervises buoy-wm instead of exec'ing it (ADR-010). An exec'd WM
+# has nobody left to stop buoy-session.target when it exits, so the
+# portals and everything else bound to graphical-session.target keep
+# running against a dead socket into the next login. Keeping this shell
+# alive costs one process and lets the target follow the WM's lifetime.
+#
+# The WM runs in the background and is `wait`ed on, rather than in the
+# foreground, so that a signal to this pid alone is forwarded: a shell
+# defers a trap while a foreground child runs, and river only SIGTERMs
+# the whole group on its own exit. INT and HUP are forwarded as TERM
+# because an asynchronous child of a non-interactive shell ignores SIGINT
+# (POSIX XCU 2.11) and buoy-wm handles no signal anyway, so SIGTERM's
+# default action is the only way it ever ends.
+#
+# No `set -e`: a systemd problem must degrade the session (no portals),
+# never abort the login with no shell left to recover from. Every systemd
+# step is reported on stderr, which lands in the journal, and skipped.
+set -u
+
+# buoy-wm is a sibling of this file, never a PATH lookup, so the three
+# binaries always come from the same installed directory.
+wm_dir=$(dirname -- "$0")
+session_vars='WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP'
+
+# All five names are passed unconditionally: both tools ignore a name that
+# is not set in the environment (DISPLAY is unset without Xwayland).
+# shellcheck disable=SC2086  # $session_vars is a deliberate word list
+systemctl --user import-environment $session_vars \
+    || echo 'buoy-session: systemctl --user import-environment failed; portals may not see the session' >&2
+# shellcheck disable=SC2086
+dbus-update-activation-environment --systemd $session_vars \
+    || echo 'buoy-session: dbus-update-activation-environment failed' >&2
+systemctl --user start buoy-session.target \
+    || echo 'buoy-session: could not start buoy-session.target' >&2
+
+# The traps are installed right before the launch, not earlier: a TERM
+# during the systemd steps then kills this script with nothing started,
+# which is the right outcome when river is already going away.
+"$wm_dir/buoy-wm" &
+wm_pid=$!
+
+signalled=0
+trap 'signalled=1; kill -s TERM "$wm_pid" 2>/dev/null || :' TERM INT HUP
+
+# A trapped signal returns from `wait` before the WM has gone, so wait
+# again in that case only. The flag decides, not the status: a second wait
+# on a pid whose status was already reported is 127 in bash (dash repeats
+# the status), so re-waiting unconditionally would lose the real status.
+while :; do
+    signalled=0
+    wait "$wm_pid"
+    status=$?
+    [ "$signalled" -eq 1 ] || break
+done
+
+# The traps stay installed: a second signal during the stop is forwarded to
+# a pid that is gone (a no-op) instead of killing this script before it
+# can exit with the WM's status.
+systemctl --user stop buoy-session.target \
+    || echo 'buoy-session: could not stop buoy-session.target' >&2
+exit "$status"
