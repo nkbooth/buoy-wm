@@ -196,7 +196,7 @@ jobs:
         run: zizmor --offline .github/workflows .github/actions
 
       - name: shellcheck
-        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh
+        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh
 
       # The session target is one directive away from a login that never
       # starts the portals. The line-by-line assert is the gate;
@@ -206,6 +206,14 @@ jobs:
       # its status.
       - name: buoy-session.target
         run: tests/buoy-session-target.sh
+
+      # One `none` in a portals.conf list switches that interface off
+      # (xdg-desktop-portal checks for it before trying any backend listed
+      # ahead of it) and the portal only reports it at debug level, so the
+      # file is asserted line by line here. There is no portals.conf
+      # validator on this runner.
+      - name: buoy-portals.conf
+        run: tests/buoy-portals-conf.sh
 
       # Runs the same pinned gitleaks revision the pre-commit config uses,
       # so there is one version of this check rather than two that drift.
