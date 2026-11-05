@@ -63,12 +63,15 @@ repos:
       # 16-line block is replicated deliberately and must not be
       # deduplicated (ADR-009). A new file that forgot it is the failure
       # mode a hook can actually catch. `wm/protocol/*.xml` is excluded:
-      # vendored MIT third-party, see NOTICE.md.
+      # vendored MIT third-party, see NOTICE.md. The alternation names the
+      # extension-less supervisor because an extension cannot match it;
+      # everything else is matched by extension so a new packaging file is
+      # gated without editing this line.
       - id: licence-header
         name: RPL-1.5 licence header present
         language: system
         entry: scripts/check-licence-header.sh
-        files: \.(rs|toml|ya?ml|sh|json|rb|spec)$
+        files: \.(rs|toml|ya?ml|sh|json|rb|spec|target|conf|desktop)$|^packaging/buoy-session$
         exclude: ^wm/protocol/
   # Purely preventive — nothing is leaking today. CI's `hygiene` job runs
   # this same pinned revision so there is one version of the check rather

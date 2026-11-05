@@ -196,7 +196,7 @@ jobs:
         run: zizmor --offline .github/workflows .github/actions
 
       - name: shellcheck
-        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh
+        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh
 
       # The session target is one directive away from a login that never
       # starts the portals. The line-by-line assert is the gate;
@@ -214,6 +214,23 @@ jobs:
       # validator on this runner.
       - name: buoy-portals.conf
         run: tests/buoy-portals-conf.sh
+
+      # The supervisor is the login path (NFR4): a regression here is a
+      # black screen, not a failing test somewhere else. The stub-based
+      # test asserts its systemd calls, signal forwarding and exit status;
+      # the runner's /bin/sh is dash, so this is also where the script's
+      # POSIX claim is exercised on every push (the test warns if that
+      # ever stops being true).
+      - name: buoy-session
+        run: tests/buoy-session.sh
+
+      # RPL 1.5 §6.4(a) requires the notice in every source file. The
+      # pre-commit hook is the only list of gated files; running it here
+      # rather than naming files again means one list, not two that
+      # drift. Commits happen on the host, where pre-commit is not
+      # installed as a git hook, so this step is the one that always runs.
+      - name: licence-header
+        run: pre-commit run --all-files licence-header
 
       # Runs the same pinned gitleaks revision the pre-commit config uses,
       # so there is one version of this check rather than two that drift.

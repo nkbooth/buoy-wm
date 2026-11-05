@@ -20,7 +20,10 @@
 # identifier near its top. RPL 1.5 §6.4(a) requires the notice to travel
 # with every source file, which is why the 16-line block is replicated
 # across the tree rather than deduplicated — the only part of that which
-# can be automated is noticing a new file that forgot it.
+# can be automated is noticing a new file that forgot it. The set of files
+# checked is the `licence-header` hook's `files:` regex in
+# .pre-commit-config.yaml, which CI's `hygiene` job runs with
+# `pre-commit run --all-files licence-header`.
 #
 # Scanned window rather than a fixed line: wm/src/main.rs carries a
 # third-party attribution notice above its SPDX line (see NOTICE.md).

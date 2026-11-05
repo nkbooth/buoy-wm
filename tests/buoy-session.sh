@@ -37,9 +37,11 @@
 # deliberately not on PATH).
 #
 # Invoked directly, through its own shebang, so a `/bin/sh` that is bash
-# (Fedora) hides bashisms; the POSIX claim is only tested where `/bin/sh`
-# is dash, e.g. `bash /w/tests/buoy-session.sh` in a `debian:stable-slim`
-# container (Story 4.3 wires this file into CI).
+# (Fedora, this host) hides bashisms. The POSIX claim is exercised where
+# `/bin/sh` is dash: the `hygiene` job on `ubuntu-latest` (Ubuntu 26.04)
+# and, locally, a one-shot `ubuntu:26.04` or `debian:stable-slim`
+# container (`bash /w/tests/buoy-session.sh`). Under GITHUB_ACTIONS the
+# test warns if the runner's `/bin/sh` is ever not dash.
 #
 # A supervisor that outlives its case must be reaped before the stub
 # directory goes away: once `$tmp/bin` is gone, its `systemctl --user
@@ -62,6 +64,20 @@ fi
 if [ ! -x "$SCRIPT" ]; then
     echo "$SCRIPT: not executable (river runs it through its shebang)" >&2
     exit 1
+fi
+
+# A runner image whose /bin/sh is not dash would pass this test while
+# proving nothing about the supervisor's POSIX claim, so say which shell
+# ran it and annotate the run; bash-as-sh still proves the contract, dash
+# is the extra coverage, so this is a warning, not a failure (same
+# reasoning as the systemd-analyze warning in buoy-session-target.sh).
+sh_path="$(readlink -f /bin/sh)"
+readonly sh_path
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "/bin/sh is $sh_path"
+    if [ "$(basename "$sh_path")" != dash ]; then
+        echo "::warning file=tests/buoy-session.sh::/bin/sh is $sh_path, not dash; the POSIX claim of packaging/buoy-session is not exercised by this run"
+    fi
 fi
 
 tmp="$(mktemp -d)"
