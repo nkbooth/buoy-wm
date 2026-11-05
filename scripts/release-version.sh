@@ -159,10 +159,11 @@ expect_value() {
 }
 
 # Returns 1 after reporting, so a missing manifest is one line and the
-# remaining manifests are still checked.
+# remaining manifests are still checked. `-f` as well as `-r`: a directory
+# passes `-r`, and sed's read error would then abort the run under set -e.
 readable() {
     local relpath=$1
-    if [ ! -r "$tree/$relpath" ]; then
+    if [ ! -f "$tree/$relpath" ] || [ ! -r "$tree/$relpath" ]; then
         report "$relpath" "missing or unreadable, tag $tag needs it"
         return 1
     fi
@@ -215,7 +216,7 @@ check_spec() {
     rpm_re="${rpm//./\\.}"
     if ! grep -Eq "^\* .* - ${rpm_re}-${release}\$" "$file"; then
         entry="$(sed -n '/^%changelog/,$ s/^\* .* - \([^ ]*\)$/\1/p' "$file" | head -n1)"
-        report_mismatch "$MANIFEST_SPEC" '%changelog top entry' "$entry" "$rpm-$release"
+        report_mismatch "$MANIFEST_SPEC" '%changelog' "$entry" "$rpm-$release"
     fi
 }
 
@@ -237,7 +238,15 @@ else
         report "$MANIFEST_CARGO" "missing or unreadable, needed to derive the tag"
         exit 1
     fi
-    tag="v$(workspace_version "$tree/$MANIFEST_CARGO")"
+    derived="$(workspace_version "$tree/$MANIFEST_CARGO")"
+    # A version line that is absent or outside the grammar is a Cargo.toml
+    # finding, reported like any other so it carries the file annotation;
+    # map_tag's message would name a tag nobody typed.
+    if [[ ! "v$derived" =~ $TAG_RE ]]; then
+        report "$MANIFEST_CARGO" "[workspace.package] version reads '$derived', not X.Y.Z or X.Y.Z-rc.N (ADR-012)"
+        exit 1
+    fi
+    tag="v$derived"
 fi
 
 map_tag "$tag"

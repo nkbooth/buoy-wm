@@ -107,6 +107,8 @@ forbid 'not in Fedora' 'stale: Fedora 44 and 45 ship river 0.5.0'
 # across two lines, so the forbid above never saw it; this phrase from the
 # same paragraph sits on one line.
 forbid 'river-classic' 'stale: the river in Fedora 44 and 45 is 0.5.0, not river-classic'
+# The archive directory is %{name}-%{upstream_version}; the tilde Version
+# in its place fails %prep on the first release candidate (ADR-012).
 forbid '%\{name\}-%\{version\}' 'the tag archive unpacks with the upstream (hyphen) form, not the tilde Version'
 
 # Only buoy-wm is on PATH, and it must stay there: the supervisor and the

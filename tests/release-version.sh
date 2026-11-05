@@ -236,19 +236,39 @@ expect_reject v1.0.0-rc.01
 # Usage errors are not rejections.
 expect_usage
 expect_usage --bogus
+expect_usage --check --tree
+expect_usage v1.0.0 v1.0.1
+
+# --help is asked for, not a mistake: usage on stdout, exit 0.
+run_script --help
+if [ "$rc" -ne 0 ] || ! grep -q '^usage:' "$tmp/out"; then
+    echo "--help: expected usage on stdout and exit 0, got $rc:" >&2
+    cat "$tmp/out" "$tmp/err" >&2
+    status=1
+fi
 
 # A tree that agrees with v1.0.0-rc.1, with and without the tag.
 write_tree "$tmp/good" 1.0.0-rc.1 1.0.0-rc.1 1.0.0~rc.1 1.0.0-rc.1 v1.0.0-rc.1
 expect_check "$tmp/good" v1.0.0-rc.1 0
 expect_check "$tmp/good" '' 0
 
-# A tree still at 0.1.0: every manifest is named in one run.
+# A tree still at 0.1.0: every manifest is named in one run. Each needle
+# carries its file, so a check dropped from one loop cannot be covered by
+# the same name reported from another.
 write_tree "$tmp/old" 0.1.0 0.1.0 0.1.0 0.1.0 v0.1.0
 expect_check "$tmp/old" v1.0.0-rc.1 1 \
-    'Cargo.toml' '[workspace.package]' buoy-common buoy-status-bar buoy-tag-picker \
-    'Cargo.lock' buoy-wm \
-    'packaging/rpm/buoy-wm.spec' 'Version:' upstream_version '%changelog' \
-    'packaging/homebrew/buoy-wm.rb' url
+    'Cargo.toml: [workspace.package] version' \
+    'Cargo.toml: [workspace.dependencies] buoy-common version' \
+    'Cargo.toml: [workspace.dependencies] buoy-status-bar version' \
+    'Cargo.toml: [workspace.dependencies] buoy-tag-picker version' \
+    'Cargo.lock: [[package]] buoy-common version' \
+    'Cargo.lock: [[package]] buoy-status-bar version' \
+    'Cargo.lock: [[package]] buoy-tag-picker version' \
+    'Cargo.lock: [[package]] buoy-wm version' \
+    'packaging/rpm/buoy-wm.spec: Version:' \
+    'packaging/rpm/buoy-wm.spec: %global upstream_version' \
+    'packaging/rpm/buoy-wm.spec: %changelog' \
+    'packaging/homebrew/buoy-wm.rb: url tag'
 expect_check_lines "$tmp/old" v1.0.0-rc.1 -ge 11
 
 # The tilde where the hyphen belongs: %autosetup would fail %prep.
@@ -295,6 +315,27 @@ expect_check "$tmp/empty" v1.0.0-rc.1 1 \
 expect_check_lines "$tmp/empty" v1.0.0-rc.1 -eq 4
 if grep -Eq 'No such file|line [0-9]+:' "$tmp/err"; then
     echo "--check on an empty tree leaks a shell error:" >&2
+    cat "$tmp/err" >&2
+    status=1
+fi
+
+# Tagless --check when the tag cannot be derived: a Cargo.toml finding,
+# not a complaint about a tag nobody typed.
+write_tree "$tmp/beta" 1.0.0-beta 1.0.0-beta 1.0.0~beta 1.0.0-beta v1.0.0-beta
+expect_check "$tmp/beta" '' 1 'Cargo.toml: [workspace.package] version' 1.0.0-beta
+expect_check_lines "$tmp/beta" '' -eq 1
+expect_check "$tmp/empty" '' 1 Cargo.toml
+expect_check_lines "$tmp/empty" '' -eq 1
+
+# A directory where a manifest should be passes -r; it must be reported
+# like a missing file, not abort on sed's read error under set -e.
+cp -r "$tmp/good" "$tmp/dir"
+rm "$tmp/dir/Cargo.lock"
+mkdir "$tmp/dir/Cargo.lock"
+expect_check "$tmp/dir" v1.0.0-rc.1 1 'Cargo.lock: missing or unreadable'
+expect_check_lines "$tmp/dir" v1.0.0-rc.1 -eq 1
+if grep -Eq 'sed:|awk:|grep:|line [0-9]+:' "$tmp/err"; then
+    echo "--check with a directory for Cargo.lock leaks a shell error:" >&2
     cat "$tmp/err" >&2
     status=1
 fi
