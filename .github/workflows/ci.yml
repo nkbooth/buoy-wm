@@ -197,7 +197,7 @@ jobs:
         run: zizmor --offline .github/workflows .github/actions
 
       - name: shellcheck
-        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh tests/buoy-desktop.sh tests/rpm-spec.sh scripts/release-version.sh tests/release-version.sh
+        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh tests/buoy-desktop.sh tests/rpm-spec.sh scripts/release-version.sh tests/release-version.sh scripts/build-rpm.sh tests/build-rpm.sh
 
       # The session target is one directive away from a login that never
       # starts the portals. The line-by-line assert is the gate;
@@ -252,6 +252,13 @@ jobs:
       # on the tag.
       - name: versions agree
         run: scripts/release-version.sh --check
+
+      # The RPM is built only on a tag (release.yml), so the script's
+      # contract — both sources present before rpmbuild runs, a full -bb
+      # with nothing dnf would refuse, the published name with the tag's
+      # hyphen — is proved here on every push against a stub rpmbuild.
+      - name: build-rpm.sh
+        run: tests/build-rpm.sh
 
       # RPL 1.5 §6.4(a) requires the notice in every source file. The
       # pre-commit hook is the only list of gated files; running it here

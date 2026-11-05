@@ -42,6 +42,9 @@
 
 # --- Packaging scratch ---
 /dist/
+# `cargo vendor` in a checkout (release.yml does it on the runner) would
+# otherwise offer tens of megabytes of third-party source to `git add`.
+/vendor/
 
 # Audit reports (/audit skill output) — local analysis, not part of the product.
 /audits/

@@ -15,7 +15,14 @@
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
 #
-# Builds the release tarball on a `v*` tag. See docs/PACKAGING.md for how
+# Builds the release tarball and the Fedora RPM on a `v*` tag and attaches
+# them, the vendored-crates tarball and their checksums to the GitHub
+# release under one build-provenance attestation. Three jobs: `build`
+# makes the tarball on the runner and stages the RPM's two sources,
+# `rpm` builds the package with Fedora's own toolchain in a Fedora
+# container (ADR-011, ADR-014), and `publish` attests and uploads. The
+# write permissions live on `publish` alone, which runs `gh` and the
+# attest action and nothing from the tree. See docs/PACKAGING.md for how
 # this feeds the Homebrew tap and the COPR RPM.
 name: Release
 
@@ -33,6 +40,14 @@ permissions:
 
 env:
   TARGET: x86_64-unknown-linux-gnu
+  # The one place the release tag is read from an expression. Every
+  # step below uses "$TAG", never `${{ }}` inside a `run:` block: GitHub
+  # expands `${{ }}` textually before bash parses the script, so a value
+  # containing a double quote would close the assignment and run the
+  # remainder as shell — including in the job that holds
+  # `contents: write`, `id-token: write` and `attestations: write` and
+  # mints the build-provenance attestations users are told to trust.
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -41,18 +56,10 @@ jobs:
     # glibc floor these binaries impose on users. 22.04 is glibc 2.35.
     runs-on: ubuntu-22.04
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    env:
-      # The one place the release tag is read from an expression. Every
-      # step below uses "$TAG", never `${{ }}` inside a `run:` block:
-      # GitHub expands `${{ }}` textually before bash parses the script, so
-      # a value containing a double quote would close the assignment and
-      # run the remainder as shell — in the one job that holds
-      # `contents: write`, `id-token: write` and `attestations: write` and
-      # mints the build-provenance attestations users are told to trust.
-      TAG: ${{ inputs.tag || github.ref_name }}
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       # First, before the tag is used as a ref, a filename or a shell word.
       # The grammar lives in scripts/release-version.sh, which ci.yml tests
@@ -70,9 +77,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
-          # `gh` below authenticates with GH_TOKEN, not with the git
-          # credential this would otherwise leave in .git/config for the
-          # whole job — including for third-party build scripts.
+          # Nothing in this job needs a git credential, least of all the
+          # third-party build scripts cargo runs; `gh` in `publish`
+          # authenticates with GH_TOKEN.
           persist-credentials: false
 
       # vX.Y.Z or vX.Y.Z-rc.N and nothing else (ADR-012). Prints the Cargo,
@@ -86,14 +93,18 @@ jobs:
       # manifest and reports every mismatch, and ci.yml runs it on every
       # push with the tag derived from Cargo.toml, so this step only fails
       # on a tag that disagrees with a tree that agrees with itself. The
-      # values are extracted with sed, never `eval`: this job holds
-      # `contents: write` and `id-token: write`.
+      # values are extracted with sed, never `eval`. `$GITHUB_ENV` is per
+      # job, so the values the other jobs need also go to `$GITHUB_OUTPUT`.
       - name: Check tag matches every packaged version
+        id: version
         run: |
           scripts/release-version.sh --check "$TAG"
           mapping="$(scripts/release-version.sh "$TAG")"
-          echo "VERSION=$(sed -n 's/^cargo=//p' <<<"$mapping")" >> "$GITHUB_ENV"
-          echo "PRERELEASE=$(sed -n 's/^prerelease=//p' <<<"$mapping")" >> "$GITHUB_ENV"
+          version="$(sed -n 's/^cargo=//p' <<<"$mapping")"
+          prerelease="$(sed -n 's/^prerelease=//p' <<<"$mapping")"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
@@ -120,26 +131,170 @@ jobs:
           cp docs/config.example.toml "dist/$stage/"
           tar -C dist -czf "dist/$stage.tar.gz" "$stage"
           (cd dist && sha256sum "$stage.tar.gz" > "$stage.tar.gz.sha256")
-          echo "ARCHIVE=dist/$stage.tar.gz" >> "$GITHUB_ENV"
 
+      # The spec's %build runs cargo --offline, so the crates arrive as
+      # Source1, the vendored-crates tarball: built here, once, with the
+      # same Cargo.lock the tarball was built from, and published beside
+      # the tarball so a packager can rebuild without the network. The
+      # name is %{name}-%{upstream_version}-vendor.tar.gz with the tag's
+      # hyphen (the spec's Source1). `cargo vendor` prints a config
+      # snippet for a local .cargo/config.toml; the spec's %prep writes
+      # its own, so stdout is dropped. The tarball is reproducible per
+      # tag — sorted names, no owners, the commit date as every mtime,
+      # `gzip -n` for no timestamp in the gzip header — so two runs of one
+      # tag give one digest and the attestation is comparable.
+      - name: Vendor the crates
+        run: |
+          cargo vendor --locked --versioned-dirs vendor >/dev/null
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          vendor="buoy-wm-${VERSION}-vendor.tar.gz"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -I 'gzip -n' -cf "dist/$vendor" vendor
+          (cd dist && sha256sum "$vendor" > "$vendor.sha256")
+
+      # Source0 for the RPM is an archive of the tree this job just
+      # validated and tested, with the prefix %autosetup expects — the same
+      # prefix GitHub's own tag archive uses, so the spec's Source0 URL
+      # serves a packager who fetches it by hand. Building from the
+      # checkout rather than downloading GitHub's archive keeps the job
+      # offline-capable and off the race with archive generation on a
+      # fresh tag (readiness report M-2(b)). These two files are the `rpm`
+      # job's input and are never published: GitHub serves the tag archive
+      # itself and the vendor tarball is already in `dist`.
+      - name: Stage the RPM sources
+        run: |
+          mkdir -p rpm-sources
+          git archive --format=tar.gz --prefix="buoy-wm-${VERSION}/" -o "rpm-sources/buoy-wm-${VERSION}.tar.gz" HEAD
+          cp "dist/buoy-wm-${VERSION}-vendor.tar.gz" rpm-sources/
+
+      # Relays between jobs, not the durable copy: the release is. Seven
+      # days is enough to download what `build` and `rpm` made when
+      # `publish` fails. The staging directory under dist/ is not an
+      # asset, hence the two patterns rather than `dist/*`.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rpm-sources
+          path: rpm-sources/*
+          if-no-files-found: error
+          retention-days: 7
+
+  rpm:
+    needs: build
+    # The runner is only the host (ADR-015); the build happens in the
+    # container below with Fedora's rpm, rust and wayland-devel
+    # (ADR-014). 44 is the Fedora release the framework image is built
+    # from, so Story 4.10 can install this RPM there; Story 5.4 turns this
+    # job into the Fedora branch of a matrix over the README's support
+    # table. The image is pinned by tag, not digest, on purpose: the point
+    # of a distribution build is the distribution's current packages,
+    # Dependabot does not bump `container.image`, and zizmor's
+    # unpinned-images audit raises only a pedantic finding for a tag.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    defaults:
+      run:
+        # A container job's default shell is `sh`.
+        shell: bash
+    steps:
+      # git so actions/checkout clones rather than falling back to the
+      # REST download; dnf5-plugins is the package that carries `builddep`
+      # on Fedora 44; rpm-build pulls tar, gzip, zstd, patch, debugedit,
+      # elfutils and binutils itself.
+      - name: Install the build tools
+        run: dnf -y install git-core rpm-build dnf5-plugins
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      # The spec's BuildRequires is the one list of build dependencies
+      # (cargo, rust, gcc, wayland-devel, systemd-rpm-macros); read from
+      # the file that declares them so this job cannot drift from it.
+      - name: Install the spec's BuildRequires
+        run: dnf -y builddep packaging/rpm/buoy-wm.spec
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rpm-sources
+          path: rpm-sources
+
+      # A full `rpmbuild -bb` — %build and %check are the build and the
+      # tests with Fedora's toolchain; no cargo runs outside rpmbuild. The
+      # script publishes the one binary package under the name GitHub will
+      # serve (see its header for the `~` rewrite) with its checksum.
+      - name: Build the RPM
+        run: scripts/build-rpm.sh rpm-sources dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rpm
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [build, rpm]
+    runs-on: ubuntu-24.04
+    permissions:
+      # `gh release create` / `upload`.
+      contents: write
+      # The attest action signs with the job's OIDC identity ...
+      id-token: write
+      # ... and stores the attestation on the repository.
+      attestations: write
+    env:
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+      # No checkout in this job, so `gh` cannot infer the repository from
+      # a remote.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # Both artifacts land flat in dist/: upload-artifact stores files
+      # relative to the least common ancestor of the matched paths.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rpm
+          path: dist
+
+      # One attestation naming the tarball, the vendor tarball and the
+      # RPM; the .sha256 files are not subjects.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: ${{ env.ARCHIVE }}
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.rpm
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          assets=(dist/*)
           # Idempotent so a re-run after a transient failure replaces the
           # assets instead of erroring on an existing release.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" --clobber "$ARCHIVE" "$ARCHIVE.sha256"
+            gh release upload "$TAG" --clobber "${assets[@]}"
           else
             flags=(--title "$TAG" --generate-notes)
             # An rc.N tag is a pre-release on GitHub too (ADR-012, Story 4.9).
             if [[ "$PRERELEASE" == yes ]]; then
               flags+=(--prerelease)
             fi
-            gh release create "$TAG" "${flags[@]}" "$ARCHIVE" "$ARCHIVE.sha256"
+            gh release create "$TAG" "${flags[@]}" "${assets[@]}"
           fi
