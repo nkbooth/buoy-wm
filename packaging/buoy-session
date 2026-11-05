@@ -44,6 +44,24 @@ set -u
 wm_dir=$(dirname -- "$0")
 session_vars='WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP'
 
+# The traps are installed before the systemd steps, not just before the
+# launch: a shell defers a trap until the foreground command returns, so a
+# TERM during `systemctl start` would otherwise kill this script with the
+# target already started and nobody left to stop it. Before the WM exists
+# the trap stops the target (a no-op if the start never ran) and exits;
+# once it exists the signal is forwarded and the wait loop below carries
+# on. The one-command gap between `&` and `wm_pid=$!` is the only window
+# left, and a signal there kills this script with the WM just launched.
+wm_pid=''
+signalled=0
+trap 'signalled=1
+    if [ -n "$wm_pid" ]; then
+        kill -s TERM "$wm_pid" 2>/dev/null || :
+    else
+        systemctl --user stop buoy-session.target 2>/dev/null || :
+        exit 143
+    fi' TERM INT HUP
+
 # All five names are passed unconditionally: both tools ignore a name that
 # is not set in the environment (DISPLAY is unset without Xwayland).
 # shellcheck disable=SC2086  # $session_vars is a deliberate word list
@@ -55,23 +73,25 @@ dbus-update-activation-environment --systemd $session_vars \
 systemctl --user start buoy-session.target \
     || echo 'buoy-session: could not start buoy-session.target' >&2
 
-# The traps are installed right before the launch, not earlier: a TERM
-# during the systemd steps then kills this script with nothing started,
-# which is the right outcome when river is already going away.
 "$wm_dir/buoy-wm" &
 wm_pid=$!
 
-signalled=0
-trap 'signalled=1; kill -s TERM "$wm_pid" 2>/dev/null || :' TERM INT HUP
-
 # A trapped signal returns from `wait` before the WM has gone, so wait
-# again in that case only. The flag decides, not the status: a second wait
-# on a pid whose status was already reported is 127 in bash (dash repeats
-# the status), so re-waiting unconditionally would lose the real status.
+# again in that case only; the flag decides, not the status. The trap can
+# also fire just after `wait` has reported the real status: the job is
+# gone by then, and a second wait on it returns 127 in bash (dash repeats
+# the status), so a 127 after a status has already been collected keeps
+# the collected one rather than replacing it. A 127 with nothing collected
+# is real: buoy-wm could not be executed.
+status=''
 while :; do
     signalled=0
-    wait "$wm_pid"
-    status=$?
+    wait "$wm_pid" 2>/dev/null
+    rc=$?
+    if [ "$rc" -eq 127 ] && [ -n "$status" ]; then
+        break
+    fi
+    status=$rc
     [ "$signalled" -eq 1 ] || break
 done
 
