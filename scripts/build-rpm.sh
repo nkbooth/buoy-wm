@@ -66,8 +66,10 @@
 #       nothing else; rpmbuild's own output goes to stderr.
 #
 # Exit codes: 0 built and published; 1 missing input or unreadable spec
-# (every missing thing is reported before exiting); 2 usage; rpmbuild's
-# own status if the build fails.
+# (every missing thing that can be named is reported before exiting; the
+# two sources are named from the spec's versions, so a spec without them
+# is reported beside rpmbuild only); 2 usage; rpmbuild's own status if
+# the build fails.
 set -euo pipefail
 
 readonly NAME=buoy-wm
@@ -130,8 +132,14 @@ report() {
     status=1
 }
 
+# rpmbuild first: it depends on nothing else, so it is named beside a
+# bad spec or missing sources rather than only once those are fixed.
+if ! command -v rpmbuild >/dev/null 2>&1; then
+    report "rpmbuild: not found on PATH (install rpm-build)"
+fi
+
 if [ ! -f "$spec" ] || [ ! -r "$spec" ]; then
-    echo "$spec: missing or unreadable spec" >&2
+    report "$spec: missing or unreadable spec"
     exit 1
 fi
 
@@ -146,6 +154,8 @@ fi
 if [ -z "$version" ]; then
     report "$spec: no 'Version:' line"
 fi
+# The source names need both versions, so this is as far as a bad spec
+# can be reported.
 if [ "$status" -ne 0 ]; then
     exit 1
 fi
@@ -157,9 +167,6 @@ for archive in "$source0" "$source1"; do
         report "$archive: missing or unreadable"
     fi
 done
-if ! command -v rpmbuild >/dev/null 2>&1; then
-    report "rpmbuild: not found on PATH (install rpm-build)"
-fi
 if [ "$status" -ne 0 ]; then
     exit 1
 fi
@@ -168,7 +175,9 @@ topdir="$(mktemp -d)"
 readonly topdir
 trap 'rm -rf "$topdir"' EXIT
 mkdir -p "$topdir/SOURCES" "$topdir/BUILD" "$topdir/RPMS" "$topdir/SRPMS"
-cp "$source0" "$source1" "$topdir/SOURCES/"
+# `--` throughout: the argument loop accepts paths after `--`, so a path
+# that starts with `-` must not become an option here either.
+cp -- "$source0" "$source1" "$topdir/SOURCES/"
 
 # The build log streams to stderr so stdout stays the one published path.
 set +e
@@ -190,10 +199,12 @@ if [ "${#built[@]}" -ne 1 ]; then
 fi
 
 published="${built[0]##*/}"
-# Quoting the pattern makes `~` and `.` literal; one substitution is
-# exact because the version occurs once in an rpm basename.
-published="${published/"$version"/$upstream}"
-mkdir -p "$out"
-cp "${built[0]}" "$out/$published"
-(cd "$out" && sha256sum "$published" >"$published.sha256")
+# Quoting the pattern makes `~` and `.` literal, and quoting the
+# replacement keeps bash 5.2's `&` (the matched text) out of it; one
+# substitution is exact because the version occurs once in an rpm
+# basename.
+published="${published/"$version"/"$upstream"}"
+mkdir -p -- "$out"
+cp -- "${built[0]}" "$out/$published"
+(cd -- "$out" && sha256sum -- "$published" >"$published.sha256")
 echo "$out/$published"

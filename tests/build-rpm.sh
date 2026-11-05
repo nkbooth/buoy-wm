@@ -241,14 +241,29 @@ run_script --spec "$tmp/fixture.spec" "$tmp/only-source1" "$tmp/out-only1"
 expect_rc 'only Source1' 1
 expect_stderr_mentions 'only Source1' "$tmp/only-source1/$SOURCE0"
 expect_stderr_lines 'only Source1' 1
+if [ -s "$STUB_LOG" ]; then
+    fail 'only Source1' "rpmbuild must not run when a source is missing"
+fi
 
-# A spec the script cannot read a version from names the spec.
+# A spec the script cannot read a version from names the spec, once per
+# missing line.
 write_spec "$tmp/no-version.spec" "$FIXTURE_VERSION" "$FIXTURE_UPSTREAM"
 sed -i -e '/^Version:/d' -e '/^%global upstream_version/d' "$tmp/no-version.spec"
 run_script --spec "$tmp/no-version.spec" "$tmp/sources" "$tmp/out-no-version"
 expect_rc 'spec without versions' 1
 expect_stderr_mentions 'spec without versions' "$tmp/no-version.spec"
+expect_stderr_lines 'spec without versions' 2
 expect_empty_stdout 'spec without versions'
+
+# A missing rpmbuild is reported beside a bad spec, not only once the
+# spec is fixed: the preflight names everything it can in one run.
+set +e
+PATH="$tmp/tools-bin" "$SCRIPT" --spec "$tmp/no-version.spec" "$tmp/sources" "$tmp/out-both" >"$tmp/out" 2>"$tmp/err"
+rc=$?
+set -e
+expect_rc 'no rpmbuild and no versions' 1
+expect_stderr_mentions 'no rpmbuild and no versions' rpmbuild "$tmp/no-version.spec"
+expect_stderr_lines 'no rpmbuild and no versions' 3
 
 # The build: both sources staged, a full -bb, the one main package
 # published under the hyphen name with its checksum, the debuginfo left
@@ -322,6 +337,21 @@ expect_empty_stdout 'rpmbuild exits 7'
 if compgen -G "$tmp/out-fail/*.rpm" >/dev/null; then
     fail 'rpmbuild exits 7' "out-dir must hold no .rpm after a failed build:"
     ls "$tmp/out-fail" >&2
+fi
+
+# An rpmbuild that exits 0 without writing the package: the script must
+# say so and publish nothing, not hand `cp` an empty name.
+write_stub "$tmp/bin-none" 0
+sed -i '/RPMS\/x86_64/d' "$tmp/bin-none/rpmbuild"
+set +e
+PATH="$tmp/bin-none:$PATH" "$SCRIPT" --spec "$tmp/fixture.spec" "$tmp/sources" "$tmp/out-none" >"$tmp/out" 2>"$tmp/err"
+rc=$?
+set -e
+expect_rc 'rpmbuild builds nothing' 1
+expect_stderr_mentions 'rpmbuild builds nothing' 'expected exactly one'
+expect_empty_stdout 'rpmbuild builds nothing'
+if [ -e "$tmp/out-none" ]; then
+    fail 'rpmbuild builds nothing' "out-dir must not be created when no package was built"
 fi
 
 exit "$status"

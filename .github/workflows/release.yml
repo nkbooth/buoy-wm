@@ -60,6 +60,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      sha: ${{ steps.version.outputs.sha }}
     steps:
       # First, before the tag is used as a ref, a filename or a shell word.
       # The grammar lives in scripts/release-version.sh, which ci.yml tests
@@ -94,7 +95,9 @@ jobs:
       # push with the tag derived from Cargo.toml, so this step only fails
       # on a tag that disagrees with a tree that agrees with itself. The
       # values are extracted with sed, never `eval`. `$GITHUB_ENV` is per
-      # job, so the values the other jobs need also go to `$GITHUB_OUTPUT`.
+      # job, so the values the other jobs need also go to `$GITHUB_OUTPUT`,
+      # with the commit this checkout resolved the tag to: `rpm` builds
+      # that commit, not whatever the tag names by the time it starts.
       - name: Check tag matches every packaged version
         id: version
         run: |
@@ -105,6 +108,7 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
@@ -169,7 +173,11 @@ jobs:
       # Relays between jobs, not the durable copy: the release is. Seven
       # days is enough to download what `build` and `rpm` made when
       # `publish` fails. The staging directory under dist/ is not an
-      # asset, hence the two patterns rather than `dist/*`.
+      # asset, hence the two patterns rather than `dist/*`. Artifacts
+      # belong to the workflow run, not the attempt, and v4+ refuses a
+      # name that already exists; `overwrite` is what lets a re-run of
+      # this job after a transient failure replace the earlier attempt's
+      # relay instead of failing on it.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
@@ -178,6 +186,7 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -185,6 +194,7 @@ jobs:
           path: rpm-sources/*
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
   rpm:
     needs: build
@@ -214,9 +224,13 @@ jobs:
       - name: Install the build tools
         run: dnf -y install git-core rpm-build dnf5-plugins
 
+      # The commit `build` validated and archived as Source0, not the tag
+      # name resolved a second time: a tag moved between the two jobs
+      # would otherwise put the spec and this script from one commit
+      # beside sources from another under one attestation.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.build.outputs.sha }}
           persist-credentials: false
 
       # The spec's BuildRequires is the one list of build dependencies
@@ -237,12 +251,14 @@ jobs:
       - name: Build the RPM
         run: scripts/build-rpm.sh rpm-sources dist
 
+      # `overwrite` for the same re-run reason as `build`'s relays.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rpm
           path: dist/*
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
   publish:
     needs: [build, rpm]
