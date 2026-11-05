@@ -65,15 +65,22 @@ if [ ! -x "$SCRIPT" ]; then
     echo "$SCRIPT: not executable (river runs it through its shebang)" >&2
     exit 1
 fi
+# The POSIX claim, the dash coverage below and shellcheck's dialect all
+# hang on this one line: a shebang quietly changed to bash would leave
+# every case green and the /bin/sh report meaningless.
+if [ "$(head -n 1 "$SCRIPT")" != '#!/bin/sh' ]; then
+    echo "$SCRIPT: first line must be #!/bin/sh (the supervisor is POSIX sh, ADR-010)" >&2
+    exit 1
+fi
 
 # A runner image whose /bin/sh is not dash would pass this test while
 # proving nothing about the supervisor's POSIX claim, so say which shell
 # ran it and annotate the run; bash-as-sh still proves the contract, dash
 # is the extra coverage, so this is a warning, not a failure (same
 # reasoning as the systemd-analyze warning in buoy-session-target.sh).
-sh_path="$(readlink -f /bin/sh)"
-readonly sh_path
+# Resolved only where it is reported, so a host run never depends on it.
 if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    sh_path="$(readlink -f /bin/sh)"
     echo "/bin/sh is $sh_path"
     if [ "$(basename "$sh_path")" != dash ]; then
         echo "::warning file=tests/buoy-session.sh::/bin/sh is $sh_path, not dash; the POSIX claim of packaging/buoy-session is not exercised by this run"
