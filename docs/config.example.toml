@@ -65,8 +65,8 @@ pinned_terminals = true
 #
 #   mod    = any of "super" ("mod4"), "ctrl" ("control"), "alt" ("mod1"),
 #            "shift". Optional — omit it for an unmodified key. The
-#            PascalCase spellings ("Super", "Ctrl", …) documented before
-#            buoy 0.1 still parse, and always will.
+#            PascalCase spellings ("Super", "Ctrl", …) are accepted as
+#            well, and always will be.
 #   key    = a keysym name: a single character ("a", "1", "?"), a named key
 #            ("Return", "Space", "Tab", "Escape", "Left", "Page_Up"), or a
 #            function key ("F1".."F35"). Named keys are case-insensitive;

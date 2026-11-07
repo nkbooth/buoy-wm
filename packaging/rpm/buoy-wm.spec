@@ -151,8 +151,6 @@ cargo test --workspace --release --offline --locked
 
 %changelog
 * Thu Nov 05 2026 Nick Booth <n1cck@onlyhams.radio> - 1.0.0~rc.1-1
-- First release candidate: the packaged buoy session (supervisor, user
-  target, portal routing) and the RC version mapping
-
-* Thu Aug 20 2026 Nick Booth <n1cck@onlyhams.radio> - 0.1.0-1
-- Initial package
+- First release candidate of 1.0.0: the buoy-wm, buoy-tag-picker and
+  buoy-status-bar binaries, and the buoy login session with its POSIX sh
+  supervisor, user target and portal routing

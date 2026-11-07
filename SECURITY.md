@@ -37,11 +37,14 @@ the entire request set is `get-state`, `create-tag`, `toggle-tag`, and
 `switch-tag`.
 
 One of those does spawn a process. A `switch-tag` for a tag whose pinned
-terminal has not started yet runs the configured terminal and `zellij`
-(`wm/src/ipc/server.rs:187`). The command and its arguments come entirely
-from your own config, never from the request — the tag name reaches the child
-only as a `zellij` session argument, passed as argv rather than through a
-shell, so it cannot inject a command. The request set carries no command
+terminal has not started yet runs the configured `terminal` with
+`pinned_terminal_args` — `zellij` by default — through
+`spawn_pinned_terminal_or_release_claim` in `wm/src/main.rs`, which the IPC
+server is handed as an effect rather than calling itself. The command and
+its arguments come entirely from your own config, never from the request —
+the tag name reaches the child only through the `{session}` placeholder, as
+`tag-<name>`, passed as argv rather than through a shell, so it cannot
+inject a command. The request set carries no command
 string of its own, reads no file, and writes nowhere. A submitted tag name is
 validated where it enters the registry — non-empty, at most 64 bytes, and
 free of path separators and control characters — and one connection may
@@ -61,11 +64,10 @@ gain anything it did not already have as your user.
 **`exec` keybinds run arbitrary commands, from your own config file.** The
 `{ exec = "..." }` action runs through `sh -c` with full shell semantics.
 `~/.config/buoy/config.toml` is therefore as trusted as your shell profile.
-Do not source one from an untrusted place. Since 0.1, that expectation is
-also checked rather than merely stated: a config file that is group- or
-world-writable, or owned by another user, is loaded but reported, the way
-bash reports a world-writable profile. Only writability is checked — `644`
-is a normal, accepted mode.
+Do not source one from an untrusted place. That expectation is checked, not
+merely stated: a config file that is group- or world-writable, or owned by
+another user, is loaded but reported, the way bash reports a world-writable
+profile. Only writability is checked — `644` is a normal, accepted mode.
 
 **A malformed config does not stop startup.** `buoy` reports the error on
 stderr and falls back to built-in defaults. This is a deliberate
@@ -76,15 +78,25 @@ bindings are not what you expect.
 
 ## Supply chain
 
-Release binaries are built by
+Release assets are built by
 [the release workflow](.github/workflows/release.yml) on GitHub-hosted
-runners and carry a build-provenance attestation. Verify one with:
+runners — the tarball on the runner, the RPM inside a Fedora container in
+the same run — and every release carries one build-provenance attestation
+naming three subjects: the binary tarball
+`buoy-wm-<version>-x86_64-unknown-linux-gnu.tar.gz`, the vendored-crates
+tarball `buoy-wm-<version>-vendor.tar.gz` the RPM is rebuilt from, and the
+RPM `buoy-wm-<version>-1.<dist>.x86_64.rpm`. `<version>` is the tag without
+its `v` in every asset name; the RPM's file carries that hyphenated form
+while `rpm -qp` reports the tilde form (`1.0.0~rc.1` for `1.0.0-rc.1`). The
+`.sha256` files beside them are checksums, not subjects. Verify any of the
+three with:
 
 ```sh
-gh attestation verify buoy-wm-<version>-x86_64-unknown-linux-gnu.tar.gz \
-  --repo nkbooth/buoy-wm
+gh attestation verify <asset> --repo nkbooth/buoy-wm
 ```
 
 Dependencies are pinned in `Cargo.lock`, which CI enforces with `--locked`,
 and reviewed monthly by Dependabot. The dependency tree is deliberately
-small: Wayland bindings, `serde`, `toml`, and `bitflags`.
+small: at runtime the Wayland bindings (`wayland-client`,
+`wayland-backend`), `serde` and `serde_json`, `toml`, `bitflags` and
+`rustix`; `wayland-scanner` generates the protocol bindings at build time.

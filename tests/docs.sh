@@ -17,12 +17,14 @@
 # language governing rights and limitations under the RPL.
 #
 # Asserts that the documents agree with the files they describe. The
-# README is shipped inside the tarball and the RPM, PACKAGING.md is the
-# packager's runbook, and install.sh's last line and the formula's
-# caveats are the two other places a user is told how to run the thing.
-# Each needle is derived from the file that owns the fact (Cargo.toml,
-# the spec, buoy.desktop) or is a string a code review already caught
-# as a drift; nothing here lints prose.
+# README and config.example.toml are shipped inside the tarball and the
+# RPM, PACKAGING.md is the packager's runbook, CHANGELOG.md and
+# SECURITY.md are what a reader of a tag opens first, and install.sh's
+# last line and the formula's caveats are the two other places a user
+# is told how to run the thing. Each needle is derived from the file
+# that owns the fact (Cargo.toml, the spec, buoy.desktop) or is a
+# string a review already caught as a drift or as a release that never
+# existed; nothing here lints prose.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,6 +36,9 @@ readonly DESKTOP="$REPO_ROOT/packaging/buoy.desktop"
 readonly FORMULA="$REPO_ROOT/packaging/homebrew/buoy-wm.rb"
 readonly INSTALL="$REPO_ROOT/scripts/install.sh"
 readonly CARGO="$REPO_ROOT/Cargo.toml"
+readonly CHANGELOG="$REPO_ROOT/CHANGELOG.md"
+readonly SECURITY="$REPO_ROOT/SECURITY.md"
+readonly EXAMPLE="$REPO_ROOT/docs/config.example.toml"
 
 tmp="$(mktemp -d)"
 readonly tmp
@@ -50,7 +55,7 @@ fail() {
 }
 
 for file in "$README" "$PACKAGING" "$SPEC" "$DESKTOP" \
-    "$FORMULA" "$INSTALL" "$CARGO"; do
+    "$FORMULA" "$INSTALL" "$CARGO" "$CHANGELOG" "$SECURITY" "$EXAMPLE"; do
     if [ ! -r "$file" ]; then
         fail "${file#"$REPO_ROOT/"}: missing or unreadable"
     fi
@@ -108,6 +113,26 @@ if ! grep -qxF -- "version=$cargo" "$README"; then
     fail "README.md: the 'version=' line is not 'version=$cargo' (the README's pinned version must be Cargo.toml's)"
 fi
 
+# The changelog's first versioned heading is the release Cargo.toml
+# builds, so a bump that left the changelog behind is red on the push
+# that made it. A leading `## [Unreleased]` is Keep a Changelog's form
+# for post-tag changes and is skipped, not forbidden. The whole token
+# is matched, optionally followed by a space and a date, so rc.10 cannot
+# pass as rc.1; the `|| true` keeps a missing heading on the report.
+heading="$(grep -m1 -E '^## \[[0-9]' "$CHANGELOG" || true)"
+if [ -z "$heading" ]; then
+    fail "CHANGELOG.md: no '## [<version>]' heading"
+else
+    case $heading in
+        "## [$cargo]" | "## [$cargo] "*) ;;
+        *) fail "CHANGELOG.md: first release heading is '$heading', not '## [$cargo]' (the changelog must describe the release Cargo.toml builds)" ;;
+    esac
+fi
+# Keep a Changelog's link reference for that heading, derived the same
+# way so the final tag cannot leave it pointing at the rc.
+require_text "$CHANGELOG" "[$cargo]: https://github.com/nkbooth/buoy-wm/releases/tag/v$cargo" \
+    "the release heading's link reference"
+
 # Asset names are derived from the spec: Source1 is the vendor tarball
 # with the tag's hyphen, and the RPM is served under the fc44 name.
 upstream="$(sed -n 's/^%global upstream_version //p' "$SPEC" | head -n1)"
@@ -134,8 +159,31 @@ fi
 require_text "$README" "$exec_line" \
     "the packaged-session section must quote the entry's Exec= line"
 
-# Strings earlier reviews caught as drifts; each would send a reader to
-# a file or a path that no longer exists.
+# Strings earlier reviews caught as drifts: a file or a path that no
+# longer exists, or a release that never existed. The project's first
+# tag is v1.0.0-rc.1 (ADR-012), so any "0.1" release a document
+# describes is a phantom; Story 6.1's creation caught each of those.
+forbid_text "$CHANGELOG" '## [0.1.0]' \
+    "a release that never happened; the first tag is 1.0.0-rc.1 (ADR-012)"
+forbid_text "$SECURITY" 'Since 0.1' \
+    "there was no 0.1; the behaviour is a fact of the first release"
+forbid_text "$EXAMPLE" 'buoy 0.1' \
+    "there was no buoy 0.1 to have documented spellings before"
+forbid_text "$SPEC" ' - 0.1.0-1' \
+    "a %changelog entry for a package never built"
+# A source line number in prose drifts with every edit above it; the
+# one caught at 6.1's creation pointed into an unrelated impl block.
+if grep -qE '\.rs:[0-9]' "$SECURITY"; then
+    fail "SECURITY.md: cites a source line number, which drifts (name the function and file instead)"
+fi
+# The release's one attestation names three subjects, and the README's
+# verify steps for the RPM and the tarball both point here.
+require_text "$SECURITY" 'gh attestation verify' \
+    "the verify command the README points at"
+require_text "$SECURITY" '-vendor.tar.gz' \
+    "the vendor tarball is an attestation subject"
+require_text "$SECURITY" '.rpm' \
+    "the RPM is an attestation subject"
 forbid_text "$PACKAGING" 'Source2' \
     "the spec has had one source besides the crates since e610d7e"
 forbid_text "$PACKAGING" '0.1.0-vendor' \
