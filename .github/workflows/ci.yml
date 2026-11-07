@@ -197,7 +197,7 @@ jobs:
         run: zizmor --offline .github/workflows .github/actions
 
       - name: shellcheck
-        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh tests/buoy-desktop.sh tests/rpm-spec.sh scripts/release-version.sh tests/release-version.sh scripts/build-rpm.sh tests/build-rpm.sh tests/docs.sh
+        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh tests/buoy-desktop.sh tests/rpm-spec.sh scripts/release-version.sh tests/release-version.sh scripts/build-rpm.sh tests/build-rpm.sh tests/docs.sh scripts/release-notes.sh tests/release-notes.sh
 
       # The session target is one directive away from a login that never
       # starts the portals. The line-by-line assert is the gate;
@@ -266,6 +266,12 @@ jobs:
       # were caught when Story 6.1 was written.
       - name: docs agree
         run: tests/docs.sh
+
+      # The release page's notes are cut from CHANGELOG.md by a script
+      # release.yml runs only on a tag; this proves the cut on every push
+      # against fixture changelogs and the real one.
+      - name: release-notes.sh
+        run: tests/release-notes.sh
 
       # The RPM is built only on a tag (release.yml), so the script's
       # contract — both sources present before rpmbuild runs, a full -bb

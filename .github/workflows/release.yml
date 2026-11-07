@@ -17,8 +17,9 @@
 #
 # Builds the release tarball and the Fedora RPM on a `v*` tag and attaches
 # them, the vendored-crates tarball and their checksums to the GitHub
-# release under one build-provenance attestation. Three jobs: `build`
-# makes the tarball on the runner and stages the RPM's two sources,
+# release under one build-provenance attestation, with the tag's
+# CHANGELOG.md entry as the release notes. Three jobs: `build` makes the
+# tarball on the runner, cuts the notes and stages the RPM's two sources,
 # `rpm` builds the package with Fedora's own toolchain in a Fedora
 # container (ADR-011, ADR-014), and `publish` attests and uploads. The
 # write permissions live on `publish` alone, which runs `gh` and the
@@ -110,6 +111,19 @@ jobs:
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # The release page is the first thing a visitor to the tag reads.
+      # GitHub's generated notes list the pull requests merged since the
+      # previous tag; this repository merges none and the first tag has no
+      # previous one, so they would be a title over a bare "Full Changelog"
+      # link. The CHANGELOG.md entry for the tag is cut here instead, in
+      # the job that reads the tree, so `publish` keeps running nothing
+      # from it — and a tag with no entry fails here in seconds, before
+      # any build, the way a half-bumped tree does in the step above.
+      - name: Write the release notes
+        run: |
+          mkdir -p release-notes
+          scripts/release-notes.sh "$TAG" > release-notes/release-notes.md
+
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
@@ -192,6 +206,16 @@ jobs:
         with:
           name: rpm-sources
           path: rpm-sources/*
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      # The notes are their own relay, never under dist/: `publish`
+      # uploads everything in dist/ as an asset.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes/release-notes.md
           if-no-files-found: error
           retention-days: 7
           overwrite: true
@@ -288,6 +312,11 @@ jobs:
           name: rpm
           path: dist
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: release-notes
+
       # One attestation naming the tarball, the vendor tarball and the
       # RPM; the .sha256 files are not subjects.
       - name: Attest build provenance
@@ -307,7 +336,9 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" --clobber "${assets[@]}"
           else
-            flags=(--title "$TAG" --generate-notes)
+            # The notes are set at creation only: the branch above completes
+            # the assets of an existing release and never rewrites them.
+            flags=(--title "$TAG" --notes-file release-notes/release-notes.md)
             # An rc.N tag is a pre-release on GitHub too (ADR-012, Story 4.9).
             if [[ "$PRERELEASE" == yes ]]; then
               flags+=(--prerelease)

@@ -51,9 +51,10 @@ published, because GitHub serves the tag archive itself. `rpm`, in a
 `dnf builddep packaging/rpm/buoy-wm.spec` and then
 `scripts/build-rpm.sh rpm-sources dist`: a full `rpmbuild -bb` with
 `%check`, on Fedora's own rustc (ADR-014). `publish` makes the one
-attestation and runs `gh release create` — `--prerelease` for an rc, and
-`--clobber` on a re-run so a transient failure replaces the assets instead
-of failing on the existing release.
+attestation and runs `gh release create` with the `CHANGELOG.md` entry for
+the tag as the release notes (cut in `build` by `scripts/release-notes.sh`)
+— `--prerelease` for an rc, and `--clobber` on a re-run so a transient
+failure replaces the assets instead of failing on the existing release.
 
 Two constraints shape everything downstream:
 
@@ -234,11 +235,14 @@ buys nothing.
    until it is quiet — it names every file that disagrees. `ci.yml` runs
    the tagless form on every push, so a half-bump is red before the tag.
 2. `cargo build --workspace --release && cargo test --workspace` — green.
-3. Commit, `git tag -a v<x.y.z>` (`-rc.N` for a release candidate), push
-   the tag. `release.yml` builds and publishes: watch `build`, `rpm` (two
-   to four minutes in the container) and `publish` (one attestation with
-   three subjects in the step summary, six assets, the pre-release flag on
-   an rc).
+3. Commit, `git tag -s v<x.y.z> -m 'buoy-wm <x.y.z>'` (signed, as every
+   commit in this repository is; `-rc.N` for a release candidate), push
+   the tag. The release notes are the `CHANGELOG.md` entry for the tag,
+   so a tag whose entry is missing fails in `build`'s first minute.
+   `release.yml` builds and publishes: watch `build`, `rpm` (two to four
+   minutes in the container) and `publish` (one attestation with three
+   subjects in the step summary, six assets, the pre-release flag on an
+   rc).
 4. Verify. Download the RPM and the tarball; `sha256sum -c` and
    `gh attestation verify` each. `dnf install` the RPM in a fresh
    `fedora:44` container to prove the dependency resolution, then on a real

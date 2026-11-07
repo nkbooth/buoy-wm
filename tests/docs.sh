@@ -221,11 +221,13 @@ require_text "$SECURITY" 'buoy-wm-<version>-vendor.tar.gz' \
 require_text "$SECURITY" 'buoy-wm-<version>-1.<dist>.x86_64.rpm' \
     "the RPM is an attestation subject"
 
-# The runbook's first step and the rebuild recipe name the scripts that
-# do the work, so a packager is sent to the one copy rather than a prose
-# restatement of it.
+# The runbook's first step, the release model and the rebuild recipe name
+# the scripts that do the work, so a packager is sent to the one copy
+# rather than a prose restatement of it.
 require_text "$PACKAGING" 'scripts/release-version.sh --check' \
     "the runbook's bump step is the --check script"
+require_text "$PACKAGING" 'scripts/release-notes.sh' \
+    "the release notes are the changelog entry that script cuts"
 require_text "$PACKAGING" 'scripts/build-rpm.sh' \
     "the offline rebuild is the build script"
 
