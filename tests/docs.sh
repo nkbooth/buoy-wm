@@ -29,7 +29,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
 readonly README="$REPO_ROOT/README.md"
 readonly PACKAGING="$REPO_ROOT/docs/PACKAGING.md"
-readonly CHANGELOG="$REPO_ROOT/CHANGELOG.md"
 readonly SPEC="$REPO_ROOT/packaging/rpm/buoy-wm.spec"
 readonly DESKTOP="$REPO_ROOT/packaging/buoy.desktop"
 readonly FORMULA="$REPO_ROOT/packaging/homebrew/buoy-wm.rb"
@@ -50,7 +49,7 @@ fail() {
     status=1
 }
 
-for file in "$README" "$PACKAGING" "$CHANGELOG" "$SPEC" "$DESKTOP" \
+for file in "$README" "$PACKAGING" "$SPEC" "$DESKTOP" \
     "$FORMULA" "$INSTALL" "$CARGO"; do
     if [ ! -r "$file" ]; then
         fail "${file#"$REPO_ROOT/"}: missing or unreadable"
@@ -93,8 +92,10 @@ count_lines() {
 
 # The README's pinned version is the one it ships with: the file travels
 # in the tarball and the RPM, so it must name the release Cargo.toml
-# builds. Exactly one line, so both install blocks share it.
-cargo="$(grep -m1 '^version = ' "$CARGO" | cut -d'"' -f2)"
+# builds. Exactly one line, so both install blocks share it. The `|| true`
+# keeps an absent line on the report: under `set -e` a failed grep in the
+# substitution would otherwise end the run before the message is written.
+cargo="$(grep -m1 '^version = ' "$CARGO" | cut -d'"' -f2 || true)"
 if [ -z "$cargo" ]; then
     fail "Cargo.toml: no 'version = \"…\"' line to derive the README version from"
 fi
@@ -102,8 +103,10 @@ version_lines="$(count_lines "$README" '^version=')"
 if [ "$version_lines" -ne 1 ]; then
     fail "README.md: expected exactly one 'version=' line, found $version_lines"
 fi
-require_text "$README" "version=$cargo" \
-    "the README's pinned version must be Cargo.toml's"
+# Whole-line match: a substring check would accept rc.10 against rc.1.
+if ! grep -qxF -- "version=$cargo" "$README"; then
+    fail "README.md: the 'version=' line is not 'version=$cargo' (the README's pinned version must be Cargo.toml's)"
+fi
 
 # Asset names are derived from the spec: Source1 is the vendor tarball
 # with the tag's hyphen, and the RPM is served under the fc44 name.
@@ -115,8 +118,6 @@ vendor_literal="buoy-wm-${upstream}-vendor.tar.gz"
 vendor_macro='%{name}-%{upstream_version}-vendor.tar.gz'
 require_either "$README" "$vendor_literal" "$vendor_macro" \
     "the vendor tarball is a release asset"
-require_either "$PACKAGING" "$vendor_literal" "$vendor_macro" \
-    "the vendor tarball is Source1"
 require_text "$PACKAGING" "$vendor_literal" \
     "the rebuild recipe must name the literal file a packager downloads"
 require_text "$README" '-1.fc44.x86_64.rpm' \
@@ -126,7 +127,7 @@ require_text "$PACKAGING" '-1.fc44.x86_64.rpm' \
 
 # The login entry's Exec= line, quoted verbatim, so the README's account
 # of what GDM runs cannot drift from the file tests/buoy-desktop.sh gates.
-exec_line="$(grep -m1 '^Exec=' "$DESKTOP")"
+exec_line="$(grep -m1 '^Exec=' "$DESKTOP" || true)"
 if [ -z "$exec_line" ]; then
     fail "packaging/buoy.desktop: no Exec= line"
 fi

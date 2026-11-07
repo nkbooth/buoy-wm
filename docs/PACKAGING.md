@@ -20,9 +20,9 @@ tests. One tag maps to one version form per packaging format; the table is
 | `formula` | `v1.0.0-rc.1` | `v1.0.0` | the Homebrew `url` tag |
 | `prerelease` | `yes` | `no` | `gh release create --prerelease` |
 
-rpm and dpkg cannot carry a hyphen in a version, and `~` is the one
-character both sort *before* nothing at all, so `1.0.0~rc.1` upgrades to
-`1.0.0` where `1.0.0.rc.1` never would.
+rpm cannot carry a hyphen in `Version:` and dpkg cannot in the upstream
+part of a version, and `~` is the one character both sort *before* nothing
+at all, so `1.0.0~rc.1` upgrades to `1.0.0` where `1.0.0.rc.1` never would.
 
 `.github/workflows/release.yml` fires on a `v*` tag and is the single source
 of every published artifact. It refuses a tag that disagrees with any
@@ -106,7 +106,7 @@ package installs:
 
 Install by URL: the README's "Fedora 44: the RPM" block downloads, verifies
 and installs it, and `rpm-ostree install` accepts the `https://` URL
-directly on an atomic host, which is how the author's image takes it
+directly on an atomic host, which is how the author's image will take it
 (Story 4.10). The spec `Requires: river >= 0.4`, `systemd` and `dbus-tools`,
 `Recommends` `foot`, `fuzzel`, `zellij` and the two portal backends, and
 `Suggests` `waybar`. `zellij` is not in Fedora's archive, so that
@@ -126,9 +126,10 @@ spec's `Version:`. To rebuild:
 2. Download `Source0` from the spec's own URL, the tag archive GitHub
    serves.
 3. Put both in one directory. In a `fedora:44` container run
-   `dnf builddep packaging/rpm/buoy-wm.spec`, then
-   `scripts/build-rpm.sh <that directory> <a fresh out-dir>`; the script
-   does not clear a non-empty out-dir.
+   `dnf install rpm-build dnf5-plugins` (the image has neither `rpmbuild`
+   nor the `builddep` subcommand), `dnf builddep packaging/rpm/buoy-wm.spec`,
+   then `scripts/build-rpm.sh <that directory> <a fresh out-dir>`; the
+   script does not clear a non-empty out-dir.
 
 `rpmlint` on the published file reports `W: non-coherent-filename`, because
 the asset carries the tag's hyphen while the header carries the tilde, and
@@ -145,8 +146,9 @@ around Fedora inclusion.
 
 `packaging/homebrew/buoy-wm.rb`, built from source against Homebrew's own
 `wayland` formula. The tap carries no session entry, supervisor, target or
-portal config; a Homebrew install uses the README's from-source session
-recipe.
+portal config; a Homebrew install starts the WM from `~/.config/river/init`
+as the README's from-source section shows, and its supervisor recipe needs
+a checkout, since the tap installs the binaries only.
 
 **This will not go into homebrew-core**, for two independent reasons worth
 knowing before spending effort on it: homebrew-core requires notability

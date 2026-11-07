@@ -80,17 +80,18 @@ curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$rpm.sha256" "$base/$rpm.sha2
 # release workflow. See SECURITY.md.
 gh attestation verify "$workdir/$rpm" --repo nkbooth/buoy-wm
 
-sudo dnf install "$workdir/$rpm"          # Workstation
-sudo rpm-ostree install "$workdir/$rpm"   # Silverblue, Kinoite: then reboot
+sudo dnf install "$workdir/$rpm"
+# Silverblue, Kinoite and other atomic hosts: this line instead, then reboot.
+# sudo rpm-ostree install "$workdir/$rpm"
 rm -rf "$workdir"
 ```
 
 `rpm-ostree install` also takes the `https://` URL directly, as RPM Fusion's
 own instructions do; the checksum is verified first here for the same
-reason the tarball's is below. dnf resolves `river`, `systemd`, `dbus-tools`
-and `xdg-desktop-portal` as hard dependencies and the two portal backends,
-`foot` and `fuzzel` as weak ones — not `zellij`, see
-[Requirements](#requirements). The package installs the three binaries and
+reason the tarball's is below. dnf resolves `river`, `systemd` and
+`dbus-tools` as hard dependencies and, as weak ones, the two portal backends
+(which bring `xdg-desktop-portal` itself), `foot` and `fuzzel` — not
+`zellij`, see [Requirements](#requirements). The package installs the three binaries and
 the session supervisor as `/usr/libexec/buoy-wm/{buoy-wm,buoy-tag-picker,buoy-status-bar,buoy-session}`,
 a `/usr/bin/buoy-wm` symlink, the login entry
 `/usr/share/wayland-sessions/buoy.desktop`, the user target
@@ -187,7 +188,7 @@ beside the WM's `--identifier=buoy-wm` lines.
 
 ### From source, without the RPM
 
-Without the package there is no login entry; a hand-written
+Without the package there is no `buoy` login entry; a hand-written
 `~/.config/river/init` starts the session instead. `buoy-wm` is the command
 river runs at startup:
 
