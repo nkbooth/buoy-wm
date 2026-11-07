@@ -4,7 +4,10 @@ Notable changes per release. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semantic](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0-rc.2]
+
+Second release candidate: the first one's logout defect, found on the live
+host the day it shipped.
 
 ### Fixed
 
@@ -187,5 +190,5 @@ changed.
 - Release candidates, tagged `vX.Y.Z-rc.N` and published as pre-releases
   (`1.0.0~rc.1` in the RPM).
 
-[Unreleased]: https://github.com/nkbooth/buoy-wm/compare/v1.0.0-rc.1...HEAD
+[1.0.0-rc.2]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.1

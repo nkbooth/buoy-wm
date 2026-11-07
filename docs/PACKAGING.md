@@ -38,7 +38,7 @@ crates) and `buoy-wm-<version>-1.fc44.x86_64.rpm`, each beside a `.sha256`
 whose line carries the bare basename, so `sha256sum -c` works wherever the
 pair is downloaded. `<version>` is the tag without its `v`, so the RPM is
 named with the hyphen while its header says `~`: GitHub rewrites `~` in
-asset names, and `rpm -qp` on the file reports `1.0.0~rc.1-1.fc44`. The
+asset names, and `rpm -qp` on the file reports `1.0.0~rc.2-1.fc44`. The
 build-provenance attestation names all three archives as subjects, and
 `gh attestation verify <file> --repo nkbooth/buoy-wm` works for each.
 
@@ -118,7 +118,7 @@ to get it.
 **Offline rebuild.** The spec's `%build` runs `cargo --offline`, so the
 crates arrive as `Source1`, the vendor tarball, named exactly
 `%{name}-%{upstream_version}-vendor.tar.gz` —
-`buoy-wm-1.0.0-rc.1-vendor.tar.gz` for rc.1, the tag's hyphen and not the
+`buoy-wm-1.0.0-rc.2-vendor.tar.gz` for rc.2, the tag's hyphen and not the
 spec's `Version:`. To rebuild:
 
 1. Download the release's vendor tarball, or make one from the tag with

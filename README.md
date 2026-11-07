@@ -67,7 +67,7 @@ and every device keeps libinput's own defaults.
 ### Fedora 44: the RPM
 
 ```sh
-version=1.0.0-rc.1
+version=1.0.0-rc.2
 rpm="buoy-wm-${version}-1.fc44.x86_64.rpm"
 base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"
 
@@ -98,9 +98,9 @@ a `/usr/bin/buoy-wm` symlink, the login entry
 `/usr/lib/systemd/user/buoy-session.target`, the portal routing
 `/usr/share/xdg-desktop-portal/buoy-portals.conf` and
 `/usr/share/buoy-wm/config.example.toml`. `rpm -qp` reports the version as
-`1.0.0~rc.1` while the file is named with the tag's hyphen: rpm cannot
+`1.0.0~rc.2` while the file is named with the tag's hyphen: rpm cannot
 carry a hyphen in a version and GitHub rewrites `~` in asset names. The same
-release carries `buoy-wm-1.0.0-rc.1-vendor.tar.gz`, the vendored crates for
+release carries `buoy-wm-1.0.0-rc.2-vendor.tar.gz`, the vendored crates for
 rebuilding the RPM offline (`docs/PACKAGING.md`).
 
 ### From a release

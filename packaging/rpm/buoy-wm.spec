@@ -23,10 +23,10 @@
 # keeps its hyphen; rpm Version cannot carry one (ADR-012: 1.0.0-rc.1 is
 # packaged as 1.0.0~rc.1, which sorts before 1.0.0), so Source0 and
 # %%autosetup use the upstream form and Version the tilde form.
-%global upstream_version 1.0.0-rc.1
+%global upstream_version 1.0.0-rc.2
 
 Name:           buoy-wm
-Version:        1.0.0~rc.1
+Version:        1.0.0~rc.2
 Release:        1%{?dist}
 Summary:        Keyboard-driven window manager for the river Wayland compositor
 
@@ -150,6 +150,11 @@ cargo test --workspace --release --offline --locked
 %{_datadir}/%{name}/config.example.toml
 
 %changelog
+* Sat Nov 07 2026 Nick Booth <n1cck@onlyhams.radio> - 1.0.0~rc.2-1
+- Stop graphical-session.target on logout: the portal's Requisite= pins it,
+  so the portals, waybar and kanshi outlived the session whenever the user
+  manager did
+
 * Thu Nov 05 2026 Nick Booth <n1cck@onlyhams.radio> - 1.0.0~rc.1-1
 - First release candidate of 1.0.0: the buoy-wm, buoy-tag-picker and
   buoy-status-bar binaries, and the buoy login session with its POSIX sh

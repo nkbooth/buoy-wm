@@ -29,7 +29,7 @@ members = ["buoy-common", "wm", "buoy-tag-picker", "buoy-status-bar"]
 # `field.workspace = true`, so the license, MSRV and repository URL can
 # never drift apart between the three published crates.
 [workspace.package]
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2024"
 # Tracks the stable release current when it was last raised, not the oldest
 # toolchain that happens to compile: clippy reads this, so a stale floor
@@ -52,15 +52,15 @@ categories = ["command-line-utilities", "gui"]
 # `deny.toml` sets `wildcards = "deny"`, and a bare `{ path = ... }` with no
 # version requirement is a wildcard, which fails CI's `cargo deny` job.
 [workspace.dependencies]
-buoy-common = { path = "buoy-common", version = "1.0.0-rc.1" }
+buoy-common = { path = "buoy-common", version = "1.0.0-rc.2" }
 # `wm` dev-depends on both satellites so one test can drive `protocol`'s
 # types against the two hand-written mirrors of them and fail when either
 # side drifts (audit finding J-01). Not a runtime dependency in either
 # direction — the satellites do not depend on `wm` at all, which is what
 # makes this a dev-dependency rather than a cycle. Versioned for the same
 # reason `buoy-common` is: `deny.toml` sets `wildcards = "deny"`.
-buoy-status-bar = { path = "buoy-status-bar", version = "1.0.0-rc.1" }
-buoy-tag-picker = { path = "buoy-tag-picker", version = "1.0.0-rc.1" }
+buoy-status-bar = { path = "buoy-status-bar", version = "1.0.0-rc.2" }
+buoy-tag-picker = { path = "buoy-tag-picker", version = "1.0.0-rc.2" }
 
 
 # Comments in this codebase reference identifiers in backticks constantly,
