@@ -59,12 +59,17 @@ class BuoyWm < Formula
       river itself, nor the programs it drives. Provide these yourself:
 
         river 0.4+   the compositor (required)
-        foot         default terminal (required)
-        zellij       runs in each tag's pinned terminal (required)
-        fuzzel       drives the tag pickers and cheat-sheet (required)
+        foot         default terminal (swappable in the config file)
+        fuzzel       drives the tag pickers and cheat-sheet
+        zellij       default multiplexer in each tag's pinned terminal,
+                     not required: tmux via pinned_terminal_args, or
+                     pinned_terminals = false for none
         waybar       renders the current-tag indicator (optional)
 
-      Start a session with:
+      This formula installs the binaries only: the buoy login entry, the
+      session supervisor, the user target and the portal config ship in
+      the RPM. Start a session from ~/.config/river/init (see the README,
+      Running it) with:
         river -c #{opt_bin}/buoy-wm
 
       An example config is at:

@@ -30,6 +30,20 @@ Notable changes per release. Format follows
   pressed before any output exists, and — from `buoy-tag-picker` — every
   reason it gives up, including `fuzzel` not being installed. Until now
   exactly one failure in the whole product was visible to the user.
+- A `buoy` entry for the display manager. It starts river with a supervisor
+  (`/usr/libexec/buoy-wm/buoy-session`) that imports the session into
+  systemd and D-Bus, keeps `buoy-session.target` up exactly as long as the
+  window manager runs and exits with its status — so the portals, waybar
+  and kanshi start and stop with the session instead of outliving a dead
+  socket.
+- `buoy-portals.conf`, which routes screen sharing and screenshots to the
+  wlroots portal backend.
+- An RPM as a GitHub release asset, built with Fedora 44's own toolchain and
+  installable by URL, with the vendored-crates tarball beside it for
+  offline rebuilds; both are covered by the release's build-provenance
+  attestation alongside the tarball.
+- Release candidates, tagged `vX.Y.Z-rc.N` and published as pre-releases
+  (`1.0.0~rc.1` in the RPM).
 
 ### Changed
 
@@ -91,6 +105,8 @@ Notable changes per release. Format follows
   from the order spawns happen to start in. `pinned_terminal_args` is
   unchanged: `{app_id}` is still required, and still the placeholder the
   value is substituted into.
+- The RPM now requires `river` (Fedora ships 0.5.0) and recommends the two
+  portal backends.
 
 ### Fixed
 

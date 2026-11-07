@@ -197,7 +197,7 @@ jobs:
         run: zizmor --offline .github/workflows .github/actions
 
       - name: shellcheck
-        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh tests/buoy-desktop.sh tests/rpm-spec.sh scripts/release-version.sh tests/release-version.sh scripts/build-rpm.sh tests/build-rpm.sh
+        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh tests/buoy-desktop.sh tests/rpm-spec.sh scripts/release-version.sh tests/release-version.sh scripts/build-rpm.sh tests/build-rpm.sh tests/docs.sh
 
       # The session target is one directive away from a login that never
       # starts the portals. The line-by-line assert is the gate;
@@ -252,6 +252,16 @@ jobs:
       # on the tag.
       - name: versions agree
         run: scripts/release-version.sh --check
+
+      # The README ships inside the tarball and the RPM, and PACKAGING.md
+      # is the packager's runbook, so each must describe the tree it is
+      # cut from: the README's pinned version against Cargo.toml, the
+      # quoted Exec= line against buoy.desktop, the asset names against
+      # the spec. Three of the strings this test forbids were real drifts
+      # found by the 4.5, 4.6 and 4.7 code reviews, not by anyone reading
+      # the documents.
+      - name: docs agree
+        run: tests/docs.sh
 
       # The RPM is built only on a tag (release.yml), so the script's
       # contract — both sources present before rpmbuild runs, a full -bb

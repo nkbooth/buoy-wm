@@ -34,11 +34,29 @@ and then left alone.
 
 | | |
 | --- | --- |
-| **river** | 0.4 or newer, built with `river-window-management-v1` |
+| **river** | 0.4 or newer, built with `river-window-management-v1`. Fedora 44 and 45 ship 0.5.0; the RPM requires it |
 | **foot** | default terminal — swappable, see [Configuration](#configuration) |
-| **zellij** | runs inside each tag's pinned terminal |
-| **fuzzel** | drives the tag pickers and the hotkey cheat-sheet |
-| **waybar** | *optional* — renders the current-tag indicator |
+| **fuzzel** | drives the tag pickers and the hotkey cheat-sheet — fixed, see [Programs](#programs) |
+| **zellij** | the *default* multiplexer in each tag's pinned terminal, not a requirement — see below |
+| **waybar** | *optional* — renders the current-tag indicator. Fedora's package ships `waybar.service`, which is how to start it under the packaged session, see [Running it](#running-it) |
+| **xdg-desktop-portal-wlr**, **xdg-desktop-portal-gtk** | *optional* — the packaged session sends ScreenCast and Screenshot to wlr and everything else to gtk; without them screen sharing is silently absent. The RPM recommends both |
+| **systemd** (user manager), **dbus-update-activation-environment** (`dbus-tools`) | what the packaged session's supervisor calls on every login; present on every Fedora and Ubuntu, listed so this table is the whole set |
+
+`zellij` is a default, not a dependency: the default `pinned_terminal_args`
+runs it inside each tag's pinned terminal, and the WM never calls it
+otherwise. **Fedora 44 and 45 do not package it**, so the RPM's
+`Recommends: zellij` is ignored by dnf. Take the upstream release asset
+`zellij-x86_64-unknown-linux-musl.tar.gz` and put the binary at
+`/usr/bin/zellij` or `~/.local/bin/zellij`, or use `tmux`, which every
+Fedora and Ubuntu archive carries:
+
+```toml
+pinned_terminal_args = ["-a", "{app_id}", "tmux", "new-session", "-A", "-s", "{session}"]
+```
+
+`-A` attaches to the session if it exists and creates it otherwise, which is
+what zellij's `attach --create` does. `pinned_terminals = false` drops the
+multiplexer and the pinned terminal altogether.
 
 `river`'s `river_input_manager_v1` and `river_libinput_config_v1` globals are
 also optional: without them, `[[input]]` blocks are skipped with one log line
@@ -46,10 +64,49 @@ and every device keeps libinput's own defaults.
 
 ## Install
 
-### From a release
+### Fedora 44: the RPM
 
 ```sh
-version=0.1.0
+version=1.0.0-rc.1
+rpm="buoy-wm-${version}-1.fc44.x86_64.rpm"
+base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"
+
+workdir="$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$rpm" "$base/$rpm"
+curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$rpm.sha256" "$base/$rpm.sha256"
+(cd "$workdir" && sha256sum -c "$rpm.sha256")
+
+# Optional and stronger: proves this exact file came out of this repo's
+# release workflow. See SECURITY.md.
+gh attestation verify "$workdir/$rpm" --repo nkbooth/buoy-wm
+
+sudo dnf install "$workdir/$rpm"          # Workstation
+sudo rpm-ostree install "$workdir/$rpm"   # Silverblue, Kinoite: then reboot
+rm -rf "$workdir"
+```
+
+`rpm-ostree install` also takes the `https://` URL directly, as RPM Fusion's
+own instructions do; the checksum is verified first here for the same
+reason the tarball's is below. dnf resolves `river`, `systemd`, `dbus-tools`
+and `xdg-desktop-portal` as hard dependencies and the two portal backends,
+`foot` and `fuzzel` as weak ones — not `zellij`, see
+[Requirements](#requirements). The package installs the three binaries and
+the session supervisor as `/usr/libexec/buoy-wm/{buoy-wm,buoy-tag-picker,buoy-status-bar,buoy-session}`,
+a `/usr/bin/buoy-wm` symlink, the login entry
+`/usr/share/wayland-sessions/buoy.desktop`, the user target
+`/usr/lib/systemd/user/buoy-session.target`, the portal routing
+`/usr/share/xdg-desktop-portal/buoy-portals.conf` and
+`/usr/share/buoy-wm/config.example.toml`. `rpm -qp` reports the version as
+`1.0.0~rc.1` while the file is named with the tag's hyphen: rpm cannot
+carry a hyphen in a version and GitHub rewrites `~` in asset names. The same
+release carries `buoy-wm-1.0.0-rc.1-vendor.tar.gz`, the vendored crates for
+rebuilding the RPM offline (`docs/PACKAGING.md`).
+
+### From a release
+
+The same `version=` as above.
+
+```sh
 archive="buoy-wm-${version}-x86_64-unknown-linux-gnu.tar.gz"
 base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"
 
@@ -98,7 +155,41 @@ to fix it from.
 
 ## Running it
 
-`buoy-wm` is the command river runs at startup:
+### The packaged session
+
+Pick **buoy** at the display manager. The entry runs
+
+```
+Exec=river -c /usr/libexec/buoy-wm/buoy-session
+```
+
+so GDM starts river, and river runs the supervisor as its init child once
+the compositor socket exists. The supervisor imports `WAYLAND_DISPLAY`,
+`DISPLAY`, `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE` and
+`XDG_SESSION_DESKTOP` into the systemd user manager and the D-Bus activation
+environment, starts `buoy-session.target` — bound to
+`graphical-session.target`, which refuses a manual start, so this is how
+xdg-desktop-portal and every other unit tied to the session comes up — then
+runs `buoy-wm` as a child, forwards termination signals to it, stops the
+target when it exits and exits with its status. The entry's
+`DesktopNames=buoy` selects `buoy-portals.conf`, which sends ScreenCast and
+Screenshot to `xdg-desktop-portal-wlr` and everything else to gtk.
+
+What follows from that: helpers belong in user units bound to
+`graphical-session.target`, not in a script. `systemctl --user enable
+waybar.service` uses Fedora's own unit; its `-c`/`-s` arguments go in a
+drop-in (`systemctl --user edit waybar.service`, an `[Service]` section with
+an empty `ExecStart=` and then yours), because the `custom/tag` module
+config is per output. `kanshi.service` likewise. `Super+Esc` ends the WM,
+the supervisor stops the target, and the session ends. The supervisor's own
+messages are prefixed `buoy-session:` and land in `journalctl --user -b`
+beside the WM's `--identifier=buoy-wm` lines.
+
+### From source, without the RPM
+
+Without the package there is no login entry; a hand-written
+`~/.config/river/init` starts the session instead. `buoy-wm` is the command
+river runs at startup:
 
 ```sh
 river -c ~/.local/lib/buoy-wm/buoy-wm
@@ -113,6 +204,36 @@ WM last, so its lifetime is the session's:
 waybar &
 exec ~/.local/lib/buoy-wm/buoy-wm
 ```
+
+That gives you window management only: no portals, and no units bound to
+the session. To get the packaged session's plumbing from a checkout, reuse
+the shipped files unchanged. Copy the supervisor beside the binaries — it
+resolves `buoy-wm` as its own sibling, which is why it must sit there and
+why `install.sh` does not do it for you (the tarball does not carry it):
+
+```sh
+install -m 0755 packaging/buoy-session ~/.local/lib/buoy-wm/
+install -Dm 0644 packaging/buoy-session.target ~/.config/systemd/user/buoy-session.target
+systemctl --user daemon-reload
+install -Dm 0644 packaging/buoy-portals.conf ~/.config/xdg-desktop-portal/buoy-portals.conf
+```
+
+`~/.config/xdg-desktop-portal` is the first directory xdg-desktop-portal
+searches. Then make the init export the name both the portal file and the
+session entry key on — a river session started from Fedora's own
+`river.desktop` sets a different one — and `exec` the supervisor, with any
+helpers started before it or, better, as the user units above:
+
+```sh
+#!/bin/sh
+# ~/.config/river/init
+export XDG_CURRENT_DESKTOP=buoy
+exec ~/.local/lib/buoy-wm/buoy-session
+```
+
+This recipe is written from the files and has not been exercised at a live
+login; the packaged session, which installs the same files, is the form
+that gets verified before a release.
 
 ## Tags
 

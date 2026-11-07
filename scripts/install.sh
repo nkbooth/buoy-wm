@@ -59,9 +59,10 @@ install_dir="${BUOY_INSTALL_DIR:-$HOME/.local/lib/buoy-wm}"
 readonly install_dir
 
 # Verify the whole set before copying any of it. A half-installed directory
-# is worse than a stale one: river `exec`s the WM as the session leader, so a
-# missing or mismatched binary means the session dies and GDM bounces you
-# back to the login screen with no shell to fix it from.
+# is worse than a stale one: whether a hand-written river init `exec`s the
+# WM or the packaged supervisor runs it from a directory just like this, a
+# missing or mismatched binary is a dead session and a bounce back to the
+# display manager with no shell to fix it from.
 missing=()
 for binary in "${BINARIES[@]}"; do
     [[ -x "$build_dir/$binary" ]] || missing+=("$binary")
@@ -92,3 +93,7 @@ if [[ -d "$bin_dir" ]]; then
     ln -sfn "$install_dir/buoy-wm" "$bin_dir/buoy-wm"
     printf 'linked %s -> %s\n' "$bin_dir/buoy-wm" "$install_dir/buoy-wm"
 fi
+
+# Two ways to start it now, and this script sets up neither: the README
+# section is the one place both are described.
+printf 'next: start it from ~/.config/river/init, or install the RPM for the login entry (README, "Running it")\n'
