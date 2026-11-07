@@ -321,6 +321,16 @@ run_case() {
     if [ "$systemctl_mode" = fail ] && ! grep -q '^buoy-session: ' "$tmp/stderr"; then
         fail "$name" "a failing systemctl was not reported on stderr"
     fi
+    # Each stop reports its own failure: the log diff above proves the second
+    # stop still runs after a failed first one, this proves it says so.
+    if [ "$systemctl_mode" = fail ]; then
+        for line in 'buoy-session: could not stop buoy-session.target' \
+                    'buoy-session: could not stop graphical-session.target'; do
+            if ! grep -qxF -- "$line" "$tmp/stderr"; then
+                fail "$name" "missing stderr line: $line"
+            fi
+        done
+    fi
 }
 
 run_case exit0 exit0 ok "" 0 "$expected_run"

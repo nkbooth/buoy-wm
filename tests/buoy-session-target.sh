@@ -41,8 +41,10 @@ if [ ! -r "$UNIT" ]; then
 fi
 
 # BindsTo= is what lets a manually started buoy-session.target pull in
-# graphical-session.target (RefuseManualStart=yes), and what lets stopping
-# it tear every Requisite=/PartOf= unit down again via StopWhenUnneeded=yes.
+# graphical-session.target (RefuseManualStart=yes). Stopping it alone does
+# not tear the Requisite=/PartOf= units down again (the portal's Requisite=
+# pins graphical-session.target past StopWhenUnneeded=yes); buoy-session
+# stops graphical-session.target explicitly for that.
 expected='[Unit]
 Description=buoy window manager session
 Documentation=man:systemd.special(7)

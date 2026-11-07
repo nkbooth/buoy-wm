@@ -186,4 +186,5 @@ changed.
 - Release candidates, tagged `vX.Y.Z-rc.N` and published as pre-releases
   (`1.0.0~rc.1` in the RPM).
 
+[Unreleased]: https://github.com/nkbooth/buoy-wm/compare/v1.0.0-rc.1...HEAD
 [1.0.0-rc.1]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.1

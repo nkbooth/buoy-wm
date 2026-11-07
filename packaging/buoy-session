@@ -35,8 +35,12 @@
 # main portal outlives the session into a re-login within logind's stop
 # delay (measured 2026-11-07). It refuses a manual start
 # (RefuseManualStart=yes), not a manual stop, so the explicit stop is
-# allowed; it is also what GNOME's gnome-session-shutdown.target does
-# through Conflicts=.
+# allowed; it is also what GNOME's gnome-session-shutdown.target
+# (/usr/lib/systemd/user/, Conflicts=graphical-session.target) does. The
+# user manager is per user, not per login, so the stop reaches every unit
+# under graphical-session.target: a second graphical session of the same
+# user (another VT, or this session nested under another compositor)
+# loses its portals and bar with ours.
 #
 # The WM runs in the background and is `wait`ed on, rather than in the
 # foreground, so that a signal to this pid alone is forwarded: a shell
@@ -60,7 +64,9 @@ session_vars='WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_S
 # launch: a shell defers a trap until the foreground command returns, so a
 # TERM during `systemctl start` would otherwise kill this script with the
 # target already started and nobody left to stop it. Before the WM exists
-# the trap stops both targets (a no-op if the start never ran) and exits;
+# the trap stops both targets and exits: the first is a no-op if the start
+# never ran, the second takes down whatever a previous login left pinned
+# under graphical-session.target, which is the point;
 # once it exists the signal is forwarded and the wait loop below carries
 # on. The one-command gap between `&` and `wm_pid=$!` is the only window
 # left, and a signal there kills this script with the WM just launched.
@@ -114,7 +120,8 @@ done
 # returned before the portal was gone would hand the next login a dead
 # socket again. The second stop is what actually ends the session (see the
 # header): stopping buoy-session.target alone leaves graphical-session.target
-# and everything PartOf= it running.
+# active and its PartOf= units unstopped, so they die on the socket and hit
+# the start limit while the portal, which needs no socket, keeps running.
 systemctl --user stop buoy-session.target \
     || echo 'buoy-session: could not stop buoy-session.target' >&2
 systemctl --user stop graphical-session.target \
