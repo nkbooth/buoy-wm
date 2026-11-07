@@ -258,10 +258,12 @@ jobs:
       # cut from: the README's pinned version against Cargo.toml, the
       # quoted Exec= line against buoy.desktop, the asset names against
       # the spec, the changelog's first release heading and its link
-      # reference against Cargo.toml, and SECURITY.md's attestation
-      # subjects. Three of the strings this test forbids were real drifts
-      # found by the 4.5, 4.6 and 4.7 code reviews, not by anyone reading
-      # the documents; the "0.1" phantoms were found the same way.
+      # reference against Cargo.toml, SECURITY.md's spawn citation against
+      # the file that defines the function, and that SECURITY.md names
+      # the three attestation subjects. Three of the strings this test
+      # forbids were real drifts found by the 4.5, 4.6 and 4.7 code
+      # reviews, not by anyone reading the documents; the "0.1" phantoms
+      # were caught when Story 6.1 was written.
       - name: docs agree
         run: tests/docs.sh
 

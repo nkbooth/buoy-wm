@@ -39,12 +39,12 @@ the entire request set is `get-state`, `create-tag`, `toggle-tag`, and
 One of those does spawn a process. A `switch-tag` for a tag whose pinned
 terminal has not started yet runs the configured `terminal` with
 `pinned_terminal_args` — `zellij` by default — through
-`spawn_pinned_terminal_or_release_claim` in `wm/src/main.rs`, which the IPC
-server is handed as an effect rather than calling itself. The command and
-its arguments come entirely from your own config, never from the request —
-the tag name reaches the child only through the `{session}` placeholder, as
-`tag-<name>`, passed as argv rather than through a shell, so it cannot
-inject a command. The request set carries no command
+`spawn_pinned_terminal_or_release_claim` in `wm/src/compositor/launch.rs`,
+which the IPC server is handed as an effect rather than calling itself. The
+command and its arguments come entirely from your own config, never from
+the request — the tag name reaches the child only through the `{session}`
+placeholder, as `tag-<name>`, passed as argv rather than through a shell,
+so it cannot inject a command. The request set carries no command
 string of its own, reads no file, and writes nowhere. A submitted tag name is
 validated where it enters the registry — non-empty, at most 64 bytes, and
 free of path separators and control characters — and one connection may

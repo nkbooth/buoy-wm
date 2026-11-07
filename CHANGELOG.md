@@ -67,8 +67,9 @@ changed.
   `pinned_terminals = false` turns pinned terminals off entirely — the
   supported way out for a user whose terminal or multiplexer is broken, in
   the one subsystem of the process that *is* your session which launches
-  another program. An empty `pinned_terminal_args` is not that switch and
-  is rejected naming the real one.
+  another program. An empty `pinned_terminal_args` is not that switch: it
+  is a `[defaults]` error, so the built-in defaults apply, and the report
+  names the real one.
 - `[[input]]` blocks configuring libinput devices by name, with
   tap-to-click enabled for touchpads by default because libinput ships it
   off.
@@ -84,15 +85,15 @@ changed.
 ### Companions and IPC
 
 - `buoy-tag-picker`: `fuzzel`-driven tag assignment (a checklist of every
-  tag) and tag switching, where typing an unknown name creates that tag
-  and switches to it in one action. The assignment picker re-reads state
-  before each pick rather than trusting a snapshot taken when it opened,
-  so a membership changed meanwhile by a keybind or a second client does
-  not invert the next toggle, and a tag created meanwhile appears. A
-  refused connection is retried twice, 50 ms then 100 ms, which covers
-  the login-time window before the WM has bound its socket; `fuzzel`
-  failing to start is reported with a non-zero exit, distinct from the
-  user pressing Escape.
+  tag; `Super+A` by default) and tag switching (`Super+S` by default),
+  where typing an unknown name creates that tag and switches to it in
+  one action. The assignment picker re-reads state before each pick
+  rather than trusting a snapshot taken when it opened, so a membership
+  changed meanwhile by a keybind or a second client does not invert the
+  next toggle, and a tag created meanwhile appears. A refused connection
+  is retried twice, 50 ms then 100 ms, which covers the login-time window
+  before the WM has bound its socket; `fuzzel` failing to start is
+  reported with a non-zero exit, distinct from the user pressing Escape.
 - `buoy-status-bar`: feeds a waybar `custom/tag` module, one process per
   output, degrading to a `disconnected` state rather than freezing on a
   stale tag. A poll failure says which of the seven distinct failures it

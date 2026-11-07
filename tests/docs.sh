@@ -129,9 +129,13 @@ else
     esac
 fi
 # Keep a Changelog's link reference for that heading, derived the same
-# way so the final tag cannot leave it pointing at the rc.
-require_text "$CHANGELOG" "[$cargo]: https://github.com/nkbooth/buoy-wm/releases/tag/v$cargo" \
-    "the release heading's link reference"
+# way and matched whole-line: the needle is a prefix of a reference whose
+# URL kept an `-rc.N` suffix, so a substring match would let the final
+# tag leave it pointing at the rc.
+link="[$cargo]: https://github.com/nkbooth/buoy-wm/releases/tag/v$cargo"
+if ! grep -qxF -- "$link" "$CHANGELOG"; then
+    fail "CHANGELOG.md: no line '$link' (the release heading's link reference)"
+fi
 
 # Asset names are derived from the spec: Source1 is the vendor tarball
 # with the tag's hyphen, and the RPM is served under the fc44 name.
@@ -161,29 +165,20 @@ require_text "$README" "$exec_line" \
 
 # Strings earlier reviews caught as drifts: a file or a path that no
 # longer exists, or a release that never existed. The project's first
-# tag is v1.0.0-rc.1 (ADR-012), so any "0.1" release a document
-# describes is a phantom; Story 6.1's creation caught each of those.
-forbid_text "$CHANGELOG" '## [0.1.0]' \
-    "a release that never happened; the first tag is 1.0.0-rc.1 (ADR-012)"
+# tag is v1.0.0-rc.1 (ADR-012), so any 0.x release a document describes
+# is a phantom; the four caught when Story 6.1 was written were a
+# `[0.1.0]` changelog entry, "Since 0.1", "buoy 0.1" and a `0.1.0-1`
+# %changelog entry, and the two version checks cover their siblings.
+if grep -qE '^## \[0\.' "$CHANGELOG"; then
+    fail "CHANGELOG.md: has a '## [0.' heading (a release that never happened; the first tag is 1.0.0-rc.1, ADR-012)"
+fi
 forbid_text "$SECURITY" 'Since 0.1' \
     "there was no 0.1; the behaviour is a fact of the first release"
 forbid_text "$EXAMPLE" 'buoy 0.1' \
     "there was no buoy 0.1 to have documented spellings before"
-forbid_text "$SPEC" ' - 0.1.0-1' \
-    "a %changelog entry for a package never built"
-# A source line number in prose drifts with every edit above it; the
-# one caught at 6.1's creation pointed into an unrelated impl block.
-if grep -qE '\.rs:[0-9]' "$SECURITY"; then
-    fail "SECURITY.md: cites a source line number, which drifts (name the function and file instead)"
+if grep -qE ' - 0\.[0-9]+\.[0-9]+-[0-9]+$' "$SPEC"; then
+    fail "packaging/rpm/buoy-wm.spec: %changelog has a 0.x entry (a package never built)"
 fi
-# The release's one attestation names three subjects, and the README's
-# verify steps for the RPM and the tarball both point here.
-require_text "$SECURITY" 'gh attestation verify' \
-    "the verify command the README points at"
-require_text "$SECURITY" '-vendor.tar.gz' \
-    "the vendor tarball is an attestation subject"
-require_text "$SECURITY" '.rpm' \
-    "the RPM is an attestation subject"
 forbid_text "$PACKAGING" 'Source2' \
     "the spec has had one source besides the crates since e610d7e"
 forbid_text "$PACKAGING" '0.1.0-vendor' \
@@ -195,6 +190,36 @@ forbid_text "$PACKAGING" 'river -c /usr/libexec/buoy-wm/buoy-wm' \
 if grep -qE '^\s*zellij\b.*\(required\)' "$FORMULA"; then
     fail "packaging/homebrew/buoy-wm.rb: caveats call zellij '(required)' (it is the default multiplexer, swappable in config)"
 fi
+
+# A source line number in prose drifts with every edit above it; the
+# one caught at 6.1's creation pointed into an unrelated impl block.
+if grep -qE '\.rs:[0-9]' "$SECURITY"; then
+    fail "SECURITY.md: cites a source line number, which drifts (name the function and file instead)"
+fi
+# SECURITY.md cites the pinned-terminal spawn by function and file
+# instead, so the file is derived from where the function is defined:
+# a rename or a move is red here rather than a citation that drifts the
+# way the line number did (the 6.1 review found it one move behind).
+spawn_fn='spawn_pinned_terminal_or_release_claim'
+spawn_file="$(grep -rlF -- "fn $spawn_fn(" "$REPO_ROOT/wm/src" || true)"
+if [ -z "$spawn_file" ] || [ "$(printf '%s\n' "$spawn_file" | wc -l)" -ne 1 ]; then
+    fail "wm/src: expected exactly one file defining '$spawn_fn' (SECURITY.md cites it by file)"
+else
+    require_text "$SECURITY" "$spawn_fn" \
+        "the spawn SECURITY.md describes, by function name"
+    require_text "$SECURITY" "${spawn_file#"$REPO_ROOT/"}" \
+        "the file that defines $spawn_fn"
+fi
+# The release's one attestation names three subjects, and the README's
+# verify steps for the RPM and the tarball both point here. The names
+# are the shapes SECURITY.md prints: `<version>` is the tag without its
+# `v`, and the RPM carries no dist tag on purpose (Story 5.4 owns fc44).
+require_text "$SECURITY" 'gh attestation verify' \
+    "the verify command the README points at"
+require_text "$SECURITY" 'buoy-wm-<version>-vendor.tar.gz' \
+    "the vendor tarball is an attestation subject"
+require_text "$SECURITY" 'buoy-wm-<version>-1.<dist>.x86_64.rpm' \
+    "the RPM is an attestation subject"
 
 # The runbook's first step and the rebuild recipe name the scripts that
 # do the work, so a packager is sent to the one copy rather than a prose
