@@ -20,9 +20,9 @@
 # tag is the body under the `## [<version>]` heading and nothing else —
 # the heading matched whole (rc.10 is not rc.1), the cut stopped at the
 # next `## ` heading or the first link-reference line, the surrounding
-# blank lines dropped — and a tag with no entry, a tag outside the
-# grammar, a missing changelog and a usage error each fail the way the
-# script's header promises.
+# blank lines dropped — and a tag with no entry, a heading with nothing
+# under it, a tag outside the grammar, a missing changelog and a usage
+# error each fail the way the script's header promises.
 #
 # release.yml runs the script only on a tag, where the release page is
 # the first thing a visitor reads; this exercises every stop rule on
@@ -159,11 +159,17 @@ fi
 end_line="$(awk -v start="$heading_line" \
     'NR > start && (/^## / || /^\[[^]]*\]: /) { print NR - 1; exit }' "$CHANGELOG")"
 if [ -z "$end_line" ]; then
-    end_line="$(wc -l <"$CHANGELOG")"
+    # `wc -l` would miss an unterminated last line, which the script prints.
+    end_line="$(awk 'END { print NR }' "$CHANGELOG")"
 fi
-sed -n "$((heading_line + 1)),${end_line}p" "$CHANGELOG" |
-    sed '/./,$!d' |
-    sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' >"$tmp/real-expected"
+if [ "$end_line" -le "$heading_line" ]; then
+    # `sed -n '8,7p'` prints line 8 — the stop line — not nothing.
+    : >"$tmp/real-expected"
+else
+    sed -n "$((heading_line + 1)),${end_line}p" "$CHANGELOG" |
+        sed '/./,$!d' |
+        sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' >"$tmp/real-expected"
+fi
 if [ ! -s "$tmp/real-expected" ]; then
     echo "CHANGELOG.md: the entry under line $heading_line is empty; nothing to compare" >&2
     exit 1
@@ -275,13 +281,14 @@ for tag in v1.0.0-beta v01.0.0; do
     fi
 done
 
-# (h) Usage errors are not rejections: exit 2, usage on stderr. --help is
-# asked for, not a mistake: usage on stdout, exit 0.
-for label in 'no arguments' 'two tags' '--bogus'; do
+# (h) Usage errors are not rejections: exit 2, usage on stderr. --help
+# and -h are asked for, not a mistake: usage on stdout, exit 0.
+for label in 'no arguments' 'two tags' '--bogus' '--tree without a directory'; do
     case $label in
         'no arguments') run_script ;;
         'two tags') run_script v1.0.0 v1.0.1 ;;
         '--bogus') run_script --bogus v1.0.0 ;;
+        '--tree without a directory') run_script v1.0.0 --tree ;;
     esac
     if [ "$rc" -ne 2 ]; then
         echo "$label: expected usage exit 2, got $rc" >&2
@@ -297,12 +304,14 @@ for label in 'no arguments' 'two tags' '--bogus'; do
         status=1
     fi
 done
-run_script --help
-if [ "$rc" -ne 0 ] || ! grep -q '^usage:' "$tmp/out"; then
-    echo "--help: expected usage on stdout and exit 0, got $rc:" >&2
-    cat "$tmp/out" "$tmp/err" >&2
-    status=1
-fi
+for flag in --help -h; do
+    run_script "$flag"
+    if [ "$rc" -ne 0 ] || ! grep -q '^usage:' "$tmp/out"; then
+        echo "$flag: expected usage on stdout and exit 0, got $rc:" >&2
+        cat "$tmp/out" "$tmp/err" >&2
+        status=1
+    fi
+done
 
 # (i) A tree with no changelog is one line naming the file, not a bash
 # error from a read under set -e.
@@ -315,5 +324,49 @@ if grep -Eq 'No such file|line [0-9]+:' "$tmp/err"; then
     cat "$tmp/err" >&2
     status=1
 fi
+# A directory named CHANGELOG.md passes `-r`; the script's `-f` is what
+# keeps awk's read error from being the message.
+mkdir -p "$tmp/dir/CHANGELOG.md"
+expect_exit 'changelog is a directory' 1 v1.0.0 --tree "$tmp/dir"
+expect_stderr 'changelog is a directory' CHANGELOG.md
+expect_stderr_lines 'changelog is a directory' 1
+if grep -Eq 'awk:|Is a directory' "$tmp/err"; then
+    echo "changelog is a directory: leaks awk's error:" >&2
+    cat "$tmp/err" >&2
+    status=1
+fi
+
+# (j) A heading with nothing under it is a failure, not empty notes: the
+# release page would be blank under a green run. Both shapes — the link
+# line directly under the heading, and the heading as the last line.
+write_changelog hollow \
+    '## [4.0.0]' \
+    '' \
+    '[4.0.0]: https://github.com/nkbooth/buoy-wm/releases/tag/v4.0.0'
+expect_exit 'hollow v4.0.0' 1 v4.0.0 --tree "$tmp/hollow"
+expect_stderr 'hollow v4.0.0' CHANGELOG.md 4.0.0
+expect_stderr_lines 'hollow v4.0.0' 1
+write_changelog hollow-eof \
+    '## [Unreleased]' \
+    '' \
+    '- An Unreleased bullet that must not be mistaken for the entry' \
+    '' \
+    '## [4.0.0]'
+expect_exit 'hollow-eof v4.0.0' 1 v4.0.0 --tree "$tmp/hollow-eof"
+expect_stderr 'hollow-eof v4.0.0' CHANGELOG.md 4.0.0
+expect_stderr_lines 'hollow-eof v4.0.0' 1
+
+# (k) Lines of only spaces or tabs are blank lines too: an editor's
+# leftovers around the body are the file's layout, not the notes.
+write_changelog spaced \
+    '## [5.0.0]' \
+    '' \
+    '  ' \
+    '- Spaced body' \
+    $'\t' \
+    '' \
+    '[5.0.0]: https://github.com/nkbooth/buoy-wm/releases/tag/v5.0.0'
+printf '%s\n' '- Spaced body' >"$tmp/expected"
+expect_body 'spaced v5.0.0' "$tmp/expected" v5.0.0 --tree "$tmp/spaced"
 
 exit "$status"

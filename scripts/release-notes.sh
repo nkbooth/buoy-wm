@@ -29,8 +29,11 @@
 # a space (Keep a Changelog's ` - <date>`), so an rc.10 heading is never
 # an rc.1 entry — the rule tests/docs.sh applies. The body is every line
 # after the heading up to the next `## ` heading or the first
-# link-reference line (`[name]: url`), with blank lines on either end
-# removed; an entry that runs to the end of the file is printed whole.
+# link-reference line (`[name]: url`), with blank lines (empty or only
+# spaces and tabs) on either end removed; an entry that runs to the end
+# of the file is printed whole. A heading with nothing under it is a
+# failure, not empty notes: the release page would be blank and the run
+# green.
 #
 # Callers: release.yml `build` (writes the notes file `publish` passes
 # to `gh release create --notes-file`), tests/release-notes.sh, and the
@@ -42,7 +45,8 @@
 #
 # Exit codes: 0 printed; 1 with one stderr line for a tag outside the
 # grammar (release-version.sh's line), a missing or unreadable
-# CHANGELOG.md, or no heading for the version; 2 usage.
+# CHANGELOG.md, no heading for the version, or a heading with nothing
+# under it; 2 usage.
 set -euo pipefail
 
 usage_text() {
@@ -108,8 +112,10 @@ fi
 # One pass. The version is compared literally (`==` and index), never as
 # a regex: it holds dots and a hyphen. The body is buffered so the blank
 # lines on either end can be dropped before anything is printed; `exit`
-# in the main rule still runs END. Exit 3 is "no heading", told apart
-# from an entry whose body is legitimately empty.
+# in the main rule still runs END. Exit 3 is "no heading" and 4 is
+# "nothing under it"; both become exit 1 with a line naming the right
+# fault, because a heading over nothing would otherwise publish blank
+# notes under a green run.
 set +e
 awk -v want="$cargo" '
     !found {
@@ -126,8 +132,11 @@ awk -v want="$cargo" '
         }
         first = 1
         last = n
-        while (first <= last && lines[first] == "") first++
-        while (last >= first && lines[last] == "") last--
+        while (first <= last && lines[first] ~ /^[ \t]*$/) first++
+        while (last >= first && lines[last] ~ /^[ \t]*$/) last--
+        if (last < first) {
+            exit 4
+        }
         for (i = first; i <= last; i++) print lines[i]
     }
 ' "$changelog"
@@ -138,6 +147,10 @@ case $rc in
     0) exit 0 ;;
     3)
         echo "CHANGELOG.md: no '## [$cargo]' heading for tag $tag" >&2
+        exit 1
+        ;;
+    4)
+        echo "CHANGELOG.md: nothing under '## [$cargo]' for tag $tag" >&2
         exit 1
         ;;
     *) exit "$rc" ;;

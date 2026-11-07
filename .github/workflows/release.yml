@@ -337,7 +337,7 @@ jobs:
             gh release upload "$TAG" --clobber "${assets[@]}"
           else
             # The notes are set at creation only: the branch above completes
-            # the assets of an existing release and never rewrites them.
+            # the assets of an existing release and never rewrites the notes.
             flags=(--title "$TAG" --notes-file release-notes/release-notes.md)
             # An rc.N tag is a pre-release on GitHub too (ADR-012, Story 4.9).
             if [[ "$PRERELEASE" == yes ]]; then
