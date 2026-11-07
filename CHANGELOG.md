@@ -8,10 +8,11 @@ Notable changes per release. Format follows
 
 ### Fixed
 
-- Logging out left the portals, waybar and kanshi behind when the next
-  login came within ten seconds, because `graphical-session.target` never
-  stopped: the portal's `Requisite=` pins it, so `StopWhenUnneeded=` never
-  fires. The supervisor now stops it explicitly after `buoy-session.target`.
+- Logging out left the portals, waybar and kanshi behind whenever the user
+  manager outlived the login (any leftover process, such as a terminal
+  multiplexer server, keeps it alive), because `graphical-session.target`
+  never stopped: the portal's `Requisite=` pins it, so `StopWhenUnneeded=`
+  never fires. The supervisor now stops it explicitly after `buoy-session.target`.
 
 ## [1.0.0-rc.1]
 
