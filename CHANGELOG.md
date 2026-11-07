@@ -4,6 +4,15 @@ Notable changes per release. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semantic](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Logging out left the portals, waybar and kanshi behind when the next
+  login came within ten seconds, because `graphical-session.target` never
+  stopped: the portal's `Requisite=` pins it, so `StopWhenUnneeded=` never
+  fires. The supervisor now stops it explicitly after `buoy-session.target`.
+
 ## [1.0.0-rc.1]
 
 First release candidate of 1.0.0, and the project's first tag. Nothing was

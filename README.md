@@ -182,7 +182,9 @@ waybar.service` uses Fedora's own unit; its `-c`/`-s` arguments go in a
 drop-in (`systemctl --user edit waybar.service`, an `[Service]` section with
 an empty `ExecStart=` and then yours), because the `custom/tag` module
 config is per output. `kanshi.service` likewise. `Super+Esc` ends the WM,
-the supervisor stops the target, and the session ends. The supervisor's own
+the supervisor stops `buoy-session.target` and then
+`graphical-session.target` (which stops every unit bound to it), and the
+session ends. The supervisor's own
 messages are prefixed `buoy-session:` and land in `journalctl --user -b`
 beside the WM's `--identifier=buoy-wm` lines.
 

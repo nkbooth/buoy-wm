@@ -19,8 +19,11 @@
 # and the session environment is imported. BindsTo= pulls
 # graphical-session.target in with it (that target is RefuseManualStart=yes,
 # so this is the only way in), which lets every Requisite=/PartOf= unit such
-# as xdg-desktop-portal activate; stopping this target lets
-# graphical-session.target's StopWhenUnneeded=yes tear them all down again.
+# as xdg-desktop-portal activate. Stopping this target alone does not tear
+# them down again: graphical-session.target is StopWhenUnneeded=yes but
+# stays pinned by the portal's Requisite=, so buoy-session stops
+# graphical-session.target explicitly after this one, and that is what
+# stops every PartOf= unit.
 
 [Unit]
 Description=buoy window manager session

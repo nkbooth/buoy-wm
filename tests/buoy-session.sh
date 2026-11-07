@@ -21,11 +21,14 @@
 # supervisor contract: the exact argv of every systemd call in order, that
 # the WM runs as a child of the supervisor (not exec'd), that TERM, INT and
 # HUP sent to the supervisor all reach the WM as SIGTERM, that the session
-# target is stopped only after the WM has exited (the stub logs its exit,
-# so the order is observed rather than inferred), that a signal during the
-# systemd steps still stops the target, that a failing systemctl never
-# stops the WM from launching, and that the supervisor's exit status is
-# always the WM's, including a WM killed by a signal.
+# target and then graphical-session.target are stopped, in that order,
+# only after the WM has exited (the stub logs its exit, so the order is
+# observed rather than inferred; graphical-session.target is stopped
+# explicitly because the portal's Requisite= pins it and StopWhenUnneeded=
+# never fires), that a signal during the systemd steps still stops both
+# targets, that a failing systemctl never stops the WM from launching, and
+# that the supervisor's exit status is always the WM's, including a WM
+# killed by a signal.
 #
 # The stub log is the contract CI checks, so the five environment names
 # and their order are compared byte for byte, and the PATH stubs reject an
@@ -45,8 +48,9 @@
 #
 # A supervisor that outlives its case must be reaped before the stub
 # directory goes away: once `$tmp/bin` is gone, its `systemctl --user
-# stop buoy-session.target` resolves to the real systemctl and stops the
-# live session's target on a developer's machine.
+# stop buoy-session.target` and `systemctl --user stop
+# graphical-session.target` resolve to the real systemctl and end the
+# live graphical session on a developer's machine.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -223,7 +227,8 @@ unset DISPLAY
 readonly setup='systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP
 dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP
 systemctl --user start buoy-session.target'
-readonly stop='systemctl --user stop buoy-session.target'
+readonly stop='systemctl --user stop buoy-session.target
+systemctl --user stop graphical-session.target'
 readonly wm_start='buoy-wm ppid=SUPERVISOR WAYLAND_DISPLAY=wayland-test'
 
 # The WM ran and left on its own terms (or via a forwarded signal).

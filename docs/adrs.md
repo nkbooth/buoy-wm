@@ -167,11 +167,20 @@ supervisor imports `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`,
 and the D-Bus activation environment, starts `buoy-session.target` (bound to
 `graphical-session.target`), runs the WM as a child, forwards termination
 signals to it, stops the target when it exits, and exits with its status.
+Amended 2026-11-07: the target it stops is both `buoy-session.target` and,
+after it, `graphical-session.target`, because the latter is pinned by the
+portal's `Requisite=` and does not stop on its own.
 **Rationale:** Measured on the live host on 2026-11-03: an exec'd WM
 imports nothing into systemd, so `xdg-desktop-portal`
 (`Requisite=graphical-session.target`) never starts and screen sharing is
 silently absent. And a WM that exits without stopping its target leaves
 portals and user units running against a dead socket into the next login.
+Measured again on 2026-11-07 (Story 4.12): stopping `buoy-session.target`
+alone produced that same symptom, because `graphical-session.target`'s
+`StopWhenUnneeded=yes` never fires while `xdg-desktop-portal.service` and
+`waybar.service` `Requisite=` it, so the supervisor stops
+`graphical-session.target` explicitly too (it refuses a manual start, not
+a manual stop).
 `graphical-session.target` refuses a manual start, which is why a session
 needs its own target to bind to it. The hand-written `~/.config/river/init`
 already did all of this with a `trap`; the packaged session has to do it

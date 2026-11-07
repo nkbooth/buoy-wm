@@ -26,6 +26,18 @@
 # running against a dead socket into the next login. Keeping this shell
 # alive costs one process and lets the target follow the WM's lifetime.
 #
+# Two targets are stopped at the end, in this order. buoy-session.target
+# is ours and is the thing the trap can stop early. graphical-session.target
+# is StopWhenUnneeded=yes but stays pinned while any active unit
+# Requisite=s it (Fedora's xdg-desktop-portal.service and waybar.service
+# do), so it never becomes unneeded on its own: its PartOf= units are never
+# stopped, they die on the vanished socket and hit the start limit, and the
+# main portal outlives the session into a re-login within logind's stop
+# delay (measured 2026-11-07). It refuses a manual start
+# (RefuseManualStart=yes), not a manual stop, so the explicit stop is
+# allowed; it is also what GNOME's gnome-session-shutdown.target does
+# through Conflicts=.
+#
 # The WM runs in the background and is `wait`ed on, rather than in the
 # foreground, so that a signal to this pid alone is forwarded: a shell
 # defers a trap while a foreground child runs, and river only SIGTERMs
@@ -48,7 +60,7 @@ session_vars='WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_S
 # launch: a shell defers a trap until the foreground command returns, so a
 # TERM during `systemctl start` would otherwise kill this script with the
 # target already started and nobody left to stop it. Before the WM exists
-# the trap stops the target (a no-op if the start never ran) and exits;
+# the trap stops both targets (a no-op if the start never ran) and exits;
 # once it exists the signal is forwarded and the wait loop below carries
 # on. The one-command gap between `&` and `wm_pid=$!` is the only window
 # left, and a signal there kills this script with the WM just launched.
@@ -59,6 +71,7 @@ trap 'signalled=1
         kill -s TERM "$wm_pid" 2>/dev/null || :
     else
         systemctl --user stop buoy-session.target 2>/dev/null || :
+        systemctl --user stop graphical-session.target 2>/dev/null || :
         exit 143
     fi' TERM INT HUP
 
@@ -95,9 +108,15 @@ while :; do
     [ "$signalled" -eq 1 ] || break
 done
 
-# The traps stay installed: a second signal during the stop is forwarded to
-# a pid that is gone (a no-op) instead of killing this script before it
-# can exit with the WM's status.
+# The traps stay installed: a second signal during the stops is forwarded
+# to a pid that is gone (a no-op) instead of killing this script before it
+# can exit with the WM's status. Both stops are synchronous: a stop that
+# returned before the portal was gone would hand the next login a dead
+# socket again. The second stop is what actually ends the session (see the
+# header): stopping buoy-session.target alone leaves graphical-session.target
+# and everything PartOf= it running.
 systemctl --user stop buoy-session.target \
     || echo 'buoy-session: could not stop buoy-session.target' >&2
+systemctl --user stop graphical-session.target \
+    || echo 'buoy-session: could not stop graphical-session.target' >&2
 exit "$status"
