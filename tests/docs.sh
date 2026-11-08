@@ -41,6 +41,7 @@ readonly SECURITY="$REPO_ROOT/SECURITY.md"
 readonly EXAMPLE="$REPO_ROOT/docs/config.example.toml"
 readonly ADRS="$REPO_ROOT/docs/adrs.md"
 readonly CONTRIBUTING="$REPO_ROOT/CONTRIBUTING.md"
+readonly RELEASE="$REPO_ROOT/.github/workflows/release.yml"
 
 tmp="$(mktemp -d)"
 readonly tmp
@@ -58,7 +59,7 @@ fail() {
 
 for file in "$README" "$PACKAGING" "$SPEC" "$DESKTOP" \
     "$FORMULA" "$INSTALL" "$CARGO" "$CHANGELOG" "$SECURITY" "$EXAMPLE" \
-    "$ADRS" "$CONTRIBUTING"; do
+    "$ADRS" "$CONTRIBUTING" "$RELEASE"; do
     if [ ! -r "$file" ]; then
         fail "${file#"$REPO_ROOT/"}: missing or unreadable"
     fi
@@ -123,8 +124,8 @@ fi
 # same line) and never spelled here. CONTRIBUTING.md is gated because
 # its build sentence is the README's twin, and a gate on one copy
 # invites the other to drift. The PACKAGING heading is counted exactly
-# once so the section is extended, not duplicated, when Story 5.4 moves
-# the glibc floor into it. Only the double-quoted spelling is read; any
+# once because the glibc floor shares the section (Story 5.4), so it is
+# extended, never duplicated. Only the double-quoted spelling is read; any
 # other value is reported rather than turned into a needle.
 msrv="$(grep -m1 '^rust-version = ' "$CARGO" | cut -d'"' -f2 || true)"
 if [ -z "$msrv" ]; then
@@ -200,8 +201,9 @@ if grep -qxF -- '## [Unreleased]' "$CHANGELOG"; then
     fi
 fi
 
-# Asset names are derived from the spec: Source1 is the vendor tarball
-# with the tag's hyphen, and the RPM is served under the fc44 name.
+# Asset names are derived from the spec (Source1 is the vendor tarball
+# with the tag's hyphen) and from release.yml (one RPM per Fedora leg
+# of the packages matrix, below).
 upstream="$(sed -n 's/^%global upstream_version //p' "$SPEC" | head -n1)"
 if [ -z "$upstream" ]; then
     fail "packaging/rpm/buoy-wm.spec: no '%global upstream_version' line"
@@ -212,10 +214,53 @@ require_either "$README" "$vendor_literal" "$vendor_macro" \
     "the vendor tarball is a release asset"
 require_text "$PACKAGING" "$vendor_literal" \
     "the rebuild recipe must name the literal file a packager downloads"
+# A fixed string on purpose: the README's install block pins a release
+# that already exists (rc.2), whose only RPM is the fc44 one, so it can
+# name every RPM release.yml now builds only once the next release
+# makes them exist; Story 5.7's rc.3 bump turns this into a derived
+# needle like PACKAGING's below.
 require_text "$README" '-1.fc44.x86_64.rpm' \
     "the RPM install block must name the asset"
-require_text "$PACKAGING" '-1.fc44.x86_64.rpm' \
-    "the release model must name the RPM asset"
+
+# PACKAGING.md describes what release.yml builds, so its facts are read
+# from the workflow: one RPM per Fedora target of the packages matrix,
+# the container the tarball is built in (named without its registry
+# prefix, as the prose does) and the pinned rustup toolchain. Each is
+# required in backticks or with the asset suffix, so a bare number in
+# another sentence cannot stand in for it. The retired runner label is
+# forbidden in both documents that used to name it.
+packages_job="$(awk '$0 == "  packages:" { in_job = 1; next }
+    /^  [a-z]/ { in_job = 0 }
+    in_job' "$RELEASE" || true)"
+fedora_releases="$(printf '%s\n' "$packages_job" | sed -n 's/^[[:space:]]*- target: fedora-\([0-9][0-9]*\)$/\1/p')"
+if [ -z "$fedora_releases" ]; then
+    fail "release.yml: no '- target: fedora-NN' in the packages job (PACKAGING.md's RPM asset names are derived from them)"
+fi
+for fedora in $fedora_releases; do
+    require_text "$PACKAGING" "-1.fc$fedora.x86_64.rpm" \
+        "the release model must name every RPM asset release.yml builds"
+done
+build_job="$(awk '$0 == "  build:" { in_job = 1; next }
+    /^  [a-z]/ { in_job = 0 }
+    in_job' "$RELEASE" || true)"
+build_image="$(printf '%s\n' "$build_job" | sed -n 's/^[[:space:]]*image: //p' | head -n1)"
+if [ -z "$build_image" ]; then
+    fail "release.yml: no container 'image:' in the build job (PACKAGING.md names the tarball's build image from it)"
+else
+    require_text "$PACKAGING" "\`${build_image#docker.io/library/}\`" \
+        "the container the tarball is built in, which sets its glibc floor"
+fi
+toolchain="$(sed -n 's/^[[:space:]]*toolchain:[[:space:]]*//p' "$RELEASE" | head -n1)"
+if [ -z "$toolchain" ]; then
+    fail "release.yml: no 'toolchain:' line (PACKAGING.md names the tarball's pinned toolchain from it)"
+else
+    require_text "$PACKAGING" "\`$toolchain\`" \
+        "the pinned rustup toolchain the tarball is built with"
+fi
+forbid_text "$PACKAGING" 'ubuntu-22.04' \
+    "the tarball is built in a container, not on the retiring runner (ADR-015)"
+forbid_text "$SECURITY" 'ubuntu-22.04' \
+    "the tarball is built in a container, not on the retiring runner (ADR-015)"
 
 # The login entry's Exec= line, quoted verbatim, so the README's account
 # of what GDM runs cannot drift from the file tests/buoy-desktop.sh gates.
@@ -363,10 +408,11 @@ else
     require_text "$SECURITY" "${spawn_file#"$REPO_ROOT/"}" \
         "the file that defines $spawn_fn"
 fi
-# The release's one attestation names three subjects, and the README's
-# verify steps for the RPM and the tarball both point here. The names
-# are the shapes SECURITY.md prints: `<version>` is the tag without its
-# `v`, and the RPM carries no dist tag on purpose (Story 5.4 owns fc44).
+# The release's one attestation names the tarball, the vendor tarball
+# and each RPM, and the README's verify steps for the RPM and the
+# tarball both point here. The names are the shapes SECURITY.md prints:
+# `<version>` is the tag without its `v`, and the RPM carries `<dist>`
+# rather than a dist tag because there is one RPM per Fedora release.
 require_text "$SECURITY" 'gh attestation verify' \
     "the verify command the README points at"
 require_text "$SECURITY" 'buoy-wm-<version>-vendor.tar.gz' \

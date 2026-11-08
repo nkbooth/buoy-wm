@@ -26,6 +26,11 @@ Notable changes per release. Format follows
 - The minimum supported Rust version is 1.93, Ubuntu 26.04 LTS's rustc
   (ADR-014), instead of 1.99, so every supported release can rebuild the
   packages with its own toolchain; the RPM spec's `BuildRequires` follows.
+- Release binaries are built in containers rather than on a runner: the
+  tarball in Ubuntu 26.04 with a pinned Rust 1.99.1 (glibc 2.43 promised,
+  was 2.35), and one RPM per supported Fedora release built with that
+  release's own toolchain, so Fedora 45 gets its own `fc45` RPM from the
+  next release.
 
 ## [1.0.0-rc.2]
 

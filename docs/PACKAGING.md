@@ -30,27 +30,34 @@ manifest, and `ci.yml` runs the same check on every push with the tag
 derived from `Cargo.toml`, so a half-bumped tree is red before anyone tags
 it. An `rc.N` tag is published as a GitHub pre-release.
 
-Each release carries six assets and one attestation:
+Each release carries eight assets and one attestation:
 `buoy-wm-<version>-x86_64-unknown-linux-gnu.tar.gz` (the three binaries,
 `install.sh`, `README.md`, `LICENSE.md`, `NOTICE.md` and
 `config.example.toml`), `buoy-wm-<version>-vendor.tar.gz` (the vendored
-crates) and `buoy-wm-<version>-1.fc44.x86_64.rpm`, each beside a `.sha256`
-whose line carries the bare basename, so `sha256sum -c` works wherever the
-pair is downloaded. `<version>` is the tag without its `v`, so the RPM is
-named with the hyphen while its header says `~`: GitHub rewrites `~` in
-asset names, and `rpm -qp` on the file reports `1.0.0~rc.2-1.fc44`. The
-build-provenance attestation names all three archives as subjects, and
+crates), `buoy-wm-<version>-1.fc44.x86_64.rpm` and
+`buoy-wm-<version>-1.fc45.x86_64.rpm` (one RPM per supported Fedora
+release, each built on that release), each beside a `.sha256` whose line
+carries the bare basename, so `sha256sum -c` works wherever the pair is
+downloaded. `<version>` is the tag without its `v`, so the RPM is named
+with the hyphen while its header says `~`: GitHub rewrites `~` in asset
+names, and `rpm -qp` on the file reports `1.0.0~rc.2-1.fc44`. The
+build-provenance attestation names all four archives as subjects, and
 `gh attestation verify <file> --repo nkbooth/buoy-wm` works for each.
 
-Three jobs produce that. `build`, on the runner, builds and tests, stages
-the tarball, runs `cargo vendor --locked --versioned-dirs` and tars the
-result reproducibly, and makes a `git archive --prefix=buoy-wm-<version>/`
-of the tag as the spec's `Source0` — relayed to the next job and never
-published, because GitHub serves the tag archive itself. `rpm`, in a
-`registry.fedoraproject.org/fedora:44` container, runs
-`dnf builddep packaging/rpm/buoy-wm.spec` and then
-`scripts/build-rpm.sh rpm-sources dist`: a full `rpmbuild -bb` with
-`%check`, on Fedora's own rustc (ADR-014). `publish` makes the one
+Three jobs produce that, each in a container the workflow pins; the
+runner is only the host (ADR-015). `build`, in a `ubuntu:26.04`
+container with rustup `1.99.1`, validates the tag, cuts the notes, builds
+and tests, stages the tarball, runs `cargo vendor --locked
+--versioned-dirs` and tars the result reproducibly, and makes a
+`git archive --prefix=buoy-wm-<version>/` of the tag as the spec's
+`Source0` — relayed to the next job and never published, because GitHub
+serves the tag archive itself. `packages` is one leg per tier-1 release
+in the README's Supported platforms table, each in that release's own
+container. The Fedora legs run `dnf builddep packaging/rpm/buoy-wm.spec`
+and then `scripts/build-rpm.sh sources dist`: a full `rpmbuild -bb` with
+`%check`, on the release's own rustc (ADR-014). The Ubuntu legs build and
+test the same `Source0` and vendor tarball offline with the release's own
+cargo; the `.deb` arrives with Story 5.5. `publish` makes the one
 attestation and runs `gh release create` with the `CHANGELOG.md` entry for
 the tag as the release notes (cut in `build` by `scripts/release-notes.sh`)
 — `--prerelease` for an rc, and `--clobber` on a re-run so a transient
@@ -65,10 +72,6 @@ Two constraints shape everything downstream:
    generic to own those names system-wide, and nothing resolves them through
    `PATH`.
 
-Binaries are built on `ubuntu-22.04`, not `ubuntu-latest`. glibc is forward-
-but not backward-compatible, so the runner's glibc becomes the floor imposed
-on every user — 22.04 sets that floor at 2.35 rather than 2.39.
-
 ## Toolchain floor
 
 `rust-version` in `Cargo.toml` is 1.93: the rustc of Ubuntu 26.04 LTS, the
@@ -82,15 +85,25 @@ drift. CI's `msrv` job builds the locked workspace on exactly that
 toolchain, so a dependency bump that needs a newer compiler is red there
 before any distribution build sees it.
 
-Distribution packages are built by the distribution's own rustc — the RPM
-by `rpmbuild` in `fedora:44`, and the `.deb`, once Story 5.5 lands, by
-`dpkg-buildpackage` in the Ubuntu containers — which is what the floor
-guarantees, since every supported release's archive rustc meets it (Fedora
-44 1.94.1 in the release repo and 1.99.1 in updates, Fedora 45 1.99.1,
-Ubuntu 26.04 1.93.1, 26.10 1.97.1, read 2026-11-08). Only the release
-tarball will use a pinned rustup toolchain (`release.yml` still says
-`stable`; Story 5.4 pins it), so the bare binary is reproducible
-independent of any archive's cadence.
+Distribution packages are built by the distribution's own rustc — the
+RPMs by `rpmbuild` in `fedora:44` and `fedora:45`, and the `.deb`, once
+Story 5.5 lands, by `dpkg-buildpackage` in the Ubuntu containers — which is
+what the floor guarantees, since every supported release's archive rustc
+meets it (Fedora 44 1.94.1 in the release repo and 1.99.1 in updates,
+Fedora 45 1.99.1, Ubuntu 26.04 1.93.1, 26.10 1.97.1, read 2026-11-08).
+Only the release tarball uses a pinned rustup toolchain: `1.99.1`, the
+compiler rc.1 and rc.2 were built with, moved by a deliberate commit and
+never by Dependabot. So the bare binary and the vendor tarball are
+reproducible independent of any archive's cadence.
+
+The release tarball is built in `ubuntu:26.04`, so its glibc floor is
+2.43, the oldest glibc of any tier-1 release (Fedora 44 is also 2.43;
+Fedora 45 and Ubuntu 26.10 are 2.44), set by a container this repository
+pins and not by a runner label (ADR-015). glibc is forward- but not
+backward-compatible, so that is the floor imposed on every user of the
+tarball. The binaries built there on 2026-11-08 referenced no glibc
+symbol newer than `GLIBC_2.39`, so an older system may run them, but only
+2.43 is promised. The floor moves only when the table does.
 
 A Launchpad PPA is therefore possible: Launchpad builds a source package
 with the target series' own rustc and only what `Build-Depends` names from
@@ -117,10 +130,11 @@ to drift.
 Installs to `~/.local/lib/buoy-wm` with a `~/.local/bin/buoy-wm` symlink —
 no root, and nothing that a broken build can take out of the system.
 
-### 2. GitHub release RPM — Fedora 44
+### 2. GitHub release RPM — Fedora 44 and 45
 
-`packaging/rpm/buoy-wm.spec`, built by `release.yml` in a `fedora:44`
-container and attached to the release. The only channel that layers cleanly
+`packaging/rpm/buoy-wm.spec`, one RPM per supported Fedora release, each
+built by `release.yml` in that release's container and attached to the
+release. The only channel that layers cleanly
 onto `rpm-ostree`, which matters for the atomic host this was developed on,
 and the only one that ships the session. Beyond the three binaries the
 package installs:
@@ -157,7 +171,8 @@ spec's `Version:`. To rebuild:
    `tar -czf buoy-wm-<upstream_version>-vendor.tar.gz vendor`.
 2. Download `Source0` from the spec's own URL, the tag archive GitHub
    serves.
-3. Put both in one directory. In a `fedora:44` container run
+3. Put both in one directory. In a container of the target release
+   (`fedora:44` or `fedora:45`) run
    `dnf install rpm-build dnf5-plugins` (the image has neither `rpmbuild`
    nor the `builddep` subcommand), `dnf builddep packaging/rpm/buoy-wm.spec`,
    then `scripts/build-rpm.sh <that directory> <a fresh out-dir>`; the
@@ -257,8 +272,8 @@ spawns arbitrary user programs.
 
 **Static musl builds.** Would remove the glibc floor, but `wayland-client`
 links the system libwayland, so a musl target needs a musl libwayland
-sysroot. The `ubuntu-22.04` glibc floor solves the same problem for
-materially less work.
+sysroot. The 2.43 glibc floor the build container sets ("Toolchain
+floor") solves the same problem for materially less work.
 
 **AppImage.** Solves distribution for GUI applications launched by a user.
 A WM is `exec`'d by a compositor at session start; the extra indirection
@@ -276,13 +291,15 @@ buys nothing.
    commit in this repository is; `-rc.N` for a release candidate), push
    the tag. The release notes are the `CHANGELOG.md` entry for the tag,
    so a tag whose entry is missing fails in `build`'s first minute.
-   `release.yml` builds and publishes: watch `build`, `rpm` (two to four
-   minutes in the container) and `publish` (one attestation with three
-   subjects in the step summary, six assets, the pre-release flag on an
-   rc).
-4. Verify. Download the RPM and the tarball; `sha256sum -c` and
-   `gh attestation verify` each. `dnf install` the RPM in a fresh
-   `fedora:44` container to prove the dependency resolution, then on a real
+   `release.yml` builds and publishes: watch `build`, the four
+   `packages` legs (the Fedora legs four to five minutes each in the
+   container, 254 s for `fedora:45` on 2026-11-08; the Ubuntu legs about a
+   minute) and `publish` (one attestation with four subjects in the step
+   summary, eight assets, the pre-release flag on an rc).
+4. Verify. Download each RPM and the tarball; `sha256sum -c` and
+   `gh attestation verify` each. `dnf install` each RPM in a fresh
+   container of its own release (`fedora:44`, `fedora:45`) to prove the
+   dependency resolution, then on a real
    Fedora host pick **buoy** at the display manager and check the portal
    (ScreenCast, Screenshot), the bar and logout. Extract the tarball on a
    clean machine, run `install.sh` and start a nested river before trusting

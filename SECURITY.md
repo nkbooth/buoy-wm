@@ -80,16 +80,18 @@ bindings are not what you expect.
 
 Release assets are built by
 [the release workflow](.github/workflows/release.yml) on GitHub-hosted
-runners — the tarball on the runner, the RPM inside a Fedora container in
-the same run — and every release carries one build-provenance attestation
-naming three subjects: the binary tarball
-`buoy-wm-<version>-x86_64-unknown-linux-gnu.tar.gz`, the vendored-crates
-tarball `buoy-wm-<version>-vendor.tar.gz` the RPM is rebuilt from, and the
-RPM `buoy-wm-<version>-1.<dist>.x86_64.rpm`. `<version>` is the tag without
-its `v` in every asset name; the RPM's file carries that hyphenated form
-while `rpm -qp` reports the tilde form (`1.0.0~rc.1` for `1.0.0-rc.1`). The
-`.sha256` files beside them are checksums, not subjects. Verify any of the
-three with:
+runners — the tarball inside an Ubuntu 26.04 container, and one RPM per
+supported Fedora release inside that release's container, in the same run
+— and every release carries one build-provenance attestation naming the
+binary tarball `buoy-wm-<version>-x86_64-unknown-linux-gnu.tar.gz`, the
+vendored-crates tarball `buoy-wm-<version>-vendor.tar.gz` the RPMs are
+rebuilt from, and each RPM `buoy-wm-<version>-1.<dist>.x86_64.rpm`
+(`<dist>` names its Fedora release, as in `fc44`). `<version>` is the tag
+without its `v` in every asset name; the RPM's file carries that
+hyphenated form while `rpm -qp` reports the tilde form (`1.0.0~rc.1` for
+`1.0.0-rc.1`). The
+`.sha256` files beside them are checksums, not subjects. Verify any of
+them with:
 
 ```sh
 gh attestation verify <asset> --repo nkbooth/buoy-wm

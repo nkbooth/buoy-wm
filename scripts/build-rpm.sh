@@ -56,9 +56,9 @@
 # carries the bare basename and `sha256sum -c` works where it is
 # downloaded.
 #
-# Callers: release.yml (the `rpm` job, in a fedora container), a local
-# fedora container (docs/PACKAGING.md), and tests/build-rpm.sh with a
-# stub rpmbuild.
+# Callers: release.yml (the Fedora legs of the `packages` job, each in
+# its release's container), a local fedora container (docs/PACKAGING.md),
+# and tests/build-rpm.sh with a stub rpmbuild.
 #
 #   build-rpm.sh [--spec <path>] <sources-dir> <out-dir>
 #       Default spec: packaging/rpm/buoy-wm.spec beside this script's

@@ -15,16 +15,20 @@
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
 #
-# Builds the release tarball and the Fedora RPM on a `v*` tag and attaches
-# them, the vendored-crates tarball and their checksums to the GitHub
-# release under one build-provenance attestation, with the tag's
-# CHANGELOG.md entry as the release notes. Three jobs: `build` makes the
-# tarball on the runner, cuts the notes and stages the RPM's two sources,
-# `rpm` builds the package with Fedora's own toolchain in a Fedora
-# container (ADR-011, ADR-014), and `publish` attests and uploads. The
-# write permissions live on `publish` alone, which runs `gh` and the
-# attest action and nothing from the tree. See docs/PACKAGING.md for how
-# this feeds the Homebrew tap and the COPR RPM.
+# Builds the release tarball and one RPM per supported Fedora release on
+# a `v*` tag and attaches them, the vendored-crates tarball and their
+# checksums to the GitHub release under one build-provenance
+# attestation, with the tag's CHANGELOG.md entry as the release notes.
+# The runner is only the host (ADR-015); every build runs in a container
+# this file pins. Three jobs: `build` makes the tarball in a
+# `ubuntu:26.04` container with a pinned rustup toolchain, cuts the notes
+# and stages the packages' two sources; `packages` is one leg per README
+# tier-1 release, each in that release's own container with its own
+# toolchain (ADR-011, ADR-014) — the Fedora legs build the RPM, the
+# Ubuntu legs build and test the same sources offline; and `publish`
+# attests and uploads. The write permissions live on `publish` alone,
+# which runs `gh` and the attest action and nothing from the tree. See
+# docs/PACKAGING.md for how this feeds the Homebrew tap and the COPR RPM.
 name: Release
 
 on:
@@ -39,6 +43,14 @@ on:
 permissions:
   contents: read
 
+# A tag push and a `workflow_dispatch` of the same tag could otherwise
+# both find no release in `gh release view` and race `gh release
+# create`. Queued, never cancelled: a cancelled `publish` leaves a
+# half-uploaded release.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   TARGET: x86_64-unknown-linux-gnu
   # The one place the release tag is read from an expression. Every
@@ -52,12 +64,22 @@ env:
 
 jobs:
   build:
-    # Deliberately NOT ubuntu-latest. glibc is forward- but not
-    # backward-compatible, so the oldest available runner sets the lowest
-    # glibc floor these binaries impose on users. 22.04 is glibc 2.35.
-    runs-on: ubuntu-22.04
+    # The container, not the runner, sets the glibc floor these binaries
+    # impose on users: glibc is forward- but not backward-compatible.
+    # `ubuntu:26.04` is the oldest glibc of the README's tier-1 releases
+    # (2.43, tied with `fedora:44`); the Ubuntu LTS is chosen because it
+    # outlives Fedora 44, so the floor does not move when 44 leaves the
+    # table (ADR-015). tests/release-workflow.sh holds this image to the
+    # table's LTS row.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
+    container:
+      image: docker.io/library/ubuntu:26.04
+    defaults:
+      run:
+        # A container job's default shell is `sh`.
+        shell: bash
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
@@ -76,6 +98,19 @@ jobs:
             exit 1
           fi
 
+      # The image runs as root and has no sudo. git so actions/checkout
+      # clones rather than falling back to the REST download, which
+      # leaves no .git for `git rev-parse`, `git log` and `git archive`;
+      # curl and ca-certificates for the rust-toolchain action, which
+      # installs rustup with `curl … https://sh.rustup.rs | sh` when it
+      # is absent; gcc and libc6-dev as the linker.
+      - name: Install the build tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git curl ca-certificates gcc libc6-dev libwayland-dev pkg-config
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
@@ -83,6 +118,15 @@ jobs:
           # third-party build scripts cargo runs; `gh` in `publish`
           # authenticates with GH_TOKEN.
           persist-credentials: false
+
+      # actions/checkout trusts the workspace only in a temporary global
+      # config that it removes after its own step
+      # (src/git-source-provider.ts: configureTempGlobalConfig …
+      # removeGlobalConfig). The workspace belongs to the runner's user
+      # and this container runs as root, so every later git call would
+      # die with "detected dubious ownership".
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       # vX.Y.Z or vX.Y.Z-rc.N and nothing else (ADR-012). Prints the Cargo,
       # RPM, Debian and formula forms into the log.
@@ -97,8 +141,9 @@ jobs:
       # on a tag that disagrees with a tree that agrees with itself. The
       # values are extracted with sed, never `eval`. `$GITHUB_ENV` is per
       # job, so the values the other jobs need also go to `$GITHUB_OUTPUT`,
-      # with the commit this checkout resolved the tag to: `rpm` builds
-      # that commit, not whatever the tag names by the time it starts.
+      # with the commit this checkout resolved the tag to: `packages`
+      # builds that commit, not whatever the tag names by the time it
+      # starts.
       - name: Check tag matches every packaged version
         id: version
         run: |
@@ -126,9 +171,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
-
-      - uses: ./.github/actions/setup-build-deps
+          # A version, not `stable`: the tarball and the vendored crates
+          # are what the attestation names, and `stable` moves with every
+          # Rust release, so a re-run of a tag months later could
+          # `--clobber` an asset with a different digest. 1.99.1 is what
+          # `stable` resolved to for rc.1 and rc.2, so the pin changed
+          # nothing that shipped. It moves by a deliberate commit, never
+          # by Dependabot, and it is not the floor: `rust-version` in
+          # Cargo.toml is what distribution builds meet (PACKAGING.md
+          # "Toolchain floor").
+          toolchain: 1.99.1
 
       - name: Build
         run: cargo build --workspace --release --locked
@@ -169,23 +221,23 @@ jobs:
           tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -I 'gzip -n' -cf "dist/$vendor" vendor
           (cd dist && sha256sum "$vendor" > "$vendor.sha256")
 
-      # Source0 for the RPM is an archive of the tree this job just
+      # Source0 for the packages is an archive of the tree this job just
       # validated and tested, with the prefix %autosetup expects — the same
       # prefix GitHub's own tag archive uses, so the spec's Source0 URL
       # serves a packager who fetches it by hand. Building from the
       # checkout rather than downloading GitHub's archive keeps the job
       # offline-capable and off the race with archive generation on a
-      # fresh tag (readiness report M-2(b)). These two files are the `rpm`
-      # job's input and are never published: GitHub serves the tag archive
-      # itself and the vendor tarball is already in `dist`.
-      - name: Stage the RPM sources
+      # fresh tag (readiness report M-2(b)). These two files are every
+      # `packages` leg's input and are never published: GitHub serves the
+      # tag archive itself and the vendor tarball is already in `dist`.
+      - name: Stage the package sources
         run: |
-          mkdir -p rpm-sources
-          git archive --format=tar.gz --prefix="buoy-wm-${VERSION}/" -o "rpm-sources/buoy-wm-${VERSION}.tar.gz" HEAD
-          cp "dist/buoy-wm-${VERSION}-vendor.tar.gz" rpm-sources/
+          mkdir -p sources
+          git archive --format=tar.gz --prefix="buoy-wm-${VERSION}/" -o "sources/buoy-wm-${VERSION}.tar.gz" HEAD
+          cp "dist/buoy-wm-${VERSION}-vendor.tar.gz" sources/
 
       # Relays between jobs, not the durable copy: the release is. Seven
-      # days is enough to download what `build` and `rpm` made when
+      # days is enough to download what `build` and `packages` made when
       # `publish` fails. The staging directory under dist/ is not an
       # asset, hence the two patterns rather than `dist/*`. Artifacts
       # belong to the workflow run, not the attempt, and v4+ refuses a
@@ -202,10 +254,11 @@ jobs:
           retention-days: 7
           overwrite: true
 
+      # Every `packages` leg reads this relay; it is never published.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rpm-sources
-          path: rpm-sources/*
+          name: sources
+          path: sources/*
           if-no-files-found: error
           retention-days: 7
           overwrite: true
@@ -220,39 +273,73 @@ jobs:
           retention-days: 7
           overwrite: true
 
-  rpm:
+  packages:
     needs: build
-    # The runner is only the host (ADR-015); the build happens in the
-    # container below with Fedora's rpm, rust and wayland-devel
-    # (ADR-014). 44 is the Fedora release the framework image is built
-    # from, so Story 4.10 can install this RPM there; Story 5.4 turns this
-    # job into the Fedora branch of a matrix over the README's support
-    # table. The image is pinned by tag, not digest, on purpose: the point
-    # of a distribution build is the distribution's current packages,
-    # Dependabot does not bump `container.image`, and zizmor's
-    # unpinned-images audit raises only a pedantic finding for a tag.
+    # The runner is only the host (ADR-015); each leg builds in its
+    # release's container with that release's own toolchain (ADR-014).
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     container:
-      image: registry.fedoraproject.org/fedora:44
+      image: ${{ matrix.image }}
     defaults:
       run:
         # A container job's default shell is `sh`.
         shell: bash
+    env:
+      # From an expression into the environment, never `${{ }}` inside
+      # `run:` (the rule stated at `env: TAG:`).
+      VERSION: ${{ needs.build.outputs.version }}
+    strategy:
+      # One run names every failing target; any failed leg still skips
+      # `publish`, so a failing target blocks the release.
+      fail-fast: false
+      # The README's Supported platforms tier-1 rows, one leg each;
+      # tests/release-workflow.sh holds this list to them. Images are
+      # pinned by tag, not digest, on purpose: the point of a
+      # distribution build is the distribution's current packages,
+      # Dependabot does not bump `container.image`, and zizmor's
+      # unpinned-images audit raises only a pedantic finding for a tag.
+      # `job.container` cannot change per step, so each step chooses
+      # its family with `if:`.
+      matrix:
+        include:
+          - target: fedora-44
+            image: registry.fedoraproject.org/fedora:44
+          - target: fedora-45
+            image: registry.fedoraproject.org/fedora:45
+          - target: ubuntu-26.04
+            image: docker.io/library/ubuntu:26.04
+          - target: ubuntu-26.10
+            image: docker.io/library/ubuntu:26.10
     steps:
       # git so actions/checkout clones rather than falling back to the
       # REST download; dnf5-plugins is the package that carries `builddep`
-      # on Fedora 44; rpm-build pulls tar, gzip, zstd, patch, debugedit,
-      # elfutils and binutils itself.
-      - name: Install the build tools
+      # on Fedora 44 (45 has it in the image); rpm-build pulls tar, gzip,
+      # zstd, patch, debugedit, elfutils and binutils itself.
+      - name: Install the build tools (Fedora)
+        if: startsWith(matrix.target, 'fedora-')
         run: dnf -y install git-core rpm-build dnf5-plugins
+
+      # The Ubuntu legs are the `.deb`'s build without the packaging
+      # (Story 5.5 adds `dpkg-buildpackage` and its upload here), so a
+      # toolchain or offline-build problem on Ubuntu is red before the
+      # package exists. No checkout and so no git: Source0 is the tree
+      # `build` validated. The image runs as root and has no sudo.
+      - name: Install the build tools (Ubuntu)
+        if: startsWith(matrix.target, 'ubuntu-')
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates cargo rustc gcc libc6-dev libwayland-dev pkgconf
 
       # The commit `build` validated and archived as Source0, not the tag
       # name resolved a second time: a tag moved between the two jobs
       # would otherwise put the spec and this script from one commit
       # beside sources from another under one attestation.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: startsWith(matrix.target, 'fedora-')
         with:
           ref: ${{ needs.build.outputs.sha }}
           persist-credentials: false
@@ -261,31 +348,52 @@ jobs:
       # (cargo, rust, gcc, wayland-devel, systemd-rpm-macros); read from
       # the file that declares them so this job cannot drift from it.
       - name: Install the spec's BuildRequires
+        if: startsWith(matrix.target, 'fedora-')
         run: dnf -y builddep packaging/rpm/buoy-wm.spec
 
+      # Both families read the same two sources.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: rpm-sources
-          path: rpm-sources
+          name: sources
+          path: sources
 
       # A full `rpmbuild -bb` — %build and %check are the build and the
       # tests with Fedora's toolchain; no cargo runs outside rpmbuild. The
       # script publishes the one binary package under the name GitHub will
       # serve (see its header for the `~` rewrite) with its checksum.
       - name: Build the RPM
-        run: scripts/build-rpm.sh rpm-sources dist
+        if: startsWith(matrix.target, 'fedora-')
+        run: scripts/build-rpm.sh sources dist
 
       # `overwrite` for the same re-run reason as `build`'s relays.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: startsWith(matrix.target, 'fedora-')
         with:
-          name: rpm
+          name: package-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
           retention-days: 7
           overwrite: true
 
+      # What the spec's %prep, %build and %check do, with Ubuntu's cargo
+      # and rustc: Source0 unpacked, the vendored crates inside it, the
+      # same vendored-sources config, and no network.
+      - name: Build and test the sources offline
+        if: startsWith(matrix.target, 'ubuntu-')
+        run: |
+          mkdir -p build
+          tar -C build -xzf "sources/buoy-wm-${VERSION}.tar.gz"
+          cd "build/buoy-wm-${VERSION}"
+          tar -xzf "../../sources/buoy-wm-${VERSION}-vendor.tar.gz"
+          mkdir -p .cargo
+          printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
+          rustc --version
+          cargo --version
+          cargo build --workspace --release --offline --locked
+          cargo test --workspace --release --offline --locked
+
   publish:
-    needs: [build, rpm]
+    needs: [build, packages]
     runs-on: ubuntu-24.04
     permissions:
       # `gh release create` / `upload`.
@@ -300,8 +408,9 @@ jobs:
       # a remote.
       GH_REPO: ${{ github.repository }}
     steps:
-      # Both artifacts land flat in dist/: upload-artifact stores files
-      # relative to the least common ancestor of the matched paths.
+      # Every artifact lands flat in dist/: upload-artifact stores files
+      # relative to the least common ancestor of the matched paths, and
+      # `merge-multiple` puts every leg's package beside the tarballs.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
@@ -309,7 +418,8 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: rpm
+          pattern: package-*
+          merge-multiple: true
           path: dist
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

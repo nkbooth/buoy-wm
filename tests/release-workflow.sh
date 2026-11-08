@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: RPL-1.5
+#
+# Unless explicitly acquired and licensed from Licensor under another
+# license, the contents of this file are subject to the Reciprocal Public
+# License ("RPL") Version 1.5, or subsequent versions as allowed by the
+# RPL, and You may not copy or use this file in either source code or
+# executable form, except in compliance with the terms and conditions of
+# the RPL.
+#
+# All software distributed under the RPL is provided strictly on an "AS
+# IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+# LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+# LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+# language governing rights and limitations under the RPL.
+#
+# Asserts that release.yml builds what the README promises, on hosts
+# that are not retiring. release.yml runs only on a tag, so a package
+# matrix that drifts from the README's Supported platforms table, a
+# runner label past its retirement or a toolchain that floats would
+# otherwise be found on the release that ships it. The targets are read
+# from the README's tier-1 rows (ADR-013: the list lives there) and
+# mapped to container images by rule; nothing here spells a release.
+# grep, awk and sed over the file's own shape, because the hygiene
+# runner guarantees neither yq nor a YAML library.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
+readonly README="$REPO_ROOT/README.md"
+readonly RELEASE="$REPO_ROOT/.github/workflows/release.yml"
+
+tmp="$(mktemp -d)"
+readonly tmp
+trap 'rm -rf "$tmp"' EXIT
+
+status=0
+: >"$tmp/report"
+
+# Every failure is appended and printed together at the end, so one run
+# names everything that disagrees rather than the first thing.
+fail() {
+    printf '%s\n' "$1" >>"$tmp/report"
+    status=1
+}
+
+for file in "$README" "$RELEASE"; do
+    if [ ! -r "$file" ]; then
+        fail "${file#"$REPO_ROOT/"}: missing or unreadable"
+    fi
+done
+if [ "$status" -ne 0 ]; then
+    cat "$tmp/report" >&2
+    exit "$status"
+fi
+
+# job_body <job>: the lines of one job, from its two-space key to the
+# next job key, so a `target:` or `image:` elsewhere cannot satisfy a
+# check about this job.
+job_body() {
+    awk -v key="  $1:" '$0 == key { in_job = 1; next }
+        /^  [a-z]/ { in_job = 0 }
+        in_job' "$RELEASE"
+}
+
+# (a) Every job runs on a label that is not retiring: GitHub removes
+# ubuntu-22.04 on 2027-04-17 after brownouts from 2027-03-23
+# (actions/runner-images#14254). Whole line after the indentation, so a
+# trailing comment or a second label cannot pass; at least three, one
+# per job.
+runs_on_lines="$(grep -E '^[[:space:]]*runs-on:' "$RELEASE" || true)"
+runs_on_count="$(printf '%s' "$runs_on_lines" | grep -c . || true)"
+if [ "$runs_on_count" -lt 3 ]; then
+    fail "release.yml: expected at least three 'runs-on:' lines (build, packages, publish), found $runs_on_count"
+fi
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    trimmed="$(printf '%s' "$line" | sed 's/^[[:space:]]*//')"
+    if [ "$trimmed" != 'runs-on: ubuntu-24.04' ]; then
+        fail "release.yml: '$trimmed' is not 'runs-on: ubuntu-24.04' (the runner is only the host, ADR-015)"
+    fi
+done <<<"$runs_on_lines"
+if grep -qF -- 'ubuntu-22.04' "$RELEASE"; then
+    fail "release.yml: still names 'ubuntu-22.04' (retiring; brownouts from 2027-03-23)"
+fi
+
+# (b) The README's tier-1 rows, read the way tests/docs.sh reads the
+# section: from its heading to the next `## `. A row's second cell is
+# its tier; the first is the release name the target is derived from.
+platforms="$(awk '/^## Supported platforms$/ { in_section = 1; next }
+    /^## / { in_section = 0 }
+    in_section' "$README" || true)"
+tier1_names="$(printf '%s\n' "$platforms" | awk -F'|' '/^\|/ {
+        name = $2; tier = $3
+        gsub(/^[ \t]+|[ \t]+$/, "", name)
+        gsub(/^[ \t]+|[ \t]+$/, "", tier)
+        if (tier == "1") print name
+    }')"
+if [ -z "$tier1_names" ]; then
+    fail "README.md: no tier-1 rows in the Supported platforms section (the release matrix is derived from them)"
+fi
+
+# Release name -> "target image" by rule; anything else is reported,
+# never skipped, so a new kind of row cannot silently leave the matrix.
+: >"$tmp/expected"
+lts_images=()
+while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if [[ "$name" =~ ^Fedora\ ([0-9]+)$ ]]; then
+        n="${BASH_REMATCH[1]}"
+        printf 'fedora-%s registry.fedoraproject.org/fedora:%s\n' "$n" "$n" >>"$tmp/expected"
+    elif [[ "$name" =~ ^Ubuntu\ ([0-9]+\.[0-9]+)(\ LTS)?$ ]]; then
+        v="${BASH_REMATCH[1]}"
+        printf 'ubuntu-%s docker.io/library/ubuntu:%s\n' "$v" "$v" >>"$tmp/expected"
+        if [ -n "${BASH_REMATCH[2]}" ]; then
+            lts_images+=("docker.io/library/ubuntu:$v")
+        fi
+    else
+        fail "README.md: tier-1 row '$name' maps to no release target (only 'Fedora NN' and 'Ubuntu X.Y[ LTS]' have a rule)"
+    fi
+done <<<"$tier1_names"
+
+# The packages job's matrix: each `- target:` line followed directly by
+# its `image:` line.
+job_body packages >"$tmp/packages"
+if [ ! -s "$tmp/packages" ]; then
+    fail "release.yml: no 'packages' job (the per-release matrix)"
+fi
+awk '/^[[:space:]]*- target: / {
+        target = $0; sub(/^[[:space:]]*- target: /, "", target)
+        if ((getline next_line) > 0) {
+            image = next_line
+            if (sub(/^[[:space:]]*image: /, "", image)) print target, image
+            else print target, "-"
+        } else print target, "-"
+    }' "$tmp/packages" >"$tmp/actual"
+while read -r target image; do
+    count="$(awk -v t="$target" '$1 == t' "$tmp/actual" | grep -c . || true)"
+    if [ "$count" -eq 0 ]; then
+        fail "release.yml: the packages matrix has no '- target: $target' (a README tier-1 row)"
+    elif [ "$count" -gt 1 ]; then
+        fail "release.yml: the packages matrix lists '- target: $target' $count times (each target exactly once)"
+    elif ! awk -v t="$target" -v i="$image" '$1 == t && $2 == i' "$tmp/actual" | grep -q .; then
+        fail "release.yml: '- target: $target' is not followed by 'image: $image'"
+    fi
+done <"$tmp/expected"
+while read -r target _; do
+    if ! awk -v t="$target" '$1 == t' "$tmp/expected" | grep -q .; then
+        fail "release.yml: the packages matrix has '- target: $target', which no README tier-1 row maps to"
+    fi
+done <"$tmp/actual"
+
+# (c) The tarball is built in the oldest-glibc supported container, the
+# LTS row's image (ADR-015), so its glibc floor is a fact of the table.
+job_body build >"$tmp/build"
+build_images="$(grep -E '^[[:space:]]*image: ' "$tmp/build" | sed 's/^[[:space:]]*image: //' || true)"
+build_image_count="$(printf '%s' "$build_images" | grep -c . || true)"
+if [ "${#lts_images[@]}" -ne 1 ]; then
+    fail "README.md: expected exactly one tier-1 row ending in ' LTS' (the build container), found ${#lts_images[@]}"
+elif [ "$build_image_count" -ne 1 ]; then
+    fail "release.yml: expected exactly one 'image:' line in the build job (its container), found $build_image_count"
+elif [ "$build_images" != "${lts_images[0]}" ]; then
+    fail "release.yml: the build job's container is '$build_images', not '${lts_images[0]}' (the tier-1 LTS row's image, ADR-015)"
+fi
+
+# (d) One pinned toolchain: the tarball and the vendored crates are
+# what the attestation names, so the compiler is a version, never a
+# channel or an expression.
+toolchain_lines="$(grep -E '^[[:space:]]*toolchain:' "$RELEASE" || true)"
+toolchain_count="$(printf '%s' "$toolchain_lines" | grep -c . || true)"
+if [ "$toolchain_count" -ne 1 ]; then
+    fail "release.yml: expected exactly one 'toolchain:' line, found $toolchain_count"
+else
+    toolchain="$(printf '%s' "$toolchain_lines" | sed 's/^[[:space:]]*toolchain:[[:space:]]*//')"
+    if [[ ! "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        fail "release.yml: toolchain '$toolchain' is not a pinned X.Y.Z version"
+    fi
+fi
+
+# (e) No container image here has sudo, which setup-build-deps runs;
+# and git refuses a workspace the runner's user owns once the container
+# runs it as root, unless the workspace is trusted by hand.
+if grep -qE '^[[:space:]]*(- )?uses: \./\.github/actions/setup-build-deps' "$RELEASE"; then
+    fail "release.yml: uses ./.github/actions/setup-build-deps (it runs sudo, which the container images lack)"
+fi
+# shellcheck disable=SC2016 # the literal text of the workflow line
+if ! grep -qF -- 'safe.directory "$GITHUB_WORKSPACE"' "$RELEASE"; then
+    fail "release.yml: does not set 'safe.directory \"\$GITHUB_WORKSPACE\"' (git refuses the runner-owned workspace as root)"
+fi
+
+# (f) A tag push and a dispatch of the same tag queue, never race.
+concurrency_count="$(grep -c '^concurrency:' "$RELEASE" || true)"
+if [ "$concurrency_count" -ne 1 ]; then
+    fail "release.yml: expected exactly one top-level 'concurrency:' block, found $concurrency_count"
+fi
+
+if [ "$status" -ne 0 ]; then
+    cat "$tmp/report" >&2
+fi
+exit "$status"

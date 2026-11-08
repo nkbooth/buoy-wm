@@ -15,7 +15,9 @@
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
 #
-# One copy of the system-dependency install that three CI/release jobs need.
+# One copy of the system-dependency install that ci.yml's `check` and
+# `msrv` jobs need. It runs `sudo`, so container jobs (release.yml's,
+# whose images run as root without sudo) install their own packages.
 # libwayland-dev provides the headers and the .pc file that
 # wayland-client/wayland-backend link against at build time; at run time
 # only libwayland-client.so.0 is needed, which every Wayland system has.
