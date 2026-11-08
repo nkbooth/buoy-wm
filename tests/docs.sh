@@ -248,8 +248,19 @@ if ! grep -qE '^pinned_terminals = (true|false)$' "$EXAMPLE"; then
 fi
 require_text "$README" 'pinned_terminals = false' \
     "the way to run without any multiplexer, which the platforms section relies on"
-require_text "$README" '"tmux", "new-session", "-A", "-s", "{session}"' \
-    "the tmux pinned_terminal_args line the Ubuntu steps point at"
+# The tmux pinned_terminal_args line the Ubuntu steps point at, as the
+# one whole line a user copies: exactly once, so a second, bare copy
+# cannot hide behind the gated one, and directly under `[defaults]`
+# (whole-line too), because a file holding only the bare key is
+# rejected (`unknown field pinned_terminal_args`). The `|| true` keeps
+# a zero count on the report rather than ending the run.
+tmux_line='pinned_terminal_args = ["-a", "{app_id}", "tmux", "new-session", "-A", "-s", "{session}"]'
+tmux_lines="$(grep -cxF -- "$tmux_line" "$README" || true)"
+if [ "$tmux_lines" -ne 1 ]; then
+    fail "README.md: expected exactly one line '$tmux_line' (the tmux pinned_terminal_args line the Ubuntu steps point at), found $tmux_lines"
+elif ! grep -B1 -xF -- "$tmux_line" "$README" | grep -qxF -- '[defaults]'; then
+    fail "README.md: the tmux pinned_terminal_args line is not directly under a '[defaults]' line (a file holding only the bare key is rejected)"
+fi
 # Two facts verified in containers on 2026-11-08 (Story 5.2). tmux 3.7
 # and newer cannot re-attach a session whose name holds `.` or `:`, so
 # a tag named that way loses its pinned terminal on the second login;
@@ -260,14 +271,6 @@ require_text "$README" '"tmux", "new-session", "-A", "-s", "{session}"' \
 # words to another row is red.
 require_text "$README" "can't find pane" \
     "the tmux error a tag named with '.' or ':' produces on the second login"
-# The tmux snippet is the one the Ubuntu steps send a user to copy, and
-# a file holding only the bare key is rejected (`unknown field
-# pinned_terminal_args`), so the header directly above it is a fact too:
-# whole-line, so a commented or indented `[defaults]` does not pass.
-if ! grep -B1 -F -- '"tmux", "new-session", "-A", "-s", "{session}"' "$README" \
-    | grep -qxF -- '[defaults]'; then
-    fail "README.md: the tmux pinned_terminal_args line is not directly under a '[defaults]' line (a file holding only the bare key is rejected)"
-fi
 ubuntu_2604_row="$(printf '%s\n' "$platforms" | grep -F -- '| Ubuntu 26.04 LTS |' || true)"
 # An absent row is already on the report from the loop above; only a
 # present row is asked about its cell.

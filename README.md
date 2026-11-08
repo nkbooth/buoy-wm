@@ -60,16 +60,16 @@ pinned_terminal_args = ["-a", "{app_id}", "tmux", "new-session", "-A", "-s", "{s
 `-A` attaches to the session if it exists and creates it otherwise, which is
 what zellij's `attach --create` does. `pinned_terminals = false` drops the
 multiplexer and the pinned terminal altogether. tmux has a trap zellij does
-not, in two shapes: tmux 3.7 and newer (Fedora 44 and 45 with updates ship
-3.8, Ubuntu 26.10 ships 3.7b) accept `.` and `:` in a new session's name but
+not, in two shapes: tmux 3.7 and newer (Ubuntu 26.10's 3.7b, the 3.8 in
+Fedora 44 and 45's updates) accept `.` and `:` in a new session's name but
 read them as target separators (`session:window.pane`) when attaching, so a
 tag named like `a.b` or `a:b` gets its pinned terminal on the first login
-only and, while that tmux server is still running, every later login fails
-with `can't find pane` or `can't find window` (or attaches to another tag's
-session if its name matches the target); tmux 3.6a (Ubuntu 26.04) rewrites
-both characters to `_`, so `a.b`, `a:b` and `a_b` share one session. Keep
-those two characters out of tag names when using tmux, or use zellij, which
-accepts them.
+only and, while that tmux server is still running, every later login either
+fails with `can't find pane` or `can't find window` or attaches to another
+tag's session whose name matches the target; tmux 3.6a (Ubuntu 26.04, and
+Fedora 44 before its updates) rewrites both characters to `_`, so `a.b`,
+`a:b` and `a_b` share one session. Keep those two characters out of tag names
+when using tmux, or use zellij, which accepts them.
 
 `river`'s `river_input_manager_v1` and `river_libinput_config_v1` globals are
 also optional: without them, `[[input]]` blocks are skipped with one log line
@@ -547,7 +547,7 @@ WM recognises the pinned window, and its absence is rejected at load. It is
 substituted per tag, as `pinned-term-<tag id>` (for example
 `pinned-term-3`), which is how a mapped window says which tag it belongs to
 rather than the WM having to guess from the order spawns happen to start in.
-`{session}` becomes the tag's zellij session name.
+`{session}` becomes the tag's session name, whichever multiplexer runs there.
 
 ### Input devices
 
