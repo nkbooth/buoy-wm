@@ -98,6 +98,19 @@ tier1_names="$(printf '%s\n' "$platforms" | awk -F'|' '/^\|/ {
         gsub(/^[ \t]+|[ \t]+$/, "", tier)
         if (tier == "1") print name
     }')"
+# A tier cell this rule cannot read ("1 (from May)", "**1**") would
+# otherwise drop its row from the matrix without a word; the header and
+# the separator row are the only other shapes the table has.
+unread_tiers="$(printf '%s\n' "$platforms" | awk -F'|' '/^\|/ {
+        name = $2; tier = $3
+        gsub(/^[ \t]+|[ \t]+$/, "", name)
+        gsub(/^[ \t]+|[ \t]+$/, "", tier)
+        if (tier !~ /^(1|2|unsupported|Tier|-+)$/) print name " -> " tier
+    }')"
+while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    fail "README.md: Supported platforms row '$row' has a tier cell that is not '1', '2' or 'unsupported'"
+done <<<"$unread_tiers"
 if [ -z "$tier1_names" ]; then
     fail "README.md: no tier-1 rows in the Supported platforms section (the release matrix is derived from them)"
 fi
@@ -151,6 +164,30 @@ while read -r target _; do
         fail "release.yml: the packages matrix has '- target: $target', which no README tier-1 row maps to"
     fi
 done <"$tmp/actual"
+# The list means nothing unless each leg runs in its own entry's image.
+# shellcheck disable=SC2016 # the literal text of the workflow line
+if [ "$(grep -cxF -- '      image: ${{ matrix.image }}' "$tmp/packages" || true)" -ne 1 ]; then
+    fail "release.yml: the packages job's container is not exactly 'image: \${{ matrix.image }}' (every leg would share one image)"
+fi
+
+# (g) Every leg can fail the release and every leg's package reaches it:
+# a per-target artifact name (a shared one lets `overwrite` replace one
+# leg's RPM with another's), `publish` waiting on `packages` and
+# downloading every `package-*`, and no `continue-on-error` anywhere.
+# shellcheck disable=SC2016 # the literal text of the workflow line
+if [ "$(grep -cxF -- '          name: package-${{ matrix.target }}' "$tmp/packages" || true)" -ne 1 ]; then
+    fail "release.yml: the packages job does not upload exactly one 'name: package-\${{ matrix.target }}' artifact"
+fi
+job_body publish >"$tmp/publish"
+if ! grep -qxF -- '    needs: [build, packages]' "$tmp/publish"; then
+    fail "release.yml: publish does not say 'needs: [build, packages]' (a failed leg must block the release)"
+fi
+if ! grep -qxF -- '          pattern: package-*' "$tmp/publish"; then
+    fail "release.yml: publish does not download 'pattern: package-*' (every leg's package)"
+fi
+if grep -qE '^[[:space:]]*continue-on-error:' "$RELEASE"; then
+    fail "release.yml: uses continue-on-error (a failing target must block the release)"
+fi
 
 # (c) The tarball is built in the oldest-glibc supported container, the
 # LTS row's image (ADR-015), so its glibc floor is a fact of the table.
@@ -182,19 +219,29 @@ fi
 # (e) No container image here has sudo, which setup-build-deps runs;
 # and git refuses a workspace the runner's user owns once the container
 # runs it as root, unless the workspace is trusted by hand.
-if grep -qE '^[[:space:]]*(- )?uses: \./\.github/actions/setup-build-deps' "$RELEASE"; then
-    fail "release.yml: uses ./.github/actions/setup-build-deps (it runs sudo, which the container images lack)"
+# Any mention, so a quoted or reformatted `uses:` cannot slip past.
+if grep -qF -- 'setup-build-deps' "$RELEASE"; then
+    fail "release.yml: names ./.github/actions/setup-build-deps (it runs sudo, which the container images lack)"
 fi
+# A `run:` line of the build job, so a comment quoting it cannot pass.
 # shellcheck disable=SC2016 # the literal text of the workflow line
-if ! grep -qF -- 'safe.directory "$GITHUB_WORKSPACE"' "$RELEASE"; then
-    fail "release.yml: does not set 'safe.directory \"\$GITHUB_WORKSPACE\"' (git refuses the runner-owned workspace as root)"
+if ! grep -qxE -- '[[:space:]]*run: git config --global --add safe\.directory "\$GITHUB_WORKSPACE"' "$tmp/build"; then
+    fail "release.yml: the build job does not run 'git config --global --add safe.directory \"\$GITHUB_WORKSPACE\"' (git refuses the runner-owned workspace as root)"
 fi
 
-# (f) A tag push and a dispatch of the same tag queue, never race.
+# (f) A tag push and a dispatch of the same tag queue, never race: one
+# block, keyed on the tag, that never cancels a running publish.
 concurrency_count="$(grep -c '^concurrency:' "$RELEASE" || true)"
 if [ "$concurrency_count" -ne 1 ]; then
     fail "release.yml: expected exactly one top-level 'concurrency:' block, found $concurrency_count"
 fi
+# shellcheck disable=SC2016 # the literal text of the workflow line
+for line in '  group: release-${{ inputs.tag || github.ref_name }}' \
+    '  cancel-in-progress: false'; do
+    if [ "$(grep -cxF -- "$line" "$RELEASE" || true)" -ne 1 ]; then
+        fail "release.yml: expected the concurrency line '${line#  }' exactly once"
+    fi
+done
 
 if [ "$status" -ne 0 ]; then
     cat "$tmp/report" >&2

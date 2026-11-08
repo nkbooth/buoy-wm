@@ -232,7 +232,11 @@ require_text "$README" '-1.fc44.x86_64.rpm' \
 packages_job="$(awk '$0 == "  packages:" { in_job = 1; next }
     /^  [a-z]/ { in_job = 0 }
     in_job' "$RELEASE" || true)"
-fedora_releases="$(printf '%s\n' "$packages_job" | sed -n 's/^[[:space:]]*- target: fedora-\([0-9][0-9]*\)$/\1/p')"
+# Split on whitespace, as tests/release-workflow.sh reads the same
+# lines, so a target that gate accepts is never dropped here.
+fedora_releases="$(printf '%s\n' "$packages_job" | awk '$1 == "-" && $2 == "target:" && $3 ~ /^fedora-[0-9]+$/ {
+        sub(/^fedora-/, "", $3); print $3
+    }')"
 if [ -z "$fedora_releases" ]; then
     fail "release.yml: no '- target: fedora-NN' in the packages job (PACKAGING.md's RPM asset names are derived from them)"
 fi

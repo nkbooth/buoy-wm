@@ -93,8 +93,8 @@ meets it (Fedora 44 1.94.1 in the release repo and 1.99.1 in updates,
 Fedora 45 1.99.1, Ubuntu 26.04 1.93.1, 26.10 1.97.1, read 2026-11-08).
 Only the release tarball uses a pinned rustup toolchain: `1.99.1`, the
 compiler rc.1 and rc.2 were built with, moved by a deliberate commit and
-never by Dependabot. So the bare binary and the vendor tarball are
-reproducible independent of any archive's cadence.
+never by Dependabot. So the bare binary's compiler and the vendor
+tarball's digest do not move with any archive's cadence.
 
 The release tarball is built in `ubuntu:26.04`, so its glibc floor is
 2.43, the oldest glibc of any tier-1 release (Fedora 44 is also 2.43;
@@ -173,8 +173,9 @@ spec's `Version:`. To rebuild:
    serves.
 3. Put both in one directory. In a container of the target release
    (`fedora:44` or `fedora:45`) run
-   `dnf install rpm-build dnf5-plugins` (the image has neither `rpmbuild`
-   nor the `builddep` subcommand), `dnf builddep packaging/rpm/buoy-wm.spec`,
+   `dnf install rpm-build dnf5-plugins` (neither image has `rpmbuild`, and
+   `fedora:44` lacks the `builddep` subcommand),
+   `dnf builddep packaging/rpm/buoy-wm.spec`,
    then `scripts/build-rpm.sh <that directory> <a fresh out-dir>`; the
    script does not clear a non-empty out-dir.
 

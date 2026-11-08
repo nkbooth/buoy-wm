@@ -318,6 +318,7 @@ river themselves, and the README says so without promising it. The runner
 label is a line that gets bumped on the LTS cadence with no effect on what
 ships. This change has a hard deadline: it must land before the first
 brownout on 2027-03-23.
+
 **Landed:** 2026-11-08, Story 5.4: every `release.yml` job runs on
 `ubuntu-24.04`, the tarball is built in `ubuntu:26.04` and each RPM in its
 Fedora release's container. `fedora:44` ties `ubuntu:26.04` at glibc 2.43;

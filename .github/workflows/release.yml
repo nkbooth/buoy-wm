@@ -45,8 +45,10 @@ permissions:
 
 # A tag push and a `workflow_dispatch` of the same tag could otherwise
 # both find no release in `gh release view` and race `gh release
-# create`. Queued, never cancelled: a cancelled `publish` leaves a
-# half-uploaded release.
+# create` (deferred from Story 4.7's review). A running run is never
+# cancelled, because a cancelled `publish` leaves a half-uploaded
+# release; GitHub keeps one pending run per group, so a third trigger
+# replaces the queued one, which has not started.
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false

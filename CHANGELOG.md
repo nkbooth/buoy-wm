@@ -29,8 +29,7 @@ Notable changes per release. Format follows
 - Release binaries are built in containers rather than on a runner: the
   tarball in Ubuntu 26.04 with a pinned Rust 1.99.1 (glibc 2.43 promised,
   was 2.35), and one RPM per supported Fedora release built with that
-  release's own toolchain, so Fedora 45 gets its own `fc45` RPM from the
-  next release.
+  release's own toolchain, so Fedora 45 gets its own `fc45` RPM.
 
 ## [1.0.0-rc.2]
 

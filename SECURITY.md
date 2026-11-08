@@ -89,9 +89,8 @@ rebuilt from, and each RPM `buoy-wm-<version>-1.<dist>.x86_64.rpm`
 (`<dist>` names its Fedora release, as in `fc44`). `<version>` is the tag
 without its `v` in every asset name; the RPM's file carries that
 hyphenated form while `rpm -qp` reports the tilde form (`1.0.0~rc.1` for
-`1.0.0-rc.1`). The
-`.sha256` files beside them are checksums, not subjects. Verify any of
-them with:
+`1.0.0-rc.1`). The `.sha256` files beside them are checksums, not
+subjects. Verify any of them with:
 
 ```sh
 gh attestation verify <asset> --repo nkbooth/buoy-wm
