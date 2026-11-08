@@ -123,21 +123,43 @@ fi
 # same line) and never spelled here. CONTRIBUTING.md is gated because
 # its build sentence is the README's twin, and a gate on one copy
 # invites the other to drift. The PACKAGING heading is counted exactly
-# once so the section is extended, not duplicated, when the glibc
-# floor joins it.
+# once so the section is extended, not duplicated, when Story 5.4 moves
+# the glibc floor into it. Only the double-quoted spelling is read; any
+# other value is reported rather than turned into a needle.
 msrv="$(grep -m1 '^rust-version = ' "$CARGO" | cut -d'"' -f2 || true)"
 if [ -z "$msrv" ]; then
     fail "Cargo.toml: no 'rust-version = \"…\"' line to derive the toolchain floor from"
 fi
+case $msrv in
+    *[!0-9.]*)
+        fail "Cargo.toml: rust-version '$msrv' is not digits and dots (only the double-quoted spelling is read)"
+        msrv=""
+        ;;
+esac
 floor_lines="$(count_lines "$PACKAGING" '^## Toolchain floor$')"
 if [ "$floor_lines" -ne 1 ]; then
     fail "docs/PACKAGING.md: expected exactly one '## Toolchain floor' heading, found $floor_lines"
 fi
+# The README and CONTRIBUTING sentence is counted exactly once (any
+# version), so a stale second spelling, in prose or a code block,
+# cannot pass beside the gated one.
+readme_floor_lines="$(count_lines "$README" 'Rust [0-9]+(\.[0-9]+)+ or newer')"
+if [ "$readme_floor_lines" -ne 1 ]; then
+    fail "README.md: expected exactly one 'Rust <version> or newer' line, found $readme_floor_lines"
+fi
+contributing_floor_lines="$(count_lines "$CONTRIBUTING" 'Rust [0-9]+(\.[0-9]+)+ or newer')"
+if [ "$contributing_floor_lines" -ne 1 ]; then
+    fail "CONTRIBUTING.md: expected exactly one 'Rust <version> or newer' line, found $contributing_floor_lines"
+fi
 # Only with a floor in hand: an empty number would turn each needle
-# into a prefix that any value satisfies.
+# into a prefix that any value satisfies. The PACKAGING needles end at
+# the colon and the closing backtick for the same reason: without them
+# `1.93` is a prefix of `1.93.1` and `1.930`.
 if [ -n "$msrv" ]; then
-    require_text "$PACKAGING" "\`rust-version\` in \`Cargo.toml\` is $msrv" \
+    require_text "$PACKAGING" "\`rust-version\` in \`Cargo.toml\` is $msrv:" \
         "the floor PACKAGING.md states must be the manifest's"
+    require_text "$PACKAGING" "\`BuildRequires: rust >= $msrv\`" \
+        "the spec line PACKAGING.md quotes must carry the manifest's floor"
     require_text "$README" "Rust $msrv or newer" \
         "the build requirement the README states must be the manifest's floor"
     require_text "$CONTRIBUTING" "Rust $msrv or newer" \

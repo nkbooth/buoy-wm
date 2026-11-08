@@ -96,14 +96,23 @@ require_tag BuildRequires 'systemd-rpm-macros'
 # 2026-10-03 bump (3193010) changed the manifest and the spec in one
 # commit, and nothing would have caught the spec staying behind. The
 # `|| true` keeps an absent line on the report instead of ending the
-# run under `set -e`. Exactly one rust line, so a second copy cannot
-# hide behind the gated one.
+# run under `set -e`. Exactly one rust line, versioned or bare, so a
+# second copy cannot hide behind the gated one. Only the double-quoted
+# spelling is read; any other value (a single-quoted one would come
+# back as the whole line) is reported rather than turned into a needle.
 msrv="$(grep -m1 '^rust-version = ' "$CARGO" | cut -d'"' -f2 || true)"
 if [ -z "$msrv" ]; then
     echo "$CARGO: no 'rust-version = \"…\"' line to derive the spec's rust floor from" >&2
     status=1
 fi
-rust_lines="$(grep -cE '^BuildRequires:[[:space:]]+rust ' "$SPEC" || true)"
+case $msrv in
+    *[!0-9.]*)
+        echo "$CARGO: rust-version '$msrv' is not digits and dots (only the double-quoted spelling is read)" >&2
+        status=1
+        msrv=""
+        ;;
+esac
+rust_lines="$(grep -cE '^BuildRequires:[[:space:]]+rust([[:space:]]|$)' "$SPEC" || true)"
 if [ "$rust_lines" -ne 1 ]; then
     echo "$SPEC: expected exactly one 'BuildRequires: rust ' line, found $rust_lines" >&2
     status=1
