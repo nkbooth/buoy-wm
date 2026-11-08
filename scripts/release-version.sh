@@ -25,7 +25,7 @@
 #   key         v1.0.0-rc.1     v1.0.0    used by
 #   cargo       1.0.0-rc.1      1.0.0     Cargo.toml, Cargo.lock, the tarball name
 #   rpm         1.0.0~rc.1      1.0.0     spec Version: (`~` sorts before the final)
-#   deb         1.0.0~rc.1-1    1.0.0-1   debian/changelog (Story 5.5)
+#   deb         1.0.0~rc.1-1    1.0.0-1   packaging/deb/debian/changelog
 #   formula     v1.0.0-rc.1     v1.0.0    the Homebrew url tag
 #   prerelease  yes             no        `gh release create --prerelease`
 #
@@ -55,6 +55,7 @@ readonly MANIFEST_CARGO=Cargo.toml
 readonly MANIFEST_LOCK=Cargo.lock
 readonly MANIFEST_SPEC=packaging/rpm/buoy-wm.spec
 readonly MANIFEST_FORMULA=packaging/homebrew/buoy-wm.rb
+readonly MANIFEST_DEB=packaging/deb/debian/changelog
 
 usage_text() {
     cat <<'EOF'
@@ -229,6 +230,22 @@ check_formula() {
     expect_value "$MANIFEST_FORMULA" 'url tag' "$actual" "$formula"
 }
 
+check_debian() {
+    local file="$tree/$MANIFEST_DEB" first actual
+    local entry_re='^buoy-wm \(([^ ()]+)\) [^;]+; urgency=[a-z]+$'
+    readable "$MANIFEST_DEB" || return 0
+    # The top entry is the version dpkg-buildpackage builds. A first line
+    # of another shape or another package is one finding, not an abort
+    # and not a compare against whatever the line holds.
+    first="$(head -n1 "$file")"
+    if [[ ! "$first" =~ $entry_re ]]; then
+        report "$MANIFEST_DEB" "first line '$first' is not 'buoy-wm (<version>) <distribution>; urgency=<u>'"
+        return 0
+    fi
+    actual="${BASH_REMATCH[1]}"
+    expect_value "$MANIFEST_DEB" 'debian/changelog version' "$actual" "$deb"
+}
+
 if [ "${#positional[@]}" -eq 1 ]; then
     tag="${positional[0]}"
 else
@@ -260,4 +277,5 @@ check_cargo_toml
 check_cargo_lock
 check_spec
 check_formula
+check_debian
 exit "$status"

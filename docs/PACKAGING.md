@@ -16,7 +16,7 @@ tests. One tag maps to one version form per packaging format; the table is
 | --- | --- | --- | --- |
 | `cargo` | `1.0.0-rc.1` | `1.0.0` | `Cargo.toml`, `Cargo.lock`, the tarball name |
 | `rpm` | `1.0.0~rc.1` | `1.0.0` | the spec's `Version:` |
-| `deb` | `1.0.0~rc.1-1` | `1.0.0-1` | `debian/changelog` (Story 5.5) |
+| `deb` | `1.0.0~rc.1-1` | `1.0.0-1` | `packaging/deb/debian/changelog` |
 | `formula` | `v1.0.0-rc.1` | `v1.0.0` | the Homebrew `url` tag |
 | `prerelease` | `yes` | `no` | `gh release create --prerelease` |
 
@@ -30,18 +30,23 @@ manifest, and `ci.yml` runs the same check on every push with the tag
 derived from `Cargo.toml`, so a half-bumped tree is red before anyone tags
 it. An `rc.N` tag is published as a GitHub pre-release.
 
-Each release carries eight assets and one attestation:
+Each release carries twelve assets and one attestation:
 `buoy-wm-<version>-x86_64-unknown-linux-gnu.tar.gz` (the three binaries,
 `install.sh`, `README.md`, `LICENSE.md`, `NOTICE.md` and
 `config.example.toml`), `buoy-wm-<version>-vendor.tar.gz` (the vendored
 crates), `buoy-wm-<version>-1.fc44.x86_64.rpm` and
 `buoy-wm-<version>-1.fc45.x86_64.rpm` (one RPM per supported Fedora
-release, each built on that release), each beside a `.sha256` whose line
-carries the bare basename, so `sha256sum -c` works wherever the pair is
-downloaded. `<version>` is the tag without its `v`, so the RPM is named
-with the hyphen while its header says `~`: GitHub rewrites `~` in asset
-names, and `rpm -qp` on the file reports `1.0.0~rc.2-1.fc44`. The
-build-provenance attestation names all four archives as subjects, and
+release, each built on that release), and
+`buoy-wm_<version>-1.ubuntu26.04_amd64.deb` and
+`buoy-wm_<version>-1.ubuntu26.10_amd64.deb` (one `.deb` per supported
+Ubuntu release, each built on that release), each beside a `.sha256`
+whose line carries the bare basename, so `sha256sum -c` works wherever
+the pair is downloaded. `<version>` is the tag without its `v`, so the
+packages are named with the hyphen while their headers say `~`: GitHub
+rewrites `~` in asset names, and `rpm -qp` on an RPM reports
+`1.0.0~rc.2-1.fc44`, `dpkg-deb -f <file> Version` on a `.deb`
+`1.0.0~rc.2-1`. The build-provenance attestation names the six archives
+and packages as subjects, and
 `gh attestation verify <file> --repo nkbooth/buoy-wm` works for each.
 
 Three jobs produce that, each in a container the workflow pins; the
@@ -55,10 +60,11 @@ serves the tag archive itself. `packages` is one leg per tier-1 release
 in the README's Supported platforms table, each in that release's own
 container. The Fedora legs run `dnf builddep packaging/rpm/buoy-wm.spec`
 and then `scripts/build-rpm.sh sources dist`: a full `rpmbuild -bb` with
-`%check`, on the release's own rustc (ADR-014). The Ubuntu legs build and
-test the same `Source0` and vendor tarball offline with the release's own
-cargo; the `.deb` arrives with Story 5.5. `publish` makes the one
-attestation and runs `gh release create` with the `CHANGELOG.md` entry for
+`%check`, on the release's own rustc (ADR-014). The Ubuntu legs run
+`apt-get build-dep ./packaging/deb`, then `scripts/build-deb.sh sources
+dist` (`dpkg-buildpackage -b` with the tests, offline, on the release's
+own rustc) and `lintian --fail-on error` on the result. `publish` makes
+the one attestation and runs `gh release create` with the `CHANGELOG.md` entry for
 the tag as the release notes (cut in `build` by `scripts/release-notes.sh`)
 — `--prerelease` for an rc, and `--clobber` on a re-run so a transient
 failure replaces the assets instead of failing on the existing release.
@@ -78,17 +84,19 @@ Two constraints shape everything downstream:
 oldest tier-1 release in the README's Supported platforms table (ADR-014).
 It moves only when that table does — a release leaving support can raise
 it, one entering with an older rustc can lower it — and never to current
-stable for its own sake. The spec's `BuildRequires: rust >= 1.93` says the
-same number, and `tests/rpm-spec.sh` and `tests/docs.sh` read it from
-`Cargo.toml` and hold both of these sentences to it, so the copies cannot
+stable for its own sake. The spec's `BuildRequires: rust >= 1.93` and
+`debian/control`'s `Build-Depends: rustc (>= 1.93)` are the second and
+third copies of the number, and `tests/rpm-spec.sh`,
+`tests/deb-package.sh` and `tests/docs.sh` read it from `Cargo.toml` and
+hold both packages and these sentences to it, so the copies cannot
 drift. CI's `msrv` job builds the locked workspace on exactly that
 toolchain, so a dependency bump that needs a newer compiler is red there
 before any distribution build sees it.
 
 Distribution packages are built by the distribution's own rustc — the
-RPMs by `rpmbuild` in `fedora:44` and `fedora:45`, and the `.deb`, once
-Story 5.5 lands, by `dpkg-buildpackage` in the Ubuntu containers — which is
-what the floor guarantees, since every supported release's archive rustc
+RPMs by `rpmbuild` in `fedora:44` and `fedora:45`, and the `.deb`s by
+`dpkg-buildpackage` in `ubuntu:26.04` and `ubuntu:26.10` — which is what
+the floor guarantees, since every supported release's archive rustc
 meets it (Fedora 44 1.94.1 in the release repo and 1.99.1 in updates,
 Fedora 45 1.99.1, Ubuntu 26.04 1.93.1, 26.10 1.97.1, read 2026-11-08).
 Only the release tarball uses a pinned rustup toolchain: `1.99.1`, the
@@ -127,8 +135,8 @@ channel is derived from. `install.sh` is shared verbatim with the source
 checkout (it detects binaries sitting beside it), so there is no second copy
 to drift.
 
-Installs to `~/.local/lib/buoy-wm` with a `~/.local/bin/buoy-wm` symlink —
-no root, and nothing that a broken build can take out of the system.
+Installs to `~/.local/lib/buoy-wm` and, when `~/.local/bin` exists, a
+symlink there — no root, and nothing that a broken build can take out of the system.
 
 ### 2. GitHub release RPM — Fedora 44 and 45
 
@@ -136,8 +144,8 @@ no root, and nothing that a broken build can take out of the system.
 built by `release.yml` in that release's container and attached to the
 release. The only channel that layers cleanly
 onto `rpm-ostree`, which matters for the atomic host this was developed on,
-and the only one that ships the session. Beyond the three binaries the
-package installs:
+and, with the `.deb`, one of the two that ship the session. Beyond the
+three binaries the package installs:
 
 - `/usr/share/wayland-sessions/buoy.desktop` — the login entry, so the
   display manager offers "buoy" instead of requiring a hand-written
@@ -190,7 +198,52 @@ by that list, so a mirror there works — but Fedora proper is closed to
 `buoy` unless RPL 1.5 is submitted for and passes legal review. Do not plan
 around Fedora inclusion.
 
-### 3. Homebrew tap — `nkbooth/homebrew-buoy`
+### 3. GitHub release `.deb` — Ubuntu 26.04 and 26.10
+
+`packaging/deb/debian/`, one `.deb` per supported Ubuntu release, each
+built by `release.yml` in that release's container with its own
+`dpkg-buildpackage`, cargo and rustc, from the same `Source0` and vendor
+tarball as the RPMs. The directory is not a top-level `debian/`, because
+a distribution packager owns that name; `scripts/build-deb.sh` copies it
+into the unpacked `Source0` before building. The package installs the
+RPM's layout exactly (the list above): the three binaries and the
+supervisor in `/usr/libexec/buoy-wm`, `/usr/bin/buoy-wm` as the one name
+on `PATH`, the login entry, the session target, the portal routing and
+`/usr/share/buoy-wm/config.example.toml`. Install it with
+`apt install ./buoy-wm_<version>-1.ubuntu26.04_amd64.deb` (or the
+`ubuntu26.10` file).
+
+`Depends` is computed from the binaries by `${shlibs:Depends}`: `libc6`
+and `libgcc-s1`, and no libwayland, because the binaries do not link it
+(wayland-backend's pure-Rust backend). `systemd` and `dbus-bin` are
+added by hand for the supervisor's `systemctl` and
+`dbus-update-activation-environment`. `Recommends` are `foot`, `fuzzel`,
+the two portal backends and `libnotify-bin` (buoy-wm runs `notify-send`
+when it rejects a config); `Suggests` is `waybar`. Neither `river` nor
+`zellij` is a relation: no Ubuntu archive carries either, so the README's
+"Supported platforms" section sends Ubuntu users to the PPA for river
+0.4+ and to zellij's own release asset (or tmux).
+
+**Offline rebuild.** In a container of the target release
+(`ubuntu:26.04` or `ubuntu:26.10`) holding a checkout of the tag, run
+`apt-get update`, `apt-get build-dep ./packaging/deb` (it installs
+`build-essential`, and with it `dpkg-dev`), then
+`scripts/build-deb.sh <a directory with Source0 and the vendor tarball> <a fresh out-dir>`.
+The rules are plain debhelper with the spec's `%prep`, `%build` and
+`%check` as overrides. The one trap: `dh_clean` deletes every `*.orig` in
+the tree, the vendored crates' `Cargo.toml.orig` included, after which
+cargo refuses the vendored sources, so the rules run
+`dh_clean -XCargo.toml.orig`.
+
+`lintian --fail-on error` on the published file (the release runs it on
+both) prints two expected warnings, `no-manual-page` until the man pages
+exist and `initial-upload-closes-no-bugs` (the changelog closes no Debian
+bug), and shows one override: lintian 2.139 does not know the `.radio`
+domain of the maintainer's address and reports it as `bogus-mail-host`,
+so `buoy-wm.lintian-overrides` overrides that tag on that address and
+nothing else.
+
+### 4. Homebrew tap — `nkbooth/homebrew-buoy`
 
 `packaging/homebrew/buoy-wm.rb`, built from source against Homebrew's own
 `wayland` formula. The tap carries no session entry, supervisor, target or
@@ -214,7 +267,7 @@ brew install buoy-wm
 Per release, the tap's copy of the formula needs exactly two lines changed
 (`url`, `sha256`). `brew bump-formula-pr` automates it.
 
-### 4. crates.io — `cargo install` fallback
+### 5. crates.io — `cargo install` fallback
 
 Zero-infrastructure coverage for any distro the other channels miss. All
 three crates install into `~/.cargo/bin`, which satisfies the
@@ -262,10 +315,12 @@ unlikely to clear the DFSG. This is a direct consequence of the license
 choice, not of packaging effort, and no amount of packaging work changes
 it. It blocks only the *archives*: a `.deb` attached to the GitHub release
 and a Launchpad PPA need no DFSG review (ADR-011), so the release-asset
-`.deb` for each supported Ubuntu is planned (the `deb` row of the version
-table above), and a PPA is an optional mirror once that Debian source
-package exists — ADR-014's MSRV keeps it buildable with Ubuntu's own
-rustc (see "Toolchain floor" above).
+`.deb` for each supported Ubuntu is built (channel 3 above). A PPA is an
+optional mirror after the tag (Story 6.5), and it needs a source package,
+which the release does not make: the orig tarball (`Source0`) plus an
+`orig-vendor` component holding the vendored crates, and a per-series
+version. ADR-014's MSRV keeps it buildable with Ubuntu's own rustc (see
+"Toolchain floor" above).
 
 **Flatpak / Snap.** Category mismatch. Both sandbox applications; a window
 manager is the session, needs the compositor's private protocol socket, and
@@ -284,7 +339,8 @@ buys nothing.
 
 1. Bump: `version` in `[workspace.package]` and `cargo update -w`; the
    spec's `Version:`, `%global upstream_version` and a `%changelog` entry;
-   the formula's `url`. Run `scripts/release-version.sh --check v<x.y.z>`
+   a `debian/changelog` entry (`packaging/deb/debian/changelog`, the `deb`
+   form, above the previous one); the formula's `url`. Run `scripts/release-version.sh --check v<x.y.z>`
    until it is quiet — it names every file that disagrees. `ci.yml` runs
    the tagless form on every push, so a half-bump is red before the tag.
 2. `cargo build --workspace --release && cargo test --workspace` — green.
@@ -294,13 +350,19 @@ buys nothing.
    so a tag whose entry is missing fails in `build`'s first minute.
    `release.yml` builds and publishes: watch `build`, the four
    `packages` legs (the Fedora legs four to five minutes each in the
-   container, 254 s for `fedora:45` on 2026-11-08; the Ubuntu legs about a
-   minute) and `publish` (one attestation with four subjects in the step
-   summary, eight assets, the pre-release flag on an rc).
-4. Verify. Download each RPM and the tarball; `sha256sum -c` and
-   `gh attestation verify` each. `dnf install` each RPM in a fresh
-   container of its own release (`fedora:44`, `fedora:45`) to prove the
-   dependency resolution, then on a real
+   container, 254 s for `fedora:45` on 2026-11-08; the Ubuntu legs about
+   five and a half minutes each with four legs sharing one machine,
+   338–342 s on 2026-11-08: apt 31–41 s, `dpkg-buildpackage` with the
+   tests 281–305 s)
+   and `publish` (one attestation with six subjects in the step summary,
+   twelve assets, the pre-release flag on an rc).
+4. Verify. Download each RPM, each `.deb` and the tarball;
+   `sha256sum -c` and `gh attestation verify` each. `dnf install` each RPM
+   in a fresh container of its own release (`fedora:44`, `fedora:45`), and
+   `apt-get update && apt install ./<file>.deb` each `.deb` in a fresh
+   container of its own (`ubuntu:26.04`, `ubuntu:26.10`), to prove the
+   dependency resolution; `/usr/bin/buoy-wm` must stop at
+   `Error: NoCompositor` in each. Then on a real
    Fedora host pick **buoy** at the display manager and check the portal
    (ScreenCast, Screenshot), the bar and logout. Extract the tarball on a
    clean machine, run `install.sh` and start a nested river before trusting

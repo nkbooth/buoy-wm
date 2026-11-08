@@ -116,8 +116,8 @@ expect_usage() {
 # follows the spec Version, as a correct bump leaves it. Fixture files
 # are written at runtime, so they carry no licence header.
 write_tree() {
-    local dir=$1 pkg=$2 deps=$3 spec_version=$4 upstream=$5 formula_tag=$6
-    mkdir -p "$dir/packaging/rpm" "$dir/packaging/homebrew"
+    local dir=$1 pkg=$2 deps=$3 spec_version=$4 upstream=$5 formula_tag=$6 deb_version=$7
+    mkdir -p "$dir/packaging/rpm" "$dir/packaging/homebrew" "$dir/packaging/deb/debian"
     {
         echo '[workspace]'
         echo 'resolver = "2"'
@@ -162,6 +162,13 @@ write_tree() {
         echo "  url \"https://github.com/nkbooth/buoy-wm/archive/refs/tags/$formula_tag.tar.gz\""
         echo 'end'
     } >"$dir/packaging/homebrew/buoy-wm.rb"
+    {
+        echo "buoy-wm ($deb_version) unstable; urgency=medium"
+        echo
+        echo '  * Fixture entry.'
+        echo
+        echo ' -- Nick Booth <nick@onlyhams.radio>  Sun, 08 Nov 2026 13:30:00 -0500'
+    } >"$dir/packaging/deb/debian/changelog"
 }
 
 run_check() {
@@ -248,14 +255,14 @@ if [ "$rc" -ne 0 ] || ! grep -q '^usage:' "$tmp/out"; then
 fi
 
 # A tree that agrees with v1.0.0-rc.1, with and without the tag.
-write_tree "$tmp/good" 1.0.0-rc.1 1.0.0-rc.1 1.0.0~rc.1 1.0.0-rc.1 v1.0.0-rc.1
+write_tree "$tmp/good" 1.0.0-rc.1 1.0.0-rc.1 1.0.0~rc.1 1.0.0-rc.1 v1.0.0-rc.1 1.0.0~rc.1-1
 expect_check "$tmp/good" v1.0.0-rc.1 0
 expect_check "$tmp/good" '' 0
 
 # A tree still at 0.1.0: every manifest is named in one run. Each needle
 # carries its file, so a check dropped from one loop cannot be covered by
 # the same name reported from another.
-write_tree "$tmp/old" 0.1.0 0.1.0 0.1.0 0.1.0 v0.1.0
+write_tree "$tmp/old" 0.1.0 0.1.0 0.1.0 0.1.0 v0.1.0 0.1.0-1
 expect_check "$tmp/old" v1.0.0-rc.1 1 \
     'Cargo.toml: [workspace.package] version' \
     'Cargo.toml: [workspace.dependencies] buoy-common version' \
@@ -268,11 +275,12 @@ expect_check "$tmp/old" v1.0.0-rc.1 1 \
     'packaging/rpm/buoy-wm.spec: Version:' \
     'packaging/rpm/buoy-wm.spec: %global upstream_version' \
     'packaging/rpm/buoy-wm.spec: %changelog' \
-    'packaging/homebrew/buoy-wm.rb: url tag'
-expect_check_lines "$tmp/old" v1.0.0-rc.1 -ge 11
+    'packaging/homebrew/buoy-wm.rb: url tag' \
+    'packaging/deb/debian/changelog: '
+expect_check_lines "$tmp/old" v1.0.0-rc.1 -ge 12
 
 # The tilde where the hyphen belongs: %autosetup would fail %prep.
-write_tree "$tmp/tilde" 1.0.0-rc.1 1.0.0-rc.1 1.0.0~rc.1 1.0.0~rc.1 v1.0.0-rc.1
+write_tree "$tmp/tilde" 1.0.0-rc.1 1.0.0-rc.1 1.0.0~rc.1 1.0.0~rc.1 v1.0.0-rc.1 1.0.0~rc.1-1
 expect_check "$tmp/tilde" v1.0.0-rc.1 1 upstream_version
 expect_check_lines "$tmp/tilde" v1.0.0-rc.1 -eq 1
 
@@ -283,9 +291,22 @@ expect_check "$tmp/changelog" v1.0.0-rc.1 1 '%changelog'
 expect_check_lines "$tmp/changelog" v1.0.0-rc.1 -eq 1
 
 # A formula URL the old release.yml regex could not even see.
-write_tree "$tmp/formula" 1.0.0-rc.1 1.0.0-rc.1 1.0.0~rc.1 1.0.0-rc.1 v1.0.0
+write_tree "$tmp/formula" 1.0.0-rc.1 1.0.0-rc.1 1.0.0~rc.1 1.0.0-rc.1 v1.0.0 1.0.0~rc.1-1
 expect_check "$tmp/formula" v1.0.0-rc.1 1 'packaging/homebrew/buoy-wm.rb'
 expect_check_lines "$tmp/formula" v1.0.0-rc.1 -eq 1
+
+# Only the Debian changelog behind: its top entry still names an older
+# release, which the .deb would then be built as.
+write_tree "$tmp/debian" 1.0.0-rc.1 1.0.0-rc.1 1.0.0~rc.1 1.0.0-rc.1 v1.0.0-rc.1 1.0.0~rc.0-1
+expect_check "$tmp/debian" v1.0.0-rc.1 1 'packaging/deb/debian/changelog: ' 1.0.0~rc.0-1
+expect_check_lines "$tmp/debian" v1.0.0-rc.1 -eq 1
+
+# A first line of another package or shape is one finding naming the
+# file, not an abort and not a version compare against garbage.
+cp -r "$tmp/good" "$tmp/debian-shape"
+sed -i '1s/^buoy-wm /other-package /' "$tmp/debian-shape/packaging/deb/debian/changelog"
+expect_check "$tmp/debian-shape" v1.0.0-rc.1 1 'packaging/deb/debian/changelog: '
+expect_check_lines "$tmp/debian-shape" v1.0.0-rc.1 -eq 1
 
 # On GitHub the mismatch is an annotation on the manifest, on stdout.
 set +e
@@ -311,8 +332,9 @@ fi
 # which `set -e` would otherwise produce on the first missing file.
 mkdir "$tmp/empty"
 expect_check "$tmp/empty" v1.0.0-rc.1 1 \
-    Cargo.toml Cargo.lock packaging/rpm/buoy-wm.spec packaging/homebrew/buoy-wm.rb
-expect_check_lines "$tmp/empty" v1.0.0-rc.1 -eq 4
+    Cargo.toml Cargo.lock packaging/rpm/buoy-wm.spec packaging/homebrew/buoy-wm.rb \
+    packaging/deb/debian/changelog
+expect_check_lines "$tmp/empty" v1.0.0-rc.1 -eq 5
 if grep -Eq 'No such file|line [0-9]+:' "$tmp/err"; then
     echo "--check on an empty tree leaks a shell error:" >&2
     cat "$tmp/err" >&2
@@ -321,7 +343,7 @@ fi
 
 # Tagless --check when the tag cannot be derived: a Cargo.toml finding,
 # not a complaint about a tag nobody typed.
-write_tree "$tmp/beta" 1.0.0-beta 1.0.0-beta 1.0.0~beta 1.0.0-beta v1.0.0-beta
+write_tree "$tmp/beta" 1.0.0-beta 1.0.0-beta 1.0.0~beta 1.0.0-beta v1.0.0-beta 1.0.0~beta-1
 expect_check "$tmp/beta" '' 1 'Cargo.toml: [workspace.package] version' 1.0.0-beta
 expect_check_lines "$tmp/beta" '' -eq 1
 expect_check "$tmp/empty" '' 1 Cargo.toml

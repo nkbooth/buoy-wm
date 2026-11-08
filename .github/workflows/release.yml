@@ -15,17 +15,17 @@
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
 #
-# Builds the release tarball and one RPM per supported Fedora release on
-# a `v*` tag and attaches them, the vendored-crates tarball and their
-# checksums to the GitHub release under one build-provenance
-# attestation, with the tag's CHANGELOG.md entry as the release notes.
+# Builds the release tarball, one RPM per supported Fedora release and
+# one .deb per supported Ubuntu release on a `v*` tag and attaches them,
+# the vendored-crates tarball and their checksums to the GitHub release
+# under one build-provenance attestation, with the tag's CHANGELOG.md entry as the release notes.
 # The runner is only the host (ADR-015); every build runs in a container
 # this file pins. Three jobs: `build` makes the tarball in a
 # `ubuntu:26.04` container with a pinned rustup toolchain, cuts the notes
 # and stages the packages' two sources; `packages` is one leg per README
 # tier-1 release, each in that release's own container with its own
 # toolchain (ADR-011, ADR-014) — the Fedora legs build the RPM, the
-# Ubuntu legs build and test the same sources offline; and `publish`
+# Ubuntu legs the .deb, from the same two sources; and `publish`
 # attests and uploads. The write permissions live on `publish` alone,
 # which runs `gh` and the attest action and nothing from the tree. See
 # docs/PACKAGING.md for how this feeds the Homebrew tap and the COPR RPM.
@@ -288,10 +288,6 @@ jobs:
       run:
         # A container job's default shell is `sh`.
         shell: bash
-    env:
-      # From an expression into the environment, never `${{ }}` inside
-      # `run:` (the rule stated at `env: TAG:`).
-      VERSION: ${{ needs.build.outputs.version }}
     strategy:
       # One run names every failing target; any failed leg still skips
       # `publish`, so a failing target blocks the release.
@@ -323,28 +319,33 @@ jobs:
         if: startsWith(matrix.target, 'fedora-')
         run: dnf -y install git-core rpm-build dnf5-plugins
 
-      # The Ubuntu legs are the `.deb`'s build without the packaging
-      # (Story 5.5 adds `dpkg-buildpackage` and its upload here), so a
-      # toolchain or offline-build problem on Ubuntu is red before the
-      # package exists. No checkout and so no git: Source0 is the tree
-      # `build` validated. The image runs as root and has no sudo.
+      # The commit `build` validated and archived as Source0, not the tag
+      # name resolved a second time: a tag moved between the two jobs
+      # would otherwise put the packaging and the build script from one
+      # commit beside sources from another under one attestation. Both
+      # families read the tree: the Fedora legs for the spec and
+      # build-rpm.sh, the Ubuntu legs for packaging/deb and build-deb.sh.
+      # The Ubuntu images have no git, so the action falls back to its
+      # REST download; that leaves no .git, and no Ubuntu step runs git.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.sha }}
+          persist-credentials: false
+
+      # debian/control's Build-Depends is the one list of the Ubuntu
+      # legs' build dependencies, as the spec's BuildRequires is for
+      # Fedora, so this job cannot drift from it. `build-dep` on a
+      # directory needs no deb-src and installs build-essential itself.
+      # lintian checks the package below. The image runs as root and has
+      # no sudo.
       - name: Install the build tools (Ubuntu)
         if: startsWith(matrix.target, 'ubuntu-')
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates cargo rustc gcc libc6-dev libwayland-dev pkgconf
-
-      # The commit `build` validated and archived as Source0, not the tag
-      # name resolved a second time: a tag moved between the two jobs
-      # would otherwise put the spec and this script from one commit
-      # beside sources from another under one attestation.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: startsWith(matrix.target, 'fedora-')
-        with:
-          ref: ${{ needs.build.outputs.sha }}
-          persist-credentials: false
+          apt-get build-dep -y ./packaging/deb
+          apt-get install -y --no-install-recommends lintian
 
       # The spec's BuildRequires is the one list of build dependencies
       # (cargo, rust, gcc, wayland-devel, systemd-rpm-macros); read from
@@ -367,32 +368,31 @@ jobs:
         if: startsWith(matrix.target, 'fedora-')
         run: scripts/build-rpm.sh sources dist
 
-      # `overwrite` for the same re-run reason as `build`'s relays.
+      # `dpkg-buildpackage -b` with debian/rules' build and tests on
+      # Ubuntu's own cargo and rustc, offline. The script publishes the
+      # one binary package under a name carrying the release label (two
+      # legs build the same version; see its header) with its checksum.
+      - name: Build the .deb
+        if: startsWith(matrix.target, 'ubuntu-')
+        run: scripts/build-deb.sh sources dist
+
+      # The .deb and not the .changes: the changes file's `Distribution:
+      # unstable` is an error under Ubuntu's lintian profile and is not
+      # shipped. Warnings (no-manual-page until the man pages exist,
+      # initial-upload-closes-no-bugs) print but do not fail.
+      - name: Lint the .deb
+        if: startsWith(matrix.target, 'ubuntu-')
+        run: lintian --fail-on error --no-tag-display-limit dist/*.deb
+
+      # One upload for both families. `overwrite` for the same re-run
+      # reason as `build`'s relays.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: startsWith(matrix.target, 'fedora-')
         with:
           name: package-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
           retention-days: 7
           overwrite: true
-
-      # What the spec's %prep, %build and %check do, with Ubuntu's cargo
-      # and rustc: Source0 unpacked, the vendored crates inside it, the
-      # same vendored-sources config, and no network.
-      - name: Build and test the sources offline
-        if: startsWith(matrix.target, 'ubuntu-')
-        run: |
-          mkdir -p build
-          tar -C build -xzf "sources/buoy-wm-${VERSION}.tar.gz"
-          cd "build/buoy-wm-${VERSION}"
-          tar -xzf "../../sources/buoy-wm-${VERSION}-vendor.tar.gz"
-          mkdir -p .cargo
-          printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
-          rustc --version
-          cargo --version
-          cargo build --workspace --release --offline --locked
-          cargo test --workspace --release --offline --locked
 
   publish:
     needs: [build, packages]
@@ -429,14 +429,15 @@ jobs:
           name: release-notes
           path: release-notes
 
-      # One attestation naming the tarball, the vendor tarball and the
-      # RPM; the .sha256 files are not subjects.
+      # One attestation naming the tarball, the vendor tarball, each RPM
+      # and each .deb; the .sha256 files are not subjects.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/*.tar.gz
             dist/*.rpm
+            dist/*.deb
 
       - name: Publish release
         env:

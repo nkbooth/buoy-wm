@@ -189,6 +189,47 @@ if grep -qE '^[[:space:]]*continue-on-error:' "$RELEASE"; then
     fail "release.yml: uses continue-on-error (a failing target must block the release)"
 fi
 
+# (h) Each family builds its package with its script, and both reach the
+# release under the one attestation. Whole `run:` lines, exactly once
+# and inside the packages job, so a comment quoting a command, a second
+# copy or a step in another job cannot stand in for it. The checkout
+# and the upload serve both families, so neither may carry an `if:`
+# (read: the line after the `uses:` is not an `if:` line); with one
+# unconditional upload, check (g)'s exactly-one artifact name holds for
+# the Ubuntu legs too.
+# count_lines_matching <file> <regex>: how many whole lines match.
+count_lines_matching() {
+    grep -cxE -- "$2" "$1" || true
+}
+for run_line in 'scripts/build-rpm\.sh sources dist' 'scripts/build-deb\.sh sources dist' \
+    'lintian --fail-on error( [^ ]+)* dist/\*\.deb'; do
+    n="$(count_lines_matching "$tmp/packages" "[[:space:]]*run: $run_line")"
+    if [ "$n" -ne 1 ]; then
+        fail "release.yml: the packages job does not have exactly one 'run: ${run_line//\\/}' line (found $n)"
+    fi
+done
+n="$(count_lines_matching "$tmp/packages" '[[:space:]]*apt-get build-dep -y \./packaging/deb')"
+if [ "$n" -ne 1 ]; then
+    fail "release.yml: the packages job does not run 'apt-get build-dep -y ./packaging/deb' exactly once as a whole line (debian/control's Build-Depends is the Ubuntu legs' one list; found $n)"
+fi
+for action in actions/checkout actions/upload-artifact; do
+    n="$(grep -cE -- "^[[:space:]]*- uses: $action@" "$tmp/packages" || true)"
+    if [ "$n" -ne 1 ]; then
+        fail "release.yml: expected exactly one '- uses: $action@' step in the packages job, found $n"
+    elif awk -v pat="^[[:space:]]*- uses: $action@" '
+            found { exit !($0 ~ /^[[:space:]]*if:/) }
+            $0 ~ pat { found = 1 }
+            END { if (!found) exit 1 }' "$tmp/packages"; then
+        fail "release.yml: the packages job's $action step has an 'if:' (both families need it)"
+    fi
+done
+for subject in 'dist/*.tar.gz' 'dist/*.rpm' 'dist/*.deb'; do
+    n="$(sed 's/^[[:space:]]*//' "$tmp/publish" | grep -cxF -- "$subject" || true)"
+    if [ "$n" -ne 1 ]; then
+        fail "release.yml: publish's attestation does not list '$subject' exactly once as a whole line (found $n)"
+    fi
+done
+
 # (c) The tarball is built in the oldest-glibc supported container, the
 # LTS row's image (ADR-015), so its glibc floor is a fact of the table.
 job_body build >"$tmp/build"

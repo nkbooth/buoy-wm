@@ -12,6 +12,10 @@ Notable changes per release. Format follows
   from on each release (the archive, or the unofficial PPAs on Ubuntu), how
   to get zellij or use tmux instead, and which release asset to download,
   plus Ubuntu install steps that follow the table.
+- A `.deb` for Ubuntu 26.04 LTS and 26.10 on every release, each built
+  with that release's own toolchain and installing the `buoy` login
+  session. river comes from the PPA and zellij from upstream, so neither
+  is a dependency.
 
 ### Changed
 

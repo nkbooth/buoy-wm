@@ -161,6 +161,8 @@ if [ -n "$msrv" ]; then
         "the floor PACKAGING.md states must be the manifest's"
     require_text "$PACKAGING" "\`BuildRequires: rust >= $msrv\`" \
         "the spec line PACKAGING.md quotes must carry the manifest's floor"
+    require_text "$PACKAGING" "\`Build-Depends: rustc (>= $msrv)\`" \
+        "the debian/control relation PACKAGING.md quotes must carry the manifest's floor"
     require_text "$README" "Rust $msrv or newer" \
         "the build requirement the README states must be the manifest's floor"
     require_text "$CONTRIBUTING" "Rust $msrv or newer" \
@@ -244,6 +246,25 @@ for fedora in $fedora_releases; do
     require_text "$PACKAGING" "-1.fc$fedora.x86_64.rpm" \
         "the release model must name every RPM asset release.yml builds"
 done
+# One .deb per Ubuntu target, named with the build container's
+# os-release label (scripts/build-deb.sh), read the same way.
+ubuntu_releases="$(printf '%s\n' "$packages_job" | awk '$1 == "-" && $2 == "target:" && $3 ~ /^ubuntu-[0-9]+\.[0-9]+$/ {
+        sub(/^ubuntu-/, "", $3); print $3
+    }')"
+if [ -z "$ubuntu_releases" ]; then
+    fail "release.yml: no '- target: ubuntu-X.Y' in the packages job (PACKAGING.md's .deb asset names are derived from them)"
+fi
+for ubuntu in $ubuntu_releases; do
+    require_text "$PACKAGING" "-1.ubuntu${ubuntu}_amd64.deb" \
+        "the release model must name every .deb asset release.yml builds"
+done
+# The .deb exists now, so the runbook describes it in the present tense
+# and names no story it is waiting for: the version table's "(Story
+# 5.5)", the jobs paragraph's "arrives with Story 5.5" and the toolchain
+# paragraph's "once Story 5.5 lands", which wraps across two lines and
+# so is caught only by the shorter needle.
+forbid_text "$PACKAGING" 'Story 5.5' \
+    "the .deb is built by dpkg-buildpackage in the Ubuntu containers and debian/changelog is in the tree"
 build_job="$(awk '$0 == "  build:" { in_job = 1; next }
     /^  [a-z]/ { in_job = 0 }
     in_job' "$RELEASE" || true)"
@@ -423,6 +444,8 @@ require_text "$SECURITY" 'buoy-wm-<version>-vendor.tar.gz' \
     "the vendor tarball is an attestation subject"
 require_text "$SECURITY" 'buoy-wm-<version>-1.<dist>.x86_64.rpm' \
     "the RPM is an attestation subject"
+require_text "$SECURITY" 'buoy-wm_<version>-1.<series>_amd64.deb' \
+    "the .deb is an attestation subject"
 
 # The runbook's first step, the release model and the rebuild recipe name
 # the scripts that do the work, so a packager is sent to the one copy
@@ -433,6 +456,8 @@ require_text "$PACKAGING" 'scripts/release-notes.sh' \
     "the release notes are the changelog entry that script cuts"
 require_text "$PACKAGING" 'scripts/build-rpm.sh' \
     "the offline rebuild is the build script"
+require_text "$PACKAGING" 'scripts/build-deb.sh' \
+    "the .deb's offline rebuild is its build script"
 
 # install.sh's last line points at the README section that explains how
 # to start a session, now that there are two ways. A fixture build dir

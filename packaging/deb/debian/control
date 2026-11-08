@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: RPL-1.5
+#
+# Unless explicitly acquired and licensed from Licensor under another
+# license, the contents of this file are subject to the Reciprocal Public
+# License ("RPL") Version 1.5, or subsequent versions as allowed by the
+# RPL, and You may not copy or use this file in either source code or
+# executable form, except in compliance with the terms and conditions of
+# the RPL.
+#
+# All software distributed under the RPL is provided strictly on an "AS
+# IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+# LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+# LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+# language governing rights and limitations under the RPL.
+#
+# Build-Depends is the one list the release's Ubuntu legs install
+# (`apt-get build-dep ./packaging/deb`), as the spec's BuildRequires is
+# for Fedora. debhelper compat 13: Ubuntu 26.04 ships debhelper 13.31,
+# so 13 is the highest level both supported releases build. The rustc
+# floor is Cargo.toml's rust-version (tests/deb-package.sh holds it).
+#
+# Depends is computed: ${shlibs:Depends} names what the binaries link
+# (libc6 and libgcc-s1; wayland-backend's pure-Rust backend never loads
+# libwayland), and the supervisor calls systemctl (systemd) and
+# dbus-update-activation-environment (dbus-bin) on every login. river
+# and zellij are deliberately absent: no Ubuntu archive carries either,
+# and the README's PPA and zellij steps cover them (ADR-013). The
+# Recommends are what the default config drives, the two portal
+# backends buoy-portals.conf names, and notify-send, which buoy-wm
+# spawns when it rejects a config.
+Source: buoy-wm
+Section: x11
+Priority: optional
+Maintainer: Nick Booth <nick@onlyhams.radio>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               rustc (>= 1.93),
+               libwayland-dev,
+               pkgconf
+Standards-Version: 4.7.2
+Homepage: https://github.com/nkbooth/buoy-wm
+Rules-Requires-Root: no
+
+Package: buoy-wm
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}, dbus-bin, systemd
+Recommends: foot,
+            fuzzel,
+            xdg-desktop-portal-wlr,
+            xdg-desktop-portal-gtk,
+            libnotify-bin
+Suggests: waybar
+Description: keyboard-driven window manager for the river Wayland compositor
+ buoy manages windows for the river Wayland compositor (0.4+) via
+ river-window-management-v1. It owns all tag state itself and gives each
+ tag a persistent fullscreen terminal multiplexer pinned behind every
+ other window, with graphical applications floating above it. Every
+ operation is bound to the keyboard and every binding is rebindable
+ through one TOML file.
+ .
+ Ships three binaries: the window manager, a fuzzel-driven tag picker,
+ and a waybar status-bar feeder.
+ .
+ Also installs a buoy session for the display manager: river starts a
+ supervisor that imports the session into systemd and D-Bus, keeps
+ buoy-session.target up exactly as long as the window manager runs, and
+ routes screen capture through the wlroots portal backend.

@@ -188,8 +188,9 @@ jobs:
           pipx install 'zizmor==1.29.0'
           pipx install 'pre-commit==4.6.2'
           sudo apt-get update
-          # `rpm` for `rpmspec`, the spec test's parser tier.
-          sudo apt-get install -y --no-install-recommends shellcheck rpm
+          # `rpm` for `rpmspec`, the spec test's parser tier; `dpkg-dev`
+          # for `dpkg-parsechangelog`, the debian/ test's.
+          sudo apt-get install -y --no-install-recommends shellcheck rpm dpkg-dev
 
       # `--offline`: no online audits, so this needs no token and cannot
       # be made to fail by a rate limit.
@@ -197,7 +198,7 @@ jobs:
         run: zizmor --offline .github/workflows .github/actions
 
       - name: shellcheck
-        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh tests/buoy-desktop.sh tests/rpm-spec.sh scripts/release-version.sh tests/release-version.sh scripts/build-rpm.sh tests/build-rpm.sh tests/docs.sh scripts/release-notes.sh tests/release-notes.sh tests/release-workflow.sh
+        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh tests/buoy-desktop.sh tests/rpm-spec.sh scripts/release-version.sh tests/release-version.sh scripts/build-rpm.sh tests/build-rpm.sh tests/docs.sh scripts/release-notes.sh tests/release-notes.sh tests/release-workflow.sh scripts/build-deb.sh tests/build-deb.sh tests/deb-package.sh
 
       # The session target is one directive away from a login that never
       # starts the portals. The line-by-line assert is the gate;
@@ -260,7 +261,7 @@ jobs:
       # the spec, the changelog's first release heading and its link
       # reference against Cargo.toml, SECURITY.md's spawn citation against
       # the file that defines the function, and that SECURITY.md names
-      # the three attestation subjects. Three of the strings this test
+      # every attestation subject. Three of the strings this test
       # forbids were real drifts found by the 4.5, 4.6 and 4.7 code
       # reviews, not by anyone reading the documents; the "0.1" phantoms
       # were caught when Story 6.1 was written.
@@ -279,6 +280,19 @@ jobs:
       # hyphen — is proved here on every push against a stub rpmbuild.
       - name: build-rpm.sh
         run: tests/build-rpm.sh
+
+      # The .deb is built only on a tag (release.yml). This asserts its
+      # relations (the rustc floor read from Cargo.toml), its installed
+      # layout, its cargo configuration and its licence text on every
+      # push, and parses the changelog with dpkg-parsechangelog.
+      - name: debian/
+        run: tests/deb-package.sh
+
+      # The same for the script that builds it: the tree it assembles,
+      # `dpkg-buildpackage -b -us -uc`, the dbgsym filter and the
+      # published name with the release label, against a stub.
+      - name: build-deb.sh
+        run: tests/build-deb.sh
 
       # release.yml runs only on a tag, so a package matrix that drifts
       # from the README's tier-1 rows, a retiring runner label or a

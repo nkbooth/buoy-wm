@@ -1,0 +1,63 @@
+#!/usr/bin/make -f
+# SPDX-FileCopyrightText: © 2026 Nick Booth
+# SPDX-License-Identifier: RPL-1.5
+#
+# Unless explicitly acquired and licensed from Licensor under another
+# license, the contents of this file are subject to the Reciprocal Public
+# License ("RPL") Version 1.5, or subsequent versions as allowed by the
+# RPL, and You may not copy or use this file in either source code or
+# executable form, except in compliance with the terms and conditions of
+# the RPL.
+#
+# All software distributed under the RPL is provided strictly on an "AS
+# IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, AND
+# LICENSOR HEREBY DISCLAIMS ALL SUCH WARRANTIES, INCLUDING WITHOUT
+# LIMITATION, ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
+# language governing rights and limitations under the RPL.
+#
+# The spec's %prep, %build and %check, one to one, for plain dh. The
+# vendored crates are already unpacked into the tree when this runs
+# (scripts/build-deb.sh does it for a binary build; a source package's
+# orig-vendor component would for a source build), so cargo never needs
+# the network.
+
+# A builder's $HOME may not exist or be writable (sbuild, Launchpad).
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+
+%:
+	dh $@
+
+# Everything the build writes, so `debian/rules clean` returns the tree
+# to the unpacked sources.
+override_dh_auto_clean:
+	rm -rf target .cargo debian/cargo-home
+
+# dh_clean deletes every *.orig in the tree by default, which takes each
+# vendored crate's Cargo.toml.orig with it; cargo then refuses the
+# vendored source ("failed to calculate checksum of:
+# …/vendor/rustix-1.1.6/Cargo.toml.orig").
+override_dh_clean:
+	dh_clean -XCargo.toml.orig
+
+# The same configuration the spec's %prep writes with a heredoc, so the
+# two package formats build one way (tests/deb-package.sh compares them).
+override_dh_auto_configure:
+	mkdir -p .cargo
+	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
+
+# The lock is what the release built and tested; --offline because the
+# vendored crates are the only source.
+override_dh_auto_build:
+	cargo build --workspace --release --offline --locked
+
+# The spec's %check: the test suite runs on this release's own rustc,
+# unless the builder asked for nocheck.
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cargo test --workspace --release --offline --locked
+endif
+
+# buoy-wm.install places every file; dh_auto_install has no build
+# system here to run.
+override_dh_auto_install:
