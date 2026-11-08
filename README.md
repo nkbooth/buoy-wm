@@ -15,11 +15,13 @@ It has been the author's daily driver since August 2026.
 Two convictions shape everything here.
 
 **Terminal first.** Every tag has a permanent, fullscreen terminal running a
-[`zellij`](https://zellij.dev) session pinned behind everything else. It is
-not a window you launch, focus, or close; it is the tag's floor. Switch to
-the `email` tag and its zellij session is simply *there*, exactly as you left
-it — across tag switches, across days, across `buoy` restarts. Graphical
-applications float on top of that floor when you need them.
+multiplexer session pinned behind everything else — [`zellij`](https://zellij.dev)
+by default and the design's reference, though `tmux` or any command that
+attaches to a named session works in its place, and zellij is not a
+dependency. It is not a window you launch, focus, or close; it is the tag's
+floor. Switch to the `email` tag and its session is simply *there*, exactly
+as you left it — across tag switches, across days, across `buoy` restarts.
+Graphical applications float on top of that floor when you need them.
 
 **Keyboard primary.** Every operation has a binding, all of them rebindable
 and removable. The mouse can move and resize floating windows, and that is
@@ -34,7 +36,7 @@ and then left alone.
 
 | | |
 | --- | --- |
-| **river** | 0.4 or newer, built with `river-window-management-v1`. Fedora 44 and 45 ship 0.5.0; the RPM requires it |
+| **river** | 0.4 or newer, built with `river-window-management-v1`. Fedora 44 and 45 ship 0.5.0; the RPM requires it. Ubuntu: see [Supported platforms](#supported-platforms) |
 | **foot** | default terminal — swappable, see [Configuration](#configuration) |
 | **fuzzel** | drives the tag pickers and the hotkey cheat-sheet — fixed, see [Programs](#programs) |
 | **zellij** | the *default* multiplexer in each tag's pinned terminal, not a requirement — see below |
@@ -62,9 +64,48 @@ multiplexer and the pinned terminal altogether.
 also optional: without them, `[[input]]` blocks are skipped with one log line
 and every device keeps libinput's own defaults.
 
+## Supported platforms
+
+| Release | Tier | river 0.4+ | Session multiplexer | Download |
+| --- | --- | --- | --- | --- |
+| Fedora 44 | 1 | 0.5.0 in the archive; the RPM requires it | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | `buoy-wm-${version}-1.fc44.x86_64.rpm` |
+| Fedora 45 | 1 | 0.5.0 in the archive; the RPM requires it | as Fedora 44 | the same `fc44` RPM, which installs on 45; an `fc45` build arrives with the next release |
+| Ubuntu 26.04 LTS | 1 | not in the archive: `ppa:tchavadar/river` (0.4.1) or a source build | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | the tarball; a `.deb` arrives with the next release |
+| Ubuntu 26.10 | 1 | not in the archive: `ppa:tchavadar/river-unstable` (0.4.5) or a source build | as Ubuntu 26.04 | the tarball; a `.deb` arrives with the next release |
+| Ubuntu 24.04 LTS and older | unsupported | no river from any apt source | — | the tarball may run if you build river yourself; nothing here is verified on it |
+
+**Tier 1** means the release is session-verified on a clean machine before
+every final release: install as the README says, pick `buoy` at the display
+manager, get portals, bar and outputs, log out cleanly. **Tier 2** would mean
+the package builds, installs and passes its tests in CI with no session
+verified; the tier exists so that adding a release is a decision against a
+written rule, and it is empty today. A release leaves the table when it
+leaves standard support.
+
+Ubuntu ships no `river` in any release. The two PPAs above are one person's
+unofficial archives — Launchpad's own banner calls them "unsupported
+packages from this untrusted PPA" — built for amd64 only; the stable PPA
+carries river only for 26.04 and the unstable one only for 26.10. The
+request to put river in the Ubuntu archive is
+[LP #2142921](https://bugs.launchpad.net/ubuntu/+bug/2142921), open and
+waiting on packaging review. Building river from source (it needs zig) is
+the other way. Ubuntu 24.04 LTS is unsupported because no apt source
+provides river for it, its xdg-desktop-portal is 1.18 and its rustc 1.75.
+
+A session multiplexer is a default, not a dependency, and no release above
+packages zellij. Take the upstream release asset
+`zellij-x86_64-unknown-linux-musl.tar.gz` and put the binary on your `PATH`,
+or `cargo install zellij`; or use `tmux` from the archive with the
+`pinned_terminal_args` line in [Requirements](#requirements); or set
+`pinned_terminals = false` to run with no multiplexer and no pinned terminal
+at all.
+
 ## Install
 
-### Fedora 44: the RPM
+### Fedora 44 and 45: the RPM
+
+The `fc44` file is also the one to install on Fedora 45 until an `fc45`
+asset exists: it installs there against the archive's river 0.5.0.
 
 ```sh
 version=1.0.0-rc.2
@@ -102,6 +143,33 @@ a `/usr/bin/buoy-wm` symlink, the login entry
 carry a hyphen in a version and GitHub rewrites `~` in asset names. The same
 release carries `buoy-wm-1.0.0-rc.2-vendor.tar.gz`, the vendored crates for
 rebuilding the RPM offline (`docs/PACKAGING.md`).
+
+### Ubuntu 26.04 and 26.10: river from a PPA, then the tarball
+
+Neither release has `river` in its archive, so add the PPA for your release
+first — [Supported platforms](#supported-platforms) says what these PPAs
+are — then install river and the programs `buoy` drives:
+
+```sh
+# Ubuntu 26.04 LTS:
+sudo add-apt-repository ppa:tchavadar/river
+# Ubuntu 26.10:
+sudo add-apt-repository ppa:tchavadar/river-unstable
+
+sudo apt update
+sudo apt install river foot fuzzel tmux xdg-desktop-portal-wlr xdg-desktop-portal-gtk
+# Optional, for the status bar:
+sudo apt install waybar
+```
+
+`tmux` is on that line because no Ubuntu archive has zellij: either get
+zellij as [Supported platforms](#supported-platforms) says and leave the
+default alone, or put the `tmux` `pinned_terminal_args` line from
+[Requirements](#requirements) in `~/.config/buoy/config.toml`. Then install
+`buoy` itself from the tarball, below. There is no `.deb` yet, and so no
+`buoy` login entry on Ubuntu: start the session from `~/.config/river/init`
+as [From source, without the RPM](#from-source-without-the-rpm) shows. The
+next release's `.deb` replaces that step.
 
 ### From a release
 

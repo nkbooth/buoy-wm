@@ -39,6 +39,7 @@ readonly CARGO="$REPO_ROOT/Cargo.toml"
 readonly CHANGELOG="$REPO_ROOT/CHANGELOG.md"
 readonly SECURITY="$REPO_ROOT/SECURITY.md"
 readonly EXAMPLE="$REPO_ROOT/docs/config.example.toml"
+readonly ADRS="$REPO_ROOT/docs/adrs.md"
 
 tmp="$(mktemp -d)"
 readonly tmp
@@ -55,7 +56,8 @@ fail() {
 }
 
 for file in "$README" "$PACKAGING" "$SPEC" "$DESKTOP" \
-    "$FORMULA" "$INSTALL" "$CARGO" "$CHANGELOG" "$SECURITY" "$EXAMPLE"; do
+    "$FORMULA" "$INSTALL" "$CARGO" "$CHANGELOG" "$SECURITY" "$EXAMPLE" \
+    "$ADRS"; do
     if [ ! -r "$file" ]; then
         fail "${file#"$REPO_ROOT/"}: missing or unreadable"
     fi
@@ -190,6 +192,38 @@ forbid_text "$PACKAGING" 'river -c /usr/libexec/buoy-wm/buoy-wm' \
 if grep -qE '^\s*zellij\b.*\(required\)' "$FORMULA"; then
     fail "packaging/homebrew/buoy-wm.rb: caveats call zellij '(required)' (it is the default multiplexer, swappable in config)"
 fi
+
+# The README's "Supported platforms" table is what the CI and release
+# matrices are derived from (ADR-013: the list lives in the README), so
+# its heading and the first cell of each row are a contract, not prose:
+# a job that greps for a release name must find it spelled this way.
+# The two forbids after it are drifts a review caught — PACKAGING.md's
+# old verdict conflated archive inclusion (blocked by RPL 1.5 against
+# the DFSG) with release-asset and PPA distribution (not blocked,
+# ADR-011), and ADR-013's rationale listed zellij among what Fedora 44
+# and 45 ship when `dnf repoquery zellij` is empty on both (the 4.8
+# review's deferral).
+heading_lines="$(count_lines "$README" '^## Supported platforms$')"
+if [ "$heading_lines" -ne 1 ]; then
+    fail "README.md: expected exactly one '## Supported platforms' heading, found $heading_lines"
+fi
+for release in '| Fedora 44 |' '| Fedora 45 |' '| Ubuntu 26.04 LTS |' \
+    '| Ubuntu 26.10 |' '| Ubuntu 24.04 LTS'; do
+    require_text "$README" "$release" \
+        "a row of the Supported platforms table; the matrices are derived from these names"
+done
+require_text "$README" 'ppa:tchavadar/river' \
+    "where Ubuntu 26.04 gets river 0.4+; no Ubuntu archive carries it"
+require_text "$README" 'ppa:tchavadar/river-unstable' \
+    "where Ubuntu 26.10 gets river 0.4+; the stable PPA has no 26.10 build"
+require_text "$README" 'bugs.launchpad.net/ubuntu/+bug/2142921' \
+    "the open request to put river in the Ubuntu archive"
+require_text "$README" 'pinned_terminals = false' \
+    "the way to run without any multiplexer, which the platforms section relies on"
+forbid_text "$PACKAGING" 'Not viable' \
+    "archive inclusion is blocked, release-asset and PPA distribution are not (ADR-011)"
+forbid_text "$ADRS" 'ship river 0.5.0, zellij' \
+    "Fedora 44 and 45 do not package zellij (the 4.8 review's deferral)"
 
 # A source line number in prose drifts with every edit above it; the
 # one caught at 6.1's creation pointed into an unrelated impl block.

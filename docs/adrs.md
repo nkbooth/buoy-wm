@@ -248,8 +248,10 @@ release in standard support with no `dnf`/`apt` source for river 0.4+
 cannot be tier 1. The list lives in the README and drives the CI and
 release matrices; a release leaves the list when it leaves standard support.
 **Rationale:** Read from the package indexes on 2026-11-03. Fedora 44 and 45
-ship river 0.5.0, zellij, rust 1.99 and `xdg-desktop-portal-wlr` 0.8.4 in
-the archive. Ubuntu ships no river in any release; the only apt source is
+ship river 0.5.0, rust 1.99 and `xdg-desktop-portal-wlr` 0.8.4 in the
+archive, but not zellij (corrected 2026-11-07, Story 5.1: the 2026-11-03
+reading listed zellij, and `dnf repoquery zellij` is empty on both
+releases). Ubuntu ships no river in any release; the only apt source is
 one person's unofficial PPA, with 0.4.1 for 26.04 and 0.4.5 for 26.10, and
 no zellij anywhere. Ubuntu 24.04 has no river from any source, a portal
 stack two years behind 26.04's and rustc 1.75; a session there cannot be

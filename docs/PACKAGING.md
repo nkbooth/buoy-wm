@@ -208,11 +208,17 @@ added, this is the one.
 builds and a `nix run` demo path. Real value, real ongoing cost; revisit if
 demand appears.
 
-**Debian/Ubuntu packaging.** Not viable. RPL 1.5's obligations — source
-disclosure triggered by internal deployment, plus an affirmative duty to
-notify the community of source availability — are very unlikely to clear
-DFSG. This is a direct consequence of the license choice, not of packaging
-effort, and no amount of packaging work changes it.
+**Debian and Ubuntu archive inclusion.** Not planned. RPL 1.5's
+obligations — source disclosure triggered by internal deployment, plus an
+affirmative duty to notify the community of source availability — are very
+unlikely to clear the DFSG. This is a direct consequence of the license
+choice, not of packaging effort, and no amount of packaging work changes
+it. It blocks only the *archives*: a `.deb` attached to the GitHub release
+and a Launchpad PPA need no DFSG review (ADR-011), so the release-asset
+`.deb` for each supported Ubuntu is planned (the `deb` row of the version
+table above), and a PPA is an optional mirror once that Debian source
+package exists — ADR-014's MSRV keeps it buildable with Ubuntu's own
+rustc.
 
 **Flatpak / Snap.** Category mismatch. Both sandbox applications; a window
 manager is the session, needs the compositor's private protocol socket, and

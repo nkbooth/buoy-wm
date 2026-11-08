@@ -4,6 +4,23 @@ Notable changes per release. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semantic](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A "Supported platforms" table in the README: Fedora 44, Fedora 45,
+  Ubuntu 26.04 LTS and Ubuntu 26.10 are tier 1, Ubuntu 24.04 LTS and older
+  are unsupported, with where river 0.4+ comes from on each (the archive,
+  or the unofficial PPAs on Ubuntu), how to get zellij or use tmux instead,
+  and which release asset to download. Ubuntu install steps to match.
+
+### Changed
+
+- The RPM install section covers Fedora 45 as well as 44 (the `fc44` file
+  installs on both until an `fc45` asset exists), and `docs/PACKAGING.md`
+  separates archive inclusion (blocked by RPL 1.5 against the DFSG) from
+  release-asset and PPA distribution (not blocked).
+
 ## [1.0.0-rc.2]
 
 Second release candidate: the first one's logout defect, found on the live
@@ -190,5 +207,6 @@ changed.
 - Release candidates, tagged `vX.Y.Z-rc.N` and published as pre-releases
   (`1.0.0~rc.1` in the RPM).
 
+[Unreleased]: https://github.com/nkbooth/buoy-wm/compare/v1.0.0-rc.2...HEAD
 [1.0.0-rc.2]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.1
