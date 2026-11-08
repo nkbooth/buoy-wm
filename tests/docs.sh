@@ -260,8 +260,18 @@ require_text "$README" '"tmux", "new-session", "-A", "-s", "{session}"' \
 # words to another row is red.
 require_text "$README" "can't find pane" \
     "the tmux error a tag named with '.' or ':' produces on the second login"
+# The tmux snippet is the one the Ubuntu steps send a user to copy, and
+# a file holding only the bare key is rejected (`unknown field
+# pinned_terminal_args`), so the header directly above it is a fact too:
+# whole-line, so a commented or indented `[defaults]` does not pass.
+if ! grep -B1 -F -- '"tmux", "new-session", "-A", "-s", "{session}"' "$README" \
+    | grep -qxF -- '[defaults]'; then
+    fail "README.md: the tmux pinned_terminal_args line is not directly under a '[defaults]' line (a file holding only the bare key is rejected)"
+fi
 ubuntu_2604_row="$(printf '%s\n' "$platforms" | grep -F -- '| Ubuntu 26.04 LTS |' || true)"
-if ! printf '%s\n' "$ubuntu_2604_row" | grep -qF -- 'monitor-only'; then
+# An absent row is already on the report from the loop above; only a
+# present row is asked about its cell.
+if [ -n "$ubuntu_2604_row" ] && ! printf '%s\n' "$ubuntu_2604_row" | grep -qF -- 'monitor-only'; then
     fail "README.md: the '| Ubuntu 26.04 LTS |' row does not say 'monitor-only' (river 0.4.1 has no window capture source; screen sharing is monitor-only there)"
 fi
 # The RPM install heading, quoted by PACKAGING.md, derived from the

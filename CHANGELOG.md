@@ -19,10 +19,10 @@ Notable changes per release. Format follows
   installs on both until an `fc45` asset exists), and `docs/PACKAGING.md`
   separates archive inclusion (blocked by RPL 1.5 against the DFSG) from
   release-asset and PPA distribution (not blocked).
-- The README states, from a container run against Ubuntu 26.04's PPA river,
-  that screen sharing is monitor-only on river 0.4.1 and that tmux 3.7 and
-  newer cannot re-attach a session whose name contains `.` or `:`; its tmux
-  snippet also gains the `[defaults]` header the key needs.
+- The README states, from running buoy against Ubuntu's PPA river in
+  containers, that screen sharing is monitor-only on river 0.4.1 and that
+  tmux 3.7 and newer cannot re-attach a session named with `.` or `:`; its
+  `pinned_terminal_args` snippets now sit under the `[defaults]` header.
 
 ## [1.0.0-rc.2]
 

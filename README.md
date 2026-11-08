@@ -59,14 +59,17 @@ pinned_terminal_args = ["-a", "{app_id}", "tmux", "new-session", "-A", "-s", "{s
 
 `-A` attaches to the session if it exists and creates it otherwise, which is
 what zellij's `attach --create` does. `pinned_terminals = false` drops the
-multiplexer and the pinned terminal altogether. tmux has one trap zellij does
-not: tmux 3.7 and newer (Fedora 44 and 45 ship 3.8, Ubuntu 26.10 ships 3.7b)
-read `.` and `:` in a session name as its window and pane separators, so a
+multiplexer and the pinned terminal altogether. tmux has a trap zellij does
+not, in two shapes: tmux 3.7 and newer (Fedora 44 and 45 with updates ship
+3.8, Ubuntu 26.10 ships 3.7b) accept `.` and `:` in a new session's name but
+read them as target separators (`session:window.pane`) when attaching, so a
 tag named like `a.b` or `a:b` gets its pinned terminal on the first login
-only and tmux reports `can't find pane` or `can't find window` after that,
-while tmux 3.6a (Ubuntu 26.04) rewrites both characters to `_`, so `a.b`,
-`a:b` and `a_b` share one session. Keep those two characters out of tag names
-when using tmux, or use zellij, which accepts them.
+only and, while that tmux server is still running, every later login fails
+with `can't find pane` or `can't find window` (or attaches to another tag's
+session if its name matches the target); tmux 3.6a (Ubuntu 26.04) rewrites
+both characters to `_`, so `a.b`, `a:b` and `a_b` share one session. Keep
+those two characters out of tag names when using tmux, or use zellij, which
+accepts them.
 
 `river`'s `river_input_manager_v1` and `river_libinput_config_v1` globals are
 also optional: without them, `[[input]]` blocks are skipped with one log line
@@ -108,7 +111,7 @@ A session multiplexer is a default, not a dependency, and no release above
 packages zellij. Take the upstream release asset
 `zellij-x86_64-unknown-linux-musl.tar.gz` and put the binary on your `PATH`,
 or `cargo install zellij`; or use `tmux` from the archive with the
-`pinned_terminal_args` line in [Requirements](#requirements); or set
+`pinned_terminal_args` block in [Requirements](#requirements); or set
 `pinned_terminals = false` to run with no multiplexer and no pinned terminal
 at all.
 
@@ -178,7 +181,7 @@ sudo apt install waybar
 
 `tmux` is on that line because no Ubuntu archive has zellij: either get
 zellij as [Supported platforms](#supported-platforms) says and leave the
-default alone, or put the `tmux` `pinned_terminal_args` line from
+default alone, or put the `tmux` `pinned_terminal_args` block from
 [Requirements](#requirements) in `~/.config/buoy/config.toml`. Then install
 `buoy` itself from the tarball, [From a release](#from-a-release) below,
 running the `version=` line from the RPM block first: the archive name is
@@ -527,6 +530,7 @@ A tag's pinned terminal is spawned as `terminal` plus `pinned_terminal_args`,
 defaulting to foot's spelling:
 
 ```toml
+[defaults]
 pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]
 ```
 
