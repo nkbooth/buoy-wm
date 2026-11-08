@@ -8,11 +8,10 @@ Notable changes per release. Format follows
 
 ### Added
 
-- A "Supported platforms" table in the README: Fedora 44, Fedora 45,
-  Ubuntu 26.04 LTS and Ubuntu 26.10 are tier 1, Ubuntu 24.04 LTS and older
-  are unsupported, with where river 0.4+ comes from on each (the archive,
-  or the unofficial PPAs on Ubuntu), how to get zellij or use tmux instead,
-  and which release asset to download. Ubuntu install steps to match.
+- A "Supported platforms" table in the README, with where river 0.4+ comes
+  from on each release (the archive, or the unofficial PPAs on Ubuntu), how
+  to get zellij or use tmux instead, and which release asset to download,
+  plus Ubuntu install steps that follow the table.
 
 ### Changed
 

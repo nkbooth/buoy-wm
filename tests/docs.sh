@@ -138,6 +138,16 @@ link="[$cargo]: https://github.com/nkbooth/buoy-wm/releases/tag/v$cargo"
 if ! grep -qxF -- "$link" "$CHANGELOG"; then
     fail "CHANGELOG.md: no line '$link' (the release heading's link reference)"
 fi
+# While an `[Unreleased]` section exists, its compare link starts at
+# the release Cargo.toml builds, derived the same way; otherwise a bump
+# that promoted the section but kept the link would point at the tag
+# before last forever.
+if grep -qxF -- '## [Unreleased]' "$CHANGELOG"; then
+    unreleased="[Unreleased]: https://github.com/nkbooth/buoy-wm/compare/v$cargo...HEAD"
+    if ! grep -qxF -- "$unreleased" "$CHANGELOG"; then
+        fail "CHANGELOG.md: no line '$unreleased' (the [Unreleased] compare link must start at Cargo.toml's release)"
+    fi
+fi
 
 # Asset names are derived from the spec: Source1 is the vendor tarball
 # with the tag's hyphen, and the RPM is served under the fc44 name.
@@ -195,33 +205,64 @@ fi
 
 # The README's "Supported platforms" table is what the CI and release
 # matrices are derived from (ADR-013: the list lives in the README), so
-# its heading and the first cell of each row are a contract, not prose:
-# a job that greps for a release name must find it spelled this way.
-# The two forbids after it are drifts a review caught — PACKAGING.md's
-# old verdict conflated archive inclusion (blocked by RPL 1.5 against
-# the DFSG) with release-asset and PPA distribution (not blocked,
-# ADR-011), and ADR-013's rationale listed zellij among what Fedora 44
-# and 45 ship when `dnf repoquery zellij` is empty on both (the 4.8
-# review's deferral).
+# its heading and the first cell of each supported row are a contract,
+# not prose: a job that greps for a release name must find it spelled
+# this way, inside that section and not somewhere else in the file. The
+# unsupported row is required too, so the README says what it does not
+# support. The two forbids after it are drifts a review caught —
+# PACKAGING.md's old verdict conflated archive inclusion (blocked by
+# RPL 1.5 against the DFSG) with release-asset and PPA distribution
+# (not blocked, ADR-011), and ADR-013's rationale listed zellij among
+# what Fedora 44 and 45 ship when `dnf repoquery zellij` is empty on
+# both (the 4.8 review's deferral).
 heading_lines="$(count_lines "$README" '^## Supported platforms$')"
 if [ "$heading_lines" -ne 1 ]; then
     fail "README.md: expected exactly one '## Supported platforms' heading, found $heading_lines"
 fi
+# The section body: from the heading to the next `## ` heading. The
+# `|| true` keeps an absent section on the report rather than ending
+# the run under `set -e`.
+platforms="$(awk '/^## Supported platforms$/ { in_section = 1; next }
+    /^## / { in_section = 0 }
+    in_section' "$README" || true)"
 for release in '| Fedora 44 |' '| Fedora 45 |' '| Ubuntu 26.04 LTS |' \
     '| Ubuntu 26.10 |' '| Ubuntu 24.04 LTS'; do
-    require_text "$README" "$release" \
-        "a row of the Supported platforms table; the matrices are derived from these names"
+    if ! printf '%s\n' "$platforms" | grep -qF -- "$release"; then
+        fail "README.md: the Supported platforms section has no row '$release' (the matrices are derived from these names)"
+    fi
 done
-require_text "$README" 'ppa:tchavadar/river' \
-    "where Ubuntu 26.04 gets river 0.4+; no Ubuntu archive carries it"
+# The stable PPA's name is a prefix of the unstable one's, so a plain
+# substring check could never fail while the unstable name is present.
+if ! grep -qE 'ppa:tchavadar/river([^-]|$)' "$README"; then
+    fail "README.md: does not mention 'ppa:tchavadar/river' (where Ubuntu 26.04 gets river 0.4+; no Ubuntu archive carries it)"
+fi
 require_text "$README" 'ppa:tchavadar/river-unstable' \
     "where Ubuntu 26.10 gets river 0.4+; the stable PPA has no 26.10 build"
 require_text "$README" 'bugs.launchpad.net/ubuntu/+bug/2142921' \
     "the open request to put river in the Ubuntu archive"
+# The two config lines the platforms section and the Ubuntu steps send
+# the reader to: the off switch, derived from the file that owns the
+# key, and the tmux spelling of the pinned-terminal command.
+if ! grep -qE '^pinned_terminals = (true|false)$' "$EXAMPLE"; then
+    fail "docs/config.example.toml: no 'pinned_terminals = true|false' line (the README's off switch is derived from it)"
+fi
 require_text "$README" 'pinned_terminals = false' \
     "the way to run without any multiplexer, which the platforms section relies on"
-forbid_text "$PACKAGING" 'Not viable' \
-    "archive inclusion is blocked, release-asset and PPA distribution are not (ADR-011)"
+require_text "$README" '"tmux", "new-session", "-A", "-s", "{session}"' \
+    "the tmux pinned_terminal_args line the Ubuntu steps point at"
+# The RPM install heading, quoted by PACKAGING.md, derived from the
+# README so a rename there is red here rather than a dangling quote.
+rpm_heading="$(grep -m1 -E '^### Fedora .*: the RPM$' "$README" || true)"
+if [ -z "$rpm_heading" ]; then
+    fail "README.md: no '### Fedora …: the RPM' heading for PACKAGING.md to quote"
+else
+    require_text "$PACKAGING" "\"${rpm_heading#\#\#\# }\"" \
+        "the README heading PACKAGING.md's install-by-URL sentence quotes"
+fi
+# Case-insensitive: the conflated verdict is wrong in any spelling.
+if grep -qiF -- 'not viable' "$PACKAGING"; then
+    fail "docs/PACKAGING.md: still says 'not viable' (archive inclusion is blocked, release-asset and PPA distribution are not (ADR-011))"
+fi
 forbid_text "$ADRS" 'ship river 0.5.0, zellij' \
     "Fedora 44 and 45 do not package zellij (the 4.8 review's deferral)"
 

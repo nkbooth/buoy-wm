@@ -105,7 +105,7 @@ package installs:
 - `/usr/share/xdg-desktop-portal/buoy-portals.conf` — the portal routing;
   the entry's `DesktopNames=buoy` selects it.
 
-Install by URL: the README's "Fedora 44: the RPM" block downloads, verifies
+Install by URL: the README's "Fedora 44 and 45: the RPM" block downloads, verifies
 and installs it, and `rpm-ostree install` accepts the `https://` URL
 directly on an atomic host, which is how the author's image will take it
 (Story 4.10). The spec `Requires: river >= 0.4`, `systemd` and `dbus-tools`,

@@ -79,17 +79,21 @@ every final release: install as the README says, pick `buoy` at the display
 manager, get portals, bar and outputs, log out cleanly. **Tier 2** would mean
 the package builds, installs and passes its tests in CI with no session
 verified; the tier exists so that adding a release is a decision against a
-written rule, and it is empty today. A release leaves the table when it
-leaves standard support.
+written rule, and it is empty today. A supported release leaves the table
+when it leaves standard support. The Ubuntu rows reach the tier-1 state
+with the next release's `.deb`; until then their path is the tarball plus
+the from-source session, as [Install](#install) says. Every release asset
+is x86_64; other architectures build from source.
 
 Ubuntu ships no `river` in any release. The two PPAs above are one person's
 unofficial archives — Launchpad's own banner calls them "unsupported
 packages from this untrusted PPA" — built for amd64 only; the stable PPA
 carries river only for 26.04 and the unstable one only for 26.10. The
 request to put river in the Ubuntu archive is
-[LP #2142921](https://bugs.launchpad.net/ubuntu/+bug/2142921), open and
-waiting on packaging review. Building river from source (it needs zig) is
-the other way. Ubuntu 24.04 LTS is unsupported because no apt source
+[LP #2142921](https://bugs.launchpad.net/ubuntu/+bug/2142921), open at
+Wishlist importance and waiting on packaging review as of 2026-11-07.
+Building river from source (river's README names the zig release it
+needs) is the other way. Ubuntu 24.04 LTS is unsupported because no apt source
 provides river for it, its xdg-desktop-portal is 1.18 and its rustc 1.75.
 
 A session multiplexer is a default, not a dependency, and no release above
@@ -105,7 +109,8 @@ at all.
 ### Fedora 44 and 45: the RPM
 
 The `fc44` file is also the one to install on Fedora 45 until an `fc45`
-asset exists: it installs there against the archive's river 0.5.0.
+asset exists: it installs there against the archive's river 0.5.0
+(verified in a `fedora:45` container).
 
 ```sh
 version=1.0.0-rc.2
@@ -148,13 +153,14 @@ rebuilding the RPM offline (`docs/PACKAGING.md`).
 
 Neither release has `river` in its archive, so add the PPA for your release
 first — [Supported platforms](#supported-platforms) says what these PPAs
-are — then install river and the programs `buoy` drives:
+are, and they build for amd64 only — then install river and the programs
+`buoy` drives. One `add-apt-repository` line, not both: each PPA carries
+river for one release.
 
 ```sh
-# Ubuntu 26.04 LTS:
 sudo add-apt-repository ppa:tchavadar/river
-# Ubuntu 26.10:
-sudo add-apt-repository ppa:tchavadar/river-unstable
+# Ubuntu 26.10: this line instead of the one above.
+# sudo add-apt-repository ppa:tchavadar/river-unstable
 
 sudo apt update
 sudo apt install river foot fuzzel tmux xdg-desktop-portal-wlr xdg-desktop-portal-gtk
@@ -166,14 +172,18 @@ sudo apt install waybar
 zellij as [Supported platforms](#supported-platforms) says and leave the
 default alone, or put the `tmux` `pinned_terminal_args` line from
 [Requirements](#requirements) in `~/.config/buoy/config.toml`. Then install
-`buoy` itself from the tarball, below. There is no `.deb` yet, and so no
-`buoy` login entry on Ubuntu: start the session from `~/.config/river/init`
-as [From source, without the RPM](#from-source-without-the-rpm) shows. The
-next release's `.deb` replaces that step.
+`buoy` itself from the tarball, [From a release](#from-a-release) below,
+running the `version=` line from the RPM block first: the archive name is
+built from it. There is no `.deb` yet, and so no `buoy` login entry on
+Ubuntu: start the session from `~/.config/river/init` as
+[From source, without the RPM](#from-source-without-the-rpm) shows; the
+portal wiring there needs the session files from a checkout, which the
+tarball does not carry. The next release's `.deb` replaces that step.
 
 ### From a release
 
-The same `version=` as above.
+The same `version=` as in the RPM block above; set it even if you skipped
+that block.
 
 ```sh
 archive="buoy-wm-${version}-x86_64-unknown-linux-gnu.tar.gz"
