@@ -250,6 +250,20 @@ require_text "$README" 'pinned_terminals = false' \
     "the way to run without any multiplexer, which the platforms section relies on"
 require_text "$README" '"tmux", "new-session", "-A", "-s", "{session}"' \
     "the tmux pinned_terminal_args line the Ubuntu steps point at"
+# Two facts verified in containers on 2026-11-08 (Story 5.2). tmux 3.7
+# and newer cannot re-attach a session whose name holds `.` or `:`, so
+# a tag named that way loses its pinned terminal on the second login;
+# the program message a user sees is the fact, not the prose around
+# it. And Ubuntu 26.04's river 0.4.1 advertises no window capture
+# source, so screen sharing there is monitor-only; that is a cell of
+# the 26.04 row, checked inside the extracted section so moving the
+# words to another row is red.
+require_text "$README" "can't find pane" \
+    "the tmux error a tag named with '.' or ':' produces on the second login"
+ubuntu_2604_row="$(printf '%s\n' "$platforms" | grep -F -- '| Ubuntu 26.04 LTS |' || true)"
+if ! printf '%s\n' "$ubuntu_2604_row" | grep -qF -- 'monitor-only'; then
+    fail "README.md: the '| Ubuntu 26.04 LTS |' row does not say 'monitor-only' (river 0.4.1 has no window capture source; screen sharing is monitor-only there)"
+fi
 # The RPM install heading, quoted by PACKAGING.md, derived from the
 # README so a rename there is red here rather than a dangling quote.
 rpm_heading="$(grep -m1 -E '^### Fedora .*: the RPM$' "$README" || true)"

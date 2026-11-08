@@ -53,12 +53,20 @@ otherwise. **Fedora 44 and 45 do not package it**, so the RPM's
 Fedora and Ubuntu archive carries:
 
 ```toml
+[defaults]
 pinned_terminal_args = ["-a", "{app_id}", "tmux", "new-session", "-A", "-s", "{session}"]
 ```
 
 `-A` attaches to the session if it exists and creates it otherwise, which is
 what zellij's `attach --create` does. `pinned_terminals = false` drops the
-multiplexer and the pinned terminal altogether.
+multiplexer and the pinned terminal altogether. tmux has one trap zellij does
+not: tmux 3.7 and newer (Fedora 44 and 45 ship 3.8, Ubuntu 26.10 ships 3.7b)
+read `.` and `:` in a session name as its window and pane separators, so a
+tag named like `a.b` or `a:b` gets its pinned terminal on the first login
+only and tmux reports `can't find pane` or `can't find window` after that,
+while tmux 3.6a (Ubuntu 26.04) rewrites both characters to `_`, so `a.b`,
+`a:b` and `a_b` share one session. Keep those two characters out of tag names
+when using tmux, or use zellij, which accepts them.
 
 `river`'s `river_input_manager_v1` and `river_libinput_config_v1` globals are
 also optional: without them, `[[input]]` blocks are skipped with one log line
@@ -70,7 +78,7 @@ and every device keeps libinput's own defaults.
 | --- | --- | --- | --- | --- |
 | Fedora 44 | 1 | 0.5.0 in the archive; the RPM requires it | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | `buoy-wm-${version}-1.fc44.x86_64.rpm` |
 | Fedora 45 | 1 | 0.5.0 in the archive; the RPM requires it | as Fedora 44 | the same `fc44` RPM, which installs on 45; an `fc45` build arrives with the next release |
-| Ubuntu 26.04 LTS | 1 | not in the archive: `ppa:tchavadar/river` (0.4.1) or a source build | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | the tarball; a `.deb` arrives with the next release |
+| Ubuntu 26.04 LTS | 1 | not in the archive: `ppa:tchavadar/river` (0.4.1) or a source build; screen sharing is monitor-only on 0.4.1 | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | the tarball; a `.deb` arrives with the next release |
 | Ubuntu 26.10 | 1 | not in the archive: `ppa:tchavadar/river-unstable` (0.4.5) or a source build | as Ubuntu 26.04 | the tarball; a `.deb` arrives with the next release |
 | Ubuntu 24.04 LTS and older | unsupported | no river from any apt source | — | the tarball may run if you build river yourself; nothing here is verified on it |
 
