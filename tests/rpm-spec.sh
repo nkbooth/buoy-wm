@@ -34,6 +34,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
 readonly SPEC="$REPO_ROOT/packaging/rpm/buoy-wm.spec"
+readonly CARGO="$REPO_ROOT/Cargo.toml"
 
 if [ ! -f "$SPEC" ]; then
     echo "$SPEC: missing" >&2
@@ -86,6 +87,30 @@ require_line '%{_datadir}/xdg-desktop-portal/buoy-portals.conf'
 
 # %{_userunitdir} is unexpanded without the macros package.
 require_tag BuildRequires 'systemd-rpm-macros'
+
+# The toolchain floor is read from the manifest, never spelled here.
+# ADR-014 makes it the rustc of the oldest tier-1 release, and
+# Cargo.toml's `rust-version` is its one home: the msrv CI job reads
+# that line so it cannot test a floor the manifest does not claim, and
+# this gate holds the spec's BuildRequires to the same line. The
+# 2026-10-03 bump (3193010) changed the manifest and the spec in one
+# commit, and nothing would have caught the spec staying behind. The
+# `|| true` keeps an absent line on the report instead of ending the
+# run under `set -e`. Exactly one rust line, so a second copy cannot
+# hide behind the gated one.
+msrv="$(grep -m1 '^rust-version = ' "$CARGO" | cut -d'"' -f2 || true)"
+if [ -z "$msrv" ]; then
+    echo "$CARGO: no 'rust-version = \"…\"' line to derive the spec's rust floor from" >&2
+    status=1
+fi
+rust_lines="$(grep -cE '^BuildRequires:[[:space:]]+rust ' "$SPEC" || true)"
+if [ "$rust_lines" -ne 1 ]; then
+    echo "$SPEC: expected exactly one 'BuildRequires: rust ' line, found $rust_lines" >&2
+    status=1
+fi
+if [ -n "$msrv" ]; then
+    require_tag BuildRequires "rust >= ${msrv//./\\.}"
+fi
 
 # The session entry runs river; the supervisor calls systemctl and
 # dbus-update-activation-environment on every login.
@@ -163,6 +188,17 @@ require_dep 'S waybar'
 
 if grep -Fxq 'W river >= 0.4' <<<"$deps"; then
     echo "$SPEC: rpmspec reports river as a Recommends; it must be a Requires" >&2
+    status=1
+fi
+
+# The parser's own reading of the floor: --buildrequires prints one bare
+# dependency per line, so the manifest's number is matched whole-line.
+buildreqs="$(rpmspec --define '_userunitdir /usr/lib/systemd/user' -q \
+    --buildrequires "$SPEC")"
+if ! grep -Fxq -- "rust >= $msrv" <<<"$buildreqs"; then
+    echo "$SPEC: rpmspec --buildrequires does not report: rust >= $msrv" >&2
+    echo "rpmspec build requirements:" >&2
+    echo "$buildreqs" >&2
     status=1
 fi
 

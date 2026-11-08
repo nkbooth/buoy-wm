@@ -224,7 +224,9 @@ publishes it and nothing was checking it.
 
 ### From source
 
-The Rust toolchain and `libwayland-dev` are the only build dependencies.
+Rust 1.93 or newer and `libwayland-dev` are the only build dependencies — the
+floor is the oldest supported release's rustc, as `docs/PACKAGING.md`
+"Toolchain floor" explains.
 
 ```sh
 cargo build --workspace --release

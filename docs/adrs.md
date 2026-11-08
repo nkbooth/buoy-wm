@@ -278,7 +278,12 @@ landed in 1.88. No Ubuntu rustc meets 1.99 (24.04: 1.75, 26.04: 1.93,
 26.10: 1.97), which made a Launchpad PPA impossible and a rebuild from any
 Ubuntu toolchain fail. On 2026-11-03 the locked workspace was built and
 every test suite passed on rust 1.93 in a one-shot container, so the drop
-costs nothing today. Fedora 44 and 45 ship 1.99.1 and are unaffected.
+costs nothing today. Since then the locked workspace has built and passed
+every test on Ubuntu 26.04's cargo 1.93.1ubuntu1 and 26.10's 1.97.1 with
+`--ignore-rust-version` (Story 5.2, 2026-11-08), and on 2026-11-08 rustc
+1.93.1 accepted the lowered manifest without the flag while clippy on
+stable 1.99.1 stayed clean under `-D warnings`. Fedora 44 and 45 ship
+1.99.1 and are unaffected.
 **Consequences:** The `msrv` CI job already reads the value from
 `Cargo.toml`, so the guard follows the manifest. A dependency bump that
 raises the lockfile's effective MSRV above the floor fails that job, which

@@ -69,6 +69,35 @@ Binaries are built on `ubuntu-22.04`, not `ubuntu-latest`. glibc is forward-
 but not backward-compatible, so the runner's glibc becomes the floor imposed
 on every user — 22.04 sets that floor at 2.35 rather than 2.39.
 
+## Toolchain floor
+
+`rust-version` in `Cargo.toml` is 1.93: the rustc of Ubuntu 26.04 LTS, the
+oldest release in the README's Supported platforms table (ADR-014). It
+moves only when that table does — a release leaving support can raise it,
+one entering can lower it — and never to current stable for its own sake.
+The spec's `BuildRequires: rust >= 1.93` says the same number, and
+`tests/rpm-spec.sh` and `tests/docs.sh` read it from `Cargo.toml`, so the
+copies cannot drift. CI's `msrv` job builds the locked workspace on exactly
+that toolchain, so a dependency bump that needs a newer compiler is red
+there before any distribution build sees it.
+
+Distribution packages are built by the distribution's own rustc — the RPM
+by `rpmbuild` in `fedora:44`, the `.deb` (Story 5.5) by `dpkg-buildpackage`
+in the Ubuntu containers — which is what the floor guarantees, since every
+supported release's archive rustc meets it (Fedora 44 1.94.1 in the release
+repo and 1.99.1 in updates, Fedora 45 1.99.1, Ubuntu 26.04 1.93.1, 26.10
+1.97.1, read 2026-11-08). Only the release tarball uses a pinned rustup
+toolchain (Story 5.4), so the bare binary is reproducible independent of
+any archive's cadence.
+
+A Launchpad PPA is therefore possible: Launchpad builds a source package
+with the target series' own rustc and only what `Build-Depends` names from
+the archive, so with the floor at 26.04's rustc and the crates vendored
+into the source package (the same tarball the RPM's `Source1` carries,
+since the builders have no network) a `buoy-wm` upload builds for 26.04 and
+26.10. It stays an optional mirror after the tag, as "Considered and not
+planned" says.
+
 ## Channels
 
 The GitHub release assets are the source of truth (ADR-011, which replaces
@@ -218,7 +247,7 @@ and a Launchpad PPA need no DFSG review (ADR-011), so the release-asset
 `.deb` for each supported Ubuntu is planned (the `deb` row of the version
 table above), and a PPA is an optional mirror once that Debian source
 package exists — ADR-014's MSRV keeps it buildable with Ubuntu's own
-rustc.
+rustc (see "Toolchain floor" above).
 
 **Flatpak / Snap.** Category mismatch. Both sandbox applications; a window
 manager is the session, needs the compositor's private protocol socket, and

@@ -40,6 +40,7 @@ readonly CHANGELOG="$REPO_ROOT/CHANGELOG.md"
 readonly SECURITY="$REPO_ROOT/SECURITY.md"
 readonly EXAMPLE="$REPO_ROOT/docs/config.example.toml"
 readonly ADRS="$REPO_ROOT/docs/adrs.md"
+readonly CONTRIBUTING="$REPO_ROOT/CONTRIBUTING.md"
 
 tmp="$(mktemp -d)"
 readonly tmp
@@ -57,7 +58,7 @@ fail() {
 
 for file in "$README" "$PACKAGING" "$SPEC" "$DESKTOP" \
     "$FORMULA" "$INSTALL" "$CARGO" "$CHANGELOG" "$SECURITY" "$EXAMPLE" \
-    "$ADRS"; do
+    "$ADRS" "$CONTRIBUTING"; do
     if [ ! -r "$file" ]; then
         fail "${file#"$REPO_ROOT/"}: missing or unreadable"
     fi
@@ -113,6 +114,34 @@ fi
 # Whole-line match: a substring check would accept rc.10 against rc.1.
 if ! grep -qxF -- "version=$cargo" "$README"; then
     fail "README.md: the 'version=' line is not 'version=$cargo' (the README's pinned version must be Cargo.toml's)"
+fi
+
+# The toolchain floor is a contract, not prose: the number a packager
+# reads in PACKAGING.md, the README and CONTRIBUTING.md must be the one
+# the manifest enforces, so it is derived from Cargo.toml's sister
+# field the same way (the msrv CI job and tests/rpm-spec.sh read the
+# same line) and never spelled here. CONTRIBUTING.md is gated because
+# its build sentence is the README's twin, and a gate on one copy
+# invites the other to drift. The PACKAGING heading is counted exactly
+# once so the section is extended, not duplicated, when the glibc
+# floor joins it.
+msrv="$(grep -m1 '^rust-version = ' "$CARGO" | cut -d'"' -f2 || true)"
+if [ -z "$msrv" ]; then
+    fail "Cargo.toml: no 'rust-version = \"…\"' line to derive the toolchain floor from"
+fi
+floor_lines="$(count_lines "$PACKAGING" '^## Toolchain floor$')"
+if [ "$floor_lines" -ne 1 ]; then
+    fail "docs/PACKAGING.md: expected exactly one '## Toolchain floor' heading, found $floor_lines"
+fi
+# Only with a floor in hand: an empty number would turn each needle
+# into a prefix that any value satisfies.
+if [ -n "$msrv" ]; then
+    require_text "$PACKAGING" "\`rust-version\` in \`Cargo.toml\` is $msrv" \
+        "the floor PACKAGING.md states must be the manifest's"
+    require_text "$README" "Rust $msrv or newer" \
+        "the build requirement the README states must be the manifest's floor"
+    require_text "$CONTRIBUTING" "Rust $msrv or newer" \
+        "the build requirement CONTRIBUTING.md states must be the manifest's floor"
 fi
 
 # The changelog's first versioned heading is the release Cargo.toml

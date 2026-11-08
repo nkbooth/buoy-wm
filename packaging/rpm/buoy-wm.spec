@@ -41,7 +41,7 @@ Source1:        %{name}-%{upstream_version}-vendor.tar.gz
 ExclusiveArch:  x86_64 aarch64
 
 BuildRequires:  cargo
-BuildRequires:  rust >= 1.99
+BuildRequires:  rust >= 1.93
 BuildRequires:  gcc
 BuildRequires:  pkgconfig(wayland-client)
 # %%{_userunitdir} (escaped: rpm expands macros even in comments). The

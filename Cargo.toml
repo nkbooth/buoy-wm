@@ -31,10 +31,12 @@ members = ["buoy-common", "wm", "buoy-tag-picker", "buoy-status-bar"]
 [workspace.package]
 version = "1.0.0-rc.2"
 edition = "2024"
-# Tracks the stable release current when it was last raised, not the oldest
-# toolchain that happens to compile: clippy reads this, so a stale floor
-# keeps the newer idioms its lints would suggest switched off.
-rust-version = "1.99"
+# The rustc of the oldest tier-1 release in the README's Supported platforms
+# table (Ubuntu 26.04 LTS, ADR-014): it moves only when that table does, and
+# is never raised to current stable for its own sake. The msrv CI job and
+# clippy both read this line; clippy gates its newer-idiom suggestions on it,
+# so those stay off until the floor moves, which is the price the ADR accepts.
+rust-version = "1.93"
 authors = ["Nick Booth <n1cck@onlyhams.radio>"]
 license = "RPL-1.5"
 repository = "https://github.com/nkbooth/buoy-wm"

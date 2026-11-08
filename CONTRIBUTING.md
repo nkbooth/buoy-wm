@@ -21,8 +21,10 @@ forget.
 
 ## Building
 
-The Rust toolchain and `libwayland-dev` are the only build dependencies.
-`.devcontainer/` provides both if you would rather not install them.
+Rust 1.93 or newer and `libwayland-dev` are the only build dependencies; the
+floor follows the oldest release the README supports, for the reasons
+`docs/PACKAGING.md` "Toolchain floor" gives. `.devcontainer/` provides both
+if you would rather not install them.
 
 ```sh
 cargo build --workspace

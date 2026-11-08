@@ -23,6 +23,9 @@ Notable changes per release. Format follows
   containers, that screen sharing is monitor-only on river 0.4.1 and that
   tmux 3.7 and newer cannot re-attach a session named with `.` or `:`; its
   `pinned_terminal_args` snippets now sit under the `[defaults]` header.
+- The minimum supported Rust version is 1.93, Ubuntu 26.04 LTS's rustc
+  (ADR-014), instead of 1.99, so every supported release can rebuild the
+  packages with its own toolchain; the RPM spec's `BuildRequires` follows.
 
 ## [1.0.0-rc.2]
 
