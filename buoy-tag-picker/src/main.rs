@@ -41,10 +41,11 @@
 //! its own RED/GREEN tests" — is no longer a carve-out for the file's
 //! decisions, only for its I/O (audit finding T-01).
 
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
+use buoy_common::cli::version_line;
 use buoy_common::log_err;
 use buoy_common::socket_path::NO_RUNTIME_DIR_MESSAGE;
 use buoy_tag_picker::launcher::Fuzzel;
@@ -149,12 +150,11 @@ fn connect_and_get_state()
     Ok((link, state))
 }
 
-/// Everything `main` does, with its failures returned rather than exited on
-/// — so there is exactly one `std::process::exit` in this binary and it is
-/// the last thing that happens.
-fn run() -> Result<(), String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mode = mode::parse_args(&args)?;
+/// Everything `main` does past `--version`, with its failures returned
+/// rather than exited on — so there is exactly one failure exit in this
+/// binary and it is the last thing that happens.
+fn run(args: &[String]) -> Result<(), String> {
+    let mode = mode::parse_args(args)?;
     let mut launcher = Fuzzel;
 
     match mode {
@@ -198,8 +198,27 @@ fn run() -> Result<(), String> {
     }
 }
 
+/// Writes `line` to stdout and exits 0, or reports the write error and
+/// exits 1: `println!` would panic on a closed stdout.
+fn print_version_and_exit(line: &str) -> ! {
+    let mut stdout = std::io::stdout().lock();
+    match writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            log_err!("could not write the version: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
-    if let Err(message) = run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Before `parse_args`, whose usage error spawns `notify-send`: a
+    // release's `verify` job runs this in a clean container (NFR6).
+    if let Some(line) = version_line(&args, env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")) {
+        print_version_and_exit(&line);
+    }
+    if let Err(message) = run(&args) {
         die_visibly(&message);
     }
 }

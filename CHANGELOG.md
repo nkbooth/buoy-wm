@@ -16,6 +16,14 @@ Notable changes per release. Format follows
   with that release's own toolchain and installing the `buoy` login
   session. river comes from the PPA and zellij from upstream, so neither
   is a dependency.
+- `--version` on `buoy-wm`, `buoy-tag-picker` and `buoy-status-bar`, as
+  the first argument: prints `<name> <version>` and exits without
+  touching the compositor, the IPC socket or the config.
+- Every release now installs each package into a clean container of its
+  own release and runs the three binaries' `--version` before anything is
+  published, so a package that cannot install or start never reaches the
+  release page; every push is also built and tested on each supported
+  release's own toolchain.
 
 ### Changed
 

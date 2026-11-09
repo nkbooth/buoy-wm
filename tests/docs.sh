@@ -29,6 +29,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
+# shellcheck source=tests/lib.sh
+source "$REPO_ROOT/tests/lib.sh"
 readonly README="$REPO_ROOT/README.md"
 readonly PACKAGING="$REPO_ROOT/docs/PACKAGING.md"
 readonly SPEC="$REPO_ROOT/packaging/rpm/buoy-wm.spec"
@@ -127,12 +129,11 @@ fi
 # once because the glibc floor shares the section (Story 5.4), so it is
 # extended, never duplicated. Only the double-quoted spelling is read; any
 # other value is reported rather than turned into a needle.
-msrv="$(grep -m1 '^rust-version = ' "$CARGO" | cut -d'"' -f2 || true)"
-if [ -z "$msrv" ]; then
-    fail "Cargo.toml: no 'rust-version = \"…\"' line to derive the toolchain floor from"
-fi
-case $msrv in
-    *[!0-9.]*)
+msrv_status=0
+msrv="$(read_msrv "$CARGO")" || msrv_status=$?
+case $msrv_status in
+    1) fail "Cargo.toml: no 'rust-version = \"…\"' line to derive the toolchain floor from" ;;
+    2)
         fail "Cargo.toml: rust-version '$msrv' is not digits and dots (only the double-quoted spelling is read)"
         msrv=""
         ;;
@@ -231,9 +232,7 @@ require_text "$README" '-1.fc44.x86_64.rpm' \
 # required in backticks or with the asset suffix, so a bare number in
 # another sentence cannot stand in for it. The retired runner label is
 # forbidden in both documents that used to name it.
-packages_job="$(awk '$0 == "  packages:" { in_job = 1; next }
-    /^  [a-z]/ { in_job = 0 }
-    in_job' "$RELEASE" || true)"
+packages_job="$(job_body "$RELEASE" packages || true)"
 # Split on whitespace, as tests/release-workflow.sh reads the same
 # lines, so a target that gate accepts is never dropped here.
 fedora_releases="$(printf '%s\n' "$packages_job" | awk '$1 == "-" && $2 == "target:" && $3 ~ /^fedora-[0-9]+$/ {
@@ -265,9 +264,7 @@ done
 # so is caught only by the shorter needle.
 forbid_text "$PACKAGING" 'Story 5.5' \
     "the .deb is built by dpkg-buildpackage in the Ubuntu containers and debian/changelog is in the tree"
-build_job="$(awk '$0 == "  build:" { in_job = 1; next }
-    /^  [a-z]/ { in_job = 0 }
-    in_job' "$RELEASE" || true)"
+build_job="$(job_body "$RELEASE" build || true)"
 build_image="$(printf '%s\n' "$build_job" | sed -n 's/^[[:space:]]*image: //p' | head -n1)"
 if [ -z "$build_image" ]; then
     fail "release.yml: no container 'image:' in the build job (PACKAGING.md names the tarball's build image from it)"
@@ -340,18 +337,23 @@ heading_lines="$(count_lines "$README" '^## Supported platforms$')"
 if [ "$heading_lines" -ne 1 ]; then
     fail "README.md: expected exactly one '## Supported platforms' heading, found $heading_lines"
 fi
-# The section body: from the heading to the next `## ` heading. The
-# `|| true` keeps an absent section on the report rather than ending
-# the run under `set -e`.
-platforms="$(awk '/^## Supported platforms$/ { in_section = 1; next }
-    /^## / { in_section = 0 }
-    in_section' "$README" || true)"
-for release in '| Fedora 44 |' '| Fedora 45 |' '| Ubuntu 26.04 LTS |' \
-    '| Ubuntu 26.10 |' '| Ubuntu 24.04 LTS'; do
-    if ! printf '%s\n' "$platforms" | grep -qF -- "$release"; then
-        fail "README.md: the Supported platforms section has no row '$release' (the matrices are derived from these names)"
-    fi
-done
+# The rows, read by tests/lib.sh's platform_rows, the reader
+# tests/release-workflow.sh and tests/ci-workflow.sh derive the matrices
+# from, so the names are read, never spelled here. Each name exactly
+# once (a duplicated row would put a target in a matrix twice), at
+# least one tier-1 row (the matrices are derived from them) and at least
+# one unsupported row (the README says what it does not support).
+platform_rows "$README" >"$tmp/rows" || true
+cut -f1 "$tmp/rows" | LC_ALL=C sort | uniq -d >"$tmp/duplicates"
+while IFS= read -r name; do
+    fail "README.md: the Supported platforms section has the row '$name' more than once"
+done <"$tmp/duplicates"
+if ! cut -f2 "$tmp/rows" | grep -qxF 1; then
+    fail "README.md: the Supported platforms section has no tier-1 row (the matrices are derived from them)"
+fi
+if ! cut -f2 "$tmp/rows" | grep -qxF unsupported; then
+    fail "README.md: the Supported platforms section has no 'unsupported' row (the README says what it does not support)"
+fi
 # The stable PPA's name is a prefix of the unstable one's, so a plain
 # substring check could never fail while the unstable name is present.
 if ! grep -qE 'ppa:tchavadar/river([^-]|$)' "$README"; then
@@ -388,15 +390,15 @@ fi
 # the program message a user sees is the fact, not the prose around
 # it. And Ubuntu 26.04's river 0.4.1 advertises no window capture
 # source, so screen sharing there is monitor-only; that is a cell of
-# the 26.04 row, checked inside the extracted section so moving the
-# words to another row is red.
+# the 26.04 row's river cell, read by platform_rows, so moving the
+# words to another row or another column is red.
 require_text "$README" "can't find pane" \
     "the tmux error a tag named with '.' or ':' produces on the second login"
-ubuntu_2604_row="$(printf '%s\n' "$platforms" | grep -F -- '| Ubuntu 26.04 LTS |' || true)"
-# An absent row is already on the report from the loop above; only a
-# present row is asked about its cell.
-if [ -n "$ubuntu_2604_row" ] && ! printf '%s\n' "$ubuntu_2604_row" | grep -qF -- 'monitor-only'; then
-    fail "README.md: the '| Ubuntu 26.04 LTS |' row does not say 'monitor-only' (river 0.4.1 has no window capture source; screen sharing is monitor-only there)"
+ubuntu_2604_river="$(awk -F'\t' '$1 == "Ubuntu 26.04 LTS" { print $3 }' "$tmp/rows")"
+if [ -z "$ubuntu_2604_river" ]; then
+    fail "README.md: the Supported platforms section has no 'Ubuntu 26.04 LTS' row with a river cell"
+elif ! printf '%s\n' "$ubuntu_2604_river" | grep -qF -- 'monitor-only'; then
+    fail "README.md: the 'Ubuntu 26.04 LTS' row's river cell does not say 'monitor-only' (river 0.4.1 has no window capture source; screen sharing is monitor-only there)"
 fi
 # The RPM install heading, quoted by PACKAGING.md, derived from the
 # README so a rename there is red here rather than a dangling quote.
@@ -458,6 +460,16 @@ require_text "$PACKAGING" 'scripts/build-rpm.sh' \
     "the offline rebuild is the build script"
 require_text "$PACKAGING" 'scripts/build-deb.sh' \
     "the .deb's offline rebuild is its build script"
+# Every package is installed and run in a clean container before the
+# release is published (NFR6); the runbook no longer asks for those
+# installs by hand, because publish would not have run without them.
+# shellcheck disable=SC2016 # a literal backticked job name
+require_text "$PACKAGING" '`verify`' \
+    "the release job that installs each package in a clean container"
+require_text "$PACKAGING" 'scripts/check-installed.sh' \
+    "the script verify runs against the installed binaries"
+forbid_text "$PACKAGING" 'in a fresh container of its own release' \
+    "the verify legs install every package; the runbook's by-hand container installs are gone"
 
 # install.sh's last line points at the README section that explains how
 # to start a session, now that there are two ways. A fixture build dir

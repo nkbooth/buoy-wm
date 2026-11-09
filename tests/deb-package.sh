@@ -31,6 +31,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
+# shellcheck source=tests/lib.sh
+source "$REPO_ROOT/tests/lib.sh"
 readonly DEB="$REPO_ROOT/packaging/deb/debian"
 readonly CONTROL="$DEB/control"
 readonly RULES="$DEB/rules"
@@ -116,12 +118,11 @@ expect_set() {
 # The toolchain floor is read from the manifest, never spelled here, as
 # tests/rpm-spec.sh reads it: debian/control is the third copy of the
 # number (ADR-014), and nothing else would notice it staying behind.
-msrv="$(grep -m1 '^rust-version = ' "$CARGO" | cut -d'"' -f2 || true)"
-if [ -z "$msrv" ]; then
-    fail "Cargo.toml: no 'rust-version = \"…\"' line to derive debian/control's rustc floor from"
-fi
-case $msrv in
-    *[!0-9.]*)
+msrv_status=0
+msrv="$(read_msrv "$CARGO")" || msrv_status=$?
+case $msrv_status in
+    1) fail "Cargo.toml: no 'rust-version = \"…\"' line to derive debian/control's rustc floor from" ;;
+    2)
         fail "Cargo.toml: rust-version '$msrv' is not digits and dots (only the double-quoted spelling is read)"
         msrv=""
         ;;

@@ -40,6 +40,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use buoy_common::cli::version_line;
 use buoy_common::framing::{Line, MAX_LINE_BYTES, read_line_bounded};
 use buoy_common::log_err;
 use buoy_common::socket_path::NO_RUNTIME_DIR_MESSAGE;
@@ -231,8 +232,26 @@ fn request_state(
     }
 }
 
+/// Writes `line` to stdout and exits 0, or reports the write error and
+/// exits 1: `println!` would panic on a closed stdout.
+fn print_version_and_exit(line: &str) -> ! {
+    let mut stdout = std::io::stdout().lock();
+    match writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            log_err!("could not write the version: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Before the output id is parsed: a release's `verify` job runs this
+    // in a clean container (NFR6).
+    if let Some(line) = version_line(&args, env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")) {
+        print_version_and_exit(&line);
+    }
     let output_id = match parse_output_id(&args) {
         Ok(output_id) => output_id,
         Err(message) => {

@@ -21,7 +21,14 @@
 name: CI
 
 on:
+  # Branches only, so a tag push no longer re-runs every job on a commit
+  # `main`'s push already gated (ci.yml ran twice on rc.1's commit). A
+  # filter naming only branches skips tag pushes: "If you define only
+  # tags/tags-ignore or only branches/branches-ignore, the workflow won't
+  # run for events affecting the undefined Git ref" (GitHub's workflow
+  # syntax reference). The tag's own gate is release.yml.
   push:
+    branches: ["**"]
   pull_request:
 
 # Every job here only reads the repository. Without this block they inherit
@@ -125,6 +132,79 @@ jobs:
       - name: cargo doc
         run: cargo doc --workspace --no-deps --document-private-items --locked
 
+  # Every push built and tested on each supported release's own toolchain
+  # (NFR6), so a change that breaks one distribution is red on the push
+  # that made it rather than on the tag. `check` stays the fast path on
+  # rustup stable and `msrv` on the declared floor: a release's archive
+  # rustc is neither (an SRU can raise the LTS's above the floor).
+  targets:
+    # The runner is only the host (ADR-015); each leg runs in its
+    # release's container.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    container:
+      image: ${{ matrix.image }}
+    defaults:
+      run:
+        # A container job's default shell is `sh`.
+        shell: bash
+    strategy:
+      # One run names every failing release.
+      fail-fast: false
+      # The README's Supported platforms tier-1 and tier-2 rows (tier 2
+      # is empty today), the same list as release.yml's `packages`;
+      # tests/ci-workflow.sh holds it to the table. Images are pinned by
+      # tag for the reason release.yml gives.
+      matrix:
+        include:
+          - target: fedora-44
+            image: registry.fedoraproject.org/fedora:44
+          - target: fedora-45
+            image: registry.fedoraproject.org/fedora:45
+          - target: ubuntu-26.04
+            image: docker.io/library/ubuntu:26.04
+          - target: ubuntu-26.10
+            image: docker.io/library/ubuntu:26.10
+    steps:
+      # The images have no git, so the action falls back to its REST
+      # download; no step here runs git.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The spec's BuildRequires is Fedora's one list of build
+      # dependencies, so this job cannot drift from what the RPM builds
+      # with. `dnf5-plugins` carries `builddep`; today's images already
+      # have it, and an older image still works.
+      - name: Install the build dependencies (Fedora)
+        if: startsWith(matrix.target, 'fedora-')
+        run: |
+          dnf -y install dnf5-plugins
+          dnf -y builddep packaging/rpm/buoy-wm.spec
+
+      # debian/control's Build-Depends is Ubuntu's one list. The one
+      # addition is ca-certificates: this job fetches crates online,
+      # which `build-dep` does not cover (without it cargo fails with
+      # `[77] Problem with the SSL CA cert`); the release legs build
+      # offline from the vendor tarball and never needed it. The image
+      # runs as root and has no sudo, which the repository's own
+      # build-deps action runs, so that action is not used here.
+      - name: Install the build dependencies (Ubuntu)
+        if: startsWith(matrix.target, 'ubuntu-')
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get build-dep -y ./packaging/deb
+          apt-get install -y --no-install-recommends ca-certificates
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
   # Separate job: the MSRV declared in [workspace.package] is a promise to
   # anyone packaging this, and an accidental use of a newer feature would
   # otherwise only surface in a distro build.
@@ -139,11 +219,13 @@ jobs:
       # so a pinned duplicate meant bumping Cargo.toml alone left CI
       # silently testing the old floor while the manifest claimed the new
       # one — a check that could not detect the thing it exists to detect.
+      # tests/lib.sh's read_msrv is the one reader the spec, .deb and docs
+      # gates use too, so this job cannot read a different floor.
       - name: Read MSRV from Cargo.toml
         id: msrv
         run: |
-          version="$(grep -m1 '^rust-version = ' Cargo.toml | cut -d'"' -f2)"
-          if [ -z "$version" ]; then
+          source tests/lib.sh
+          if ! version="$(read_msrv Cargo.toml)"; then
             echo "could not read rust-version from Cargo.toml" >&2
             exit 1
           fi
@@ -197,8 +279,17 @@ jobs:
       - name: zizmor
         run: zizmor --offline .github/workflows .github/actions
 
+      # A shell file is linted because it is one, not because someone
+      # appended it to a list: tests/lib.sh's shell_files names every
+      # tracked file whose first line is a sh, bash or dash `#!` (the
+      # hand list this replaced had missed one). `-x` follows each test's
+      # `source tests/lib.sh`.
       - name: shellcheck
-        run: shellcheck scripts/install.sh .devcontainer/post-create.sh tests/buoy-session-target.sh tests/buoy-portals-conf.sh packaging/buoy-session tests/buoy-session.sh tests/buoy-desktop.sh tests/rpm-spec.sh scripts/release-version.sh tests/release-version.sh scripts/build-rpm.sh tests/build-rpm.sh tests/docs.sh scripts/release-notes.sh tests/release-notes.sh tests/release-workflow.sh scripts/build-deb.sh tests/build-deb.sh tests/deb-package.sh
+        run: |
+          source tests/lib.sh
+          files="$(shell_files)"
+          mapfile -t list <<<"$files"
+          shellcheck -x "${list[@]}"
 
       # The session target is one directive away from a login that never
       # starts the portals. The line-by-line assert is the gate;
@@ -294,12 +385,24 @@ jobs:
       - name: build-deb.sh
         run: tests/build-deb.sh
 
+      # The script release.yml's `verify` job runs against each installed
+      # package, on a tag only; this proves its contract on every push
+      # against stub binaries at the paths the spec's %files names.
+      - name: check-installed.sh
+        run: tests/check-installed.sh
+
       # release.yml runs only on a tag, so a package matrix that drifts
       # from the README's tier-1 rows, a retiring runner label or a
       # floating toolchain would otherwise be found on the release that
       # ships it. This holds the workflow to the table on every push.
       - name: release.yml matrix
         run: tests/release-workflow.sh
+
+      # The same table drives this file's `targets` job, so a release
+      # added to or dropped from the README without CI following it is
+      # red here, as are a lost tag filter and a shellcheck hand list.
+      - name: ci.yml targets
+        run: tests/ci-workflow.sh
 
       # RPL 1.5 §6.4(a) requires the notice in every source file. The
       # pre-commit hook is the only list of gated files; running it here

@@ -24,6 +24,7 @@
 //! `docs/adrs.md` is where it and its consequences are recorded — notably
 //! that the wire *types* stay deliberately per-crate.
 
+pub mod cli;
 pub mod framing;
 pub mod log;
 pub mod notify;

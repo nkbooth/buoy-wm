@@ -16,19 +16,22 @@
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
 #
-# Asserts that release.yml builds what the README promises, on hosts
-# that are not retiring. release.yml runs only on a tag, so a package
-# matrix that drifts from the README's Supported platforms table, a
-# runner label past its retirement or a toolchain that floats would
-# otherwise be found on the release that ships it. The targets are read
-# from the README's tier-1 rows (ADR-013: the list lives there) and
-# mapped to container images by rule; nothing here spells a release.
-# grep, awk and sed over the file's own shape, because the hygiene
-# runner guarantees neither yq nor a YAML library.
+# Asserts that release.yml builds and verifies what the README promises,
+# on hosts that are not retiring. release.yml runs only on a tag, so a
+# package matrix that drifts from the README's Supported platforms
+# table, a runner label past its retirement or a toolchain that floats
+# would otherwise be found on the release that ships it. The targets are
+# read from the README's tier-1 and tier-2 rows (ADR-013: the list lives
+# there) and mapped to container images by rule, both through
+# tests/lib.sh; nothing here spells a release. grep, awk and sed over
+# the file's own shape, because the hygiene runner guarantees neither yq
+# nor a YAML library.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
+# shellcheck source=tests/lib.sh
+source "$REPO_ROOT/tests/lib.sh"
 readonly README="$REPO_ROOT/README.md"
 readonly RELEASE="$REPO_ROOT/.github/workflows/release.yml"
 
@@ -56,24 +59,15 @@ if [ "$status" -ne 0 ]; then
     exit "$status"
 fi
 
-# job_body <job>: the lines of one job, from its two-space key to the
-# next job key, so a `target:` or `image:` elsewhere cannot satisfy a
-# check about this job.
-job_body() {
-    awk -v key="  $1:" '$0 == key { in_job = 1; next }
-        /^  [a-z]/ { in_job = 0 }
-        in_job' "$RELEASE"
-}
-
 # (a) Every job runs on a label that is not retiring: GitHub removes
 # ubuntu-22.04 on 2027-04-17 after brownouts from 2027-03-23
 # (actions/runner-images#14254). Whole line after the indentation, so a
-# trailing comment or a second label cannot pass; at least three, one
+# trailing comment or a second label cannot pass; at least four, one
 # per job.
 runs_on_lines="$(grep -E '^[[:space:]]*runs-on:' "$RELEASE" || true)"
 runs_on_count="$(printf '%s' "$runs_on_lines" | grep -c . || true)"
-if [ "$runs_on_count" -lt 3 ]; then
-    fail "release.yml: expected at least three 'runs-on:' lines (build, packages, publish), found $runs_on_count"
+if [ "$runs_on_count" -lt 4 ]; then
+    fail "release.yml: expected at least four 'runs-on:' lines (build, packages, verify, publish), found $runs_on_count"
 fi
 while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -86,84 +80,46 @@ if grep -qF -- 'ubuntu-22.04' "$RELEASE"; then
     fail "release.yml: still names 'ubuntu-22.04' (retiring; brownouts from 2027-03-23)"
 fi
 
-# (b) The README's tier-1 rows, read the way tests/docs.sh reads the
-# section: from its heading to the next `## `. A row's second cell is
-# its tier; the first is the release name the target is derived from.
-platforms="$(awk '/^## Supported platforms$/ { in_section = 1; next }
-    /^## / { in_section = 0 }
-    in_section' "$README" || true)"
-tier1_names="$(printf '%s\n' "$platforms" | awk -F'|' '/^\|/ {
-        name = $2; tier = $3
-        gsub(/^[ \t]+|[ \t]+$/, "", name)
-        gsub(/^[ \t]+|[ \t]+$/, "", tier)
-        if (tier == "1") print name
-    }')"
-# A tier cell this rule cannot read ("1 (from May)", "**1**") would
-# otherwise drop its row from the matrix without a word; the header and
-# the separator row are the only other shapes the table has.
-unread_tiers="$(printf '%s\n' "$platforms" | awk -F'|' '/^\|/ {
-        name = $2; tier = $3
-        gsub(/^[ \t]+|[ \t]+$/, "", name)
-        gsub(/^[ \t]+|[ \t]+$/, "", tier)
-        if (tier !~ /^(1|2|unsupported|Tier|-+)$/) print name " -> " tier
-    }')"
-while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    fail "README.md: Supported platforms row '$row' has a tier cell that is not '1', '2' or 'unsupported'"
-done <<<"$unread_tiers"
-if [ -z "$tier1_names" ]; then
-    fail "README.md: no tier-1 rows in the Supported platforms section (the release matrix is derived from them)"
-fi
-
+# (b) The README's rows (tests/lib.sh's platform_rows). Every matrix is
+# the tier-1 and tier-2 rows (ADR-013: tier 2 builds, installs and
+# passes its tests in CI); a tier cell this rule cannot read ("1 (from
+# May)", "**1**") would otherwise drop its row from the matrix without
+# a word.
+platform_rows "$README" >"$tmp/rows"
+while IFS=$'\t' read -r name tier _; do
+    case $tier in
+        1 | 2 | unsupported) ;;
+        *) fail "README.md: Supported platforms row '$name -> $tier' has a tier cell that is not '1', '2' or 'unsupported'" ;;
+    esac
+done <"$tmp/rows"
 # Release name -> "target image" by rule; anything else is reported,
 # never skipped, so a new kind of row cannot silently leave the matrix.
-: >"$tmp/expected"
+supported_targets "$README" >"$tmp/mapped"
+grep -v '^- ' "$tmp/mapped" >"$tmp/expected" || true
+while read -r _ name; do
+    fail "README.md: tier-1 or tier-2 row '$name' maps to no release target (only 'Fedora NN' and 'Ubuntu X.Y[ LTS]' have a rule)"
+done < <(grep '^- ' "$tmp/mapped" || true)
+if [ ! -s "$tmp/mapped" ]; then
+    fail "README.md: no tier-1 or tier-2 rows in the Supported platforms section (the release matrix is derived from them)"
+fi
+# The build container is the tier-1 LTS row's image (check (c)).
 lts_images=()
-while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if [[ "$name" =~ ^Fedora\ ([0-9]+)$ ]]; then
-        n="${BASH_REMATCH[1]}"
-        printf 'fedora-%s registry.fedoraproject.org/fedora:%s\n' "$n" "$n" >>"$tmp/expected"
-    elif [[ "$name" =~ ^Ubuntu\ ([0-9]+\.[0-9]+)(\ LTS)?$ ]]; then
-        v="${BASH_REMATCH[1]}"
-        printf 'ubuntu-%s docker.io/library/ubuntu:%s\n' "$v" "$v" >>"$tmp/expected"
-        if [ -n "${BASH_REMATCH[2]}" ]; then
-            lts_images+=("docker.io/library/ubuntu:$v")
-        fi
-    else
-        fail "README.md: tier-1 row '$name' maps to no release target (only 'Fedora NN' and 'Ubuntu X.Y[ LTS]' have a rule)"
+while IFS=$'\t' read -r name tier _; do
+    if [ "$tier" = 1 ] && [[ "$name" == *' LTS' ]] && pair="$(release_target "$name")"; then
+        lts_images+=("${pair#* }")
     fi
-done <<<"$tier1_names"
+done <"$tmp/rows"
 
 # The packages job's matrix: each `- target:` line followed directly by
 # its `image:` line.
-job_body packages >"$tmp/packages"
+job_body "$RELEASE" packages >"$tmp/packages"
 if [ ! -s "$tmp/packages" ]; then
     fail "release.yml: no 'packages' job (the per-release matrix)"
 fi
-awk '/^[[:space:]]*- target: / {
-        target = $0; sub(/^[[:space:]]*- target: /, "", target)
-        if ((getline next_line) > 0) {
-            image = next_line
-            if (sub(/^[[:space:]]*image: /, "", image)) print target, image
-            else print target, "-"
-        } else print target, "-"
-    }' "$tmp/packages" >"$tmp/actual"
-while read -r target image; do
-    count="$(awk -v t="$target" '$1 == t' "$tmp/actual" | grep -c . || true)"
-    if [ "$count" -eq 0 ]; then
-        fail "release.yml: the packages matrix has no '- target: $target' (a README tier-1 row)"
-    elif [ "$count" -gt 1 ]; then
-        fail "release.yml: the packages matrix lists '- target: $target' $count times (each target exactly once)"
-    elif ! awk -v t="$target" -v i="$image" '$1 == t && $2 == i' "$tmp/actual" | grep -q .; then
-        fail "release.yml: '- target: $target' is not followed by 'image: $image'"
-    fi
-done <"$tmp/expected"
-while read -r target _; do
-    if ! awk -v t="$target" '$1 == t' "$tmp/expected" | grep -q .; then
-        fail "release.yml: the packages matrix has '- target: $target', which no README tier-1 row maps to"
-    fi
-done <"$tmp/actual"
+matrix_pairs "$tmp/packages" >"$tmp/actual"
+while IFS= read -r difference; do
+    fail "release.yml: the packages matrix $difference"
+done < <(matrix_differences "$tmp/expected" "$tmp/actual")
 # The list means nothing unless each leg runs in its own entry's image.
 # shellcheck disable=SC2016 # the literal text of the workflow line
 if [ "$(grep -cxF -- '      image: ${{ matrix.image }}' "$tmp/packages" || true)" -ne 1 ]; then
@@ -173,14 +129,15 @@ fi
 # (g) Every leg can fail the release and every leg's package reaches it:
 # a per-target artifact name (a shared one lets `overwrite` replace one
 # leg's RPM with another's), `publish` waiting on `packages` and
-# downloading every `package-*`, and no `continue-on-error` anywhere.
+# `verify` and downloading every `package-*`, and no
+# `continue-on-error` anywhere.
 # shellcheck disable=SC2016 # the literal text of the workflow line
 if [ "$(grep -cxF -- '          name: package-${{ matrix.target }}' "$tmp/packages" || true)" -ne 1 ]; then
     fail "release.yml: the packages job does not upload exactly one 'name: package-\${{ matrix.target }}' artifact"
 fi
-job_body publish >"$tmp/publish"
-if ! grep -qxF -- '    needs: [build, packages]' "$tmp/publish"; then
-    fail "release.yml: publish does not say 'needs: [build, packages]' (a failed leg must block the release)"
+job_body "$RELEASE" publish >"$tmp/publish"
+if ! grep -qxF -- '    needs: [build, packages, verify]' "$tmp/publish"; then
+    fail "release.yml: publish does not say 'needs: [build, packages, verify]' (a failed leg or a failed install must block the release, NFR6)"
 fi
 if ! grep -qxF -- '          pattern: package-*' "$tmp/publish"; then
     fail "release.yml: publish does not download 'pattern: package-*' (every leg's package)"
@@ -197,26 +154,8 @@ fi
 # anywhere in its step; with one unconditional upload, check (g)'s
 # exactly-one artifact name holds for the Ubuntu legs too. Each family's
 # build step, and the lint step, carries exactly its family's guard, so
-# a dead condition cannot skip one quietly.
-# count_lines_matching <file> <regex>: how many whole lines match.
-count_lines_matching() {
-    grep -cxE -- "$2" "$1" || true
-}
-# step_with <file> <regex>: every step of the job's `steps:` list that
-# holds a line matching <regex>, from its `- ` line to the next step.
-step_with() {
-    # Through the environment: `-v` would turn the regex's `\.` into `.`.
-    STEP_PAT="$2" awk '
-        BEGIN { pat = ENVIRON["STEP_PAT"] }
-        function flush() { if (hit) printf "%s", buf; buf = ""; hit = 0 }
-        /^[[:space:]]*steps:[[:space:]]*$/ { in_steps = 1; next }
-        !in_steps { next }
-        !have_indent && match($0, /^[[:space:]]*- /) { indent = RLENGTH - 2; have_indent = 1 }
-        have_indent && match($0, /^[[:space:]]*[^[:space:]]/) && RLENGTH - 1 < indent { flush(); in_steps = 0; next }
-        have_indent && match($0, /^[[:space:]]*- /) && RLENGTH - 2 == indent { flush() }
-        { buf = buf $0 "\n"; if ($0 ~ pat) hit = 1 }
-        END { flush() }' "$1"
-}
+# a dead condition cannot skip one quietly. count_lines_matching and
+# step_with are tests/lib.sh's, shared with tests/ci-workflow.sh.
 for run_line in 'scripts/build-rpm\.sh sources dist' 'scripts/build-deb\.sh sources dist' \
     'lintian --fail-on error( [^ ]+)* dist/\*\.deb'; do
     n="$(count_lines_matching "$tmp/packages" "[[:space:]]*run: $run_line")"
@@ -261,7 +200,7 @@ done
 
 # (c) The tarball is built in the oldest-glibc supported container, the
 # LTS row's image (ADR-015), so its glibc floor is a fact of the table.
-job_body build >"$tmp/build"
+job_body "$RELEASE" build >"$tmp/build"
 build_images="$(grep -E '^[[:space:]]*image: ' "$tmp/build" | sed 's/^[[:space:]]*image: //' || true)"
 build_image_count="$(printf '%s' "$build_images" | grep -c . || true)"
 if [ "${#lts_images[@]}" -ne 1 ]; then
@@ -312,6 +251,60 @@ for line in '  group: release-${{ inputs.tag || github.ref_name }}' \
         fail "release.yml: expected the concurrency line '${line#  }' exactly once"
     fi
 done
+
+# (i) Every package is installed into a clean container of its own
+# release and its binaries run before anything is published (NFR6). The
+# same matrix as `packages`, each leg in its entry's image, downloading
+# its own leg's artifact; the install and the check as whole `run:`
+# lines, each install under exactly its family's guard and the check
+# under none. Clean means nothing but the package and what it pulls, so
+# no build tool may appear anywhere in the job.
+job_body "$RELEASE" verify >"$tmp/verify"
+if [ ! -s "$tmp/verify" ]; then
+    fail "release.yml: no 'verify' job (each package installed and run in a clean container, NFR6)"
+else
+    matrix_pairs "$tmp/verify" >"$tmp/verify-actual"
+    while IFS= read -r difference; do
+        fail "release.yml: the verify matrix $difference"
+    done < <(matrix_differences "$tmp/expected" "$tmp/verify-actual")
+    # shellcheck disable=SC2016 # the literal text of the workflow lines
+    for line in '      image: ${{ matrix.image }}' '    needs: [build, packages]' \
+        '          name: package-${{ matrix.target }}'; do
+        if [ "$(grep -cxF -- "$line" "$tmp/verify" || true)" -ne 1 ]; then
+            fail "release.yml: the verify job does not have exactly one line '${line#"${line%%[! ]*}"}'"
+        fi
+    done
+    # shellcheck disable=SC2016 # the literal text of the workflow line
+    n="$(count_lines_matching "$tmp/verify" '[[:space:]]*run: scripts/check-installed\.sh "\$VERSION"')"
+    if [ "$n" -ne 1 ]; then
+        fail "release.yml: the verify job does not have exactly one 'run: scripts/check-installed.sh \"\$VERSION\"' line (found $n)"
+    elif step_with "$tmp/verify" '^[[:space:]]*run: scripts/check-installed\.sh' | grep -qE '^[[:space:]]*if:'; then
+        fail "release.yml: the verify job's check-installed.sh step has an 'if:' (every leg must run the binaries)"
+    fi
+    while IFS='|' read -r anchor family; do
+        n="$(count_lines_matching "$tmp/verify" "[[:space:]]*(run: )?$anchor")"
+        if [ "$n" -ne 1 ]; then
+            fail "release.yml: the verify job does not run '${anchor//\\/}' exactly once as a whole line (found $n)"
+            continue
+        fi
+        step_with "$tmp/verify" "^[[:space:]]*(run: )?$anchor\$" >"$tmp/step"
+        ifs="$(grep -E '^[[:space:]]*if:' "$tmp/step" | sed 's/^[[:space:]]*//' || true)"
+        if [ "$ifs" != "if: startsWith(matrix.target, '$family-')" ]; then
+            fail "release.yml: the verify job's '${anchor//\\/}' step is not guarded by exactly 'if: startsWith(matrix.target, '$family-')' (found: ${ifs:-none})"
+        fi
+    done <<'EOF'
+dnf -y install \./dist/\*\.rpm|fedora
+apt-get install -y --no-install-recommends \./dist/\*\.deb|ubuntu
+EOF
+    if ! grep -qE '^[[:space:]]*(run: )?(cd dist && )?sha256sum -c' "$tmp/verify"; then
+        fail "release.yml: the verify job does not check the download with 'sha256sum -c'"
+    fi
+    for tool in builddep build-dep cargo rpmbuild dpkg-buildpackage lintian; do
+        if grep -qF -- "$tool" "$tmp/verify"; then
+            fail "release.yml: the verify job names '$tool' (the container must be clean but for the package and what it pulls)"
+        fi
+    done
+fi
 
 if [ "$status" -ne 0 ]; then
     cat "$tmp/report" >&2

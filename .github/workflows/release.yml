@@ -21,13 +21,14 @@
 # under one build-provenance attestation, with the tag's CHANGELOG.md
 # entry as the release notes.
 # The runner is only the host (ADR-015); every build runs in a container
-# this file pins. Three jobs: `build` makes the tarball in a
+# this file pins. Four jobs: `build` makes the tarball in a
 # `ubuntu:26.04` container with a pinned rustup toolchain, cuts the notes
 # and stages the packages' two sources; `packages` is one leg per README
-# tier-1 release, each in that release's own container with its own
-# toolchain (ADR-011, ADR-014) — the Fedora legs build the RPM, the
-# Ubuntu legs the .deb, from the same two sources; and `publish`
-# attests and uploads. The write permissions live on `publish` alone,
+# tier-1 or tier-2 release, each in that release's own container with
+# its own toolchain (ADR-011, ADR-014) — the Fedora legs build the RPM,
+# the Ubuntu legs the .deb, from the same two sources; `verify` installs
+# each package in a clean container of its release and runs the
+# binaries (NFR6); and `publish` attests and uploads. The write permissions live on `publish` alone,
 # which runs `gh` and the attest action and nothing from the tree. See
 # docs/PACKAGING.md for how this feeds the Homebrew tap and the COPR RPM.
 name: Release
@@ -293,8 +294,8 @@ jobs:
       # One run names every failing target; any failed leg still skips
       # `publish`, so a failing target blocks the release.
       fail-fast: false
-      # The README's Supported platforms tier-1 rows, one leg each;
-      # tests/release-workflow.sh holds this list to them. Images are
+      # The README's Supported platforms tier-1 and tier-2 rows, one leg
+      # each; tests/release-workflow.sh holds this list to them. Images are
       # pinned by tag, not digest, on purpose: the point of a
       # distribution build is the distribution's current packages,
       # Dependabot does not bump `container.image`, and zizmor's
@@ -314,8 +315,9 @@ jobs:
     steps:
       # git so actions/checkout clones rather than falling back to the
       # REST download; dnf5-plugins is the package that carries `builddep`
-      # on Fedora 44 (45 has it in the image); rpm-build pulls tar, gzip,
-      # zstd, patch, debugedit, elfutils and binutils itself.
+      # (today's fedora:44 and fedora:45 images already have it; it is
+      # installed anyway so an older image works); rpm-build pulls tar,
+      # gzip, zstd, patch, debugedit, elfutils and binutils itself.
       - name: Install the build tools (Fedora)
         if: startsWith(matrix.target, 'fedora-')
         run: dnf -y install git-core rpm-build dnf5-plugins
@@ -395,8 +397,87 @@ jobs:
           retention-days: 7
           overwrite: true
 
-  publish:
+  # A package that builds can still fail to install or start: a missing
+  # runtime dependency, a library the release does not ship, a binary at
+  # a path the session does not look in. The `packages` leg cannot show
+  # that, because its container has every build dependency installed, so
+  # a missing runtime dependency would pass there. A fresh image of the
+  # same release is the only clean container (NFR6).
+  verify:
     needs: [build, packages]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    container:
+      image: ${{ matrix.image }}
+    defaults:
+      run:
+        # A container job's default shell is `sh`.
+        shell: bash
+    env:
+      # The version the binaries print, the workspace form (`1.0.0-rc.2`)
+      # whatever the package header says; read here, never inside a
+      # `run:` block, for the reason TAG is.
+      VERSION: ${{ needs.build.outputs.version }}
+    strategy:
+      fail-fast: false
+      # The same legs as `packages`; tests/release-workflow.sh holds both
+      # lists to the README.
+      matrix:
+        include:
+          - target: fedora-44
+            image: registry.fedoraproject.org/fedora:44
+          - target: fedora-45
+            image: registry.fedoraproject.org/fedora:45
+          - target: ubuntu-26.04
+            image: docker.io/library/ubuntu:26.04
+          - target: ubuntu-26.10
+            image: docker.io/library/ubuntu:26.10
+    steps:
+      # For scripts/check-installed.sh only; nothing from the tree is
+      # installed. The commit `build` validated, as in `packages`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.sha }}
+          persist-credentials: false
+
+      # This leg's package and its checksum, exactly what `publish` will
+      # attach for this release.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-${{ matrix.target }}
+          path: dist
+
+      - name: Check the download
+        run: cd dist && sha256sum -c -- *.sha256
+
+      # dnf resolves the RPM's Requires from the release's own
+      # repositories, as a user's install does.
+      - name: Install the RPM
+        if: startsWith(matrix.target, 'fedora-')
+        run: dnf -y install ./dist/*.rpm
+
+      # apt resolves the .deb's Depends from the release's archive, as a
+      # user's install does; no Recommends, so a hard dependency the
+      # package forgot cannot arrive through one.
+      - name: Install the .deb
+        if: startsWith(matrix.target, 'ubuntu-')
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ./dist/*.deb
+
+      # `--version` from the installed paths: each binary loads its
+      # libraries, sits where the session looks for it and says the
+      # version the tag claims, without a compositor.
+      - name: Run the installed binaries
+        run: scripts/check-installed.sh "$VERSION"
+
+  publish:
+    # A failed build, a failed install or a binary that will not start on
+    # any target skips this job, so it blocks the release (NFR6).
+    needs: [build, packages, verify]
     runs-on: ubuntu-24.04
     permissions:
       # `gh release create` / `upload`.

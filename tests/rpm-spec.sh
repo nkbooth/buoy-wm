@@ -28,11 +28,18 @@
 # that caused it. Two tiers: a text gate that always runs and reports every
 # mismatch before exiting, and, where rpmspec exists, the real parser as a
 # structural and dependency gate. rpmspec -q does not reject a misspelled
-# section name, so the text tier stays the content gate.
+# section name, so the text tier stays the content gate. The text tier
+# enforces the spec's one-tag-per-line style on purpose: that style is
+# the contract, and the parser tier (`rpmspec -q --buildrequires` and
+# the `--qf` dependency query) is the normalising check, so the other
+# shapes rpm accepts (a comma list, several relations on one tag line)
+# stay rejected rather than read.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
+# shellcheck source=tests/lib.sh
+source "$REPO_ROOT/tests/lib.sh"
 readonly SPEC="$REPO_ROOT/packaging/rpm/buoy-wm.spec"
 readonly CARGO="$REPO_ROOT/Cargo.toml"
 
@@ -100,13 +107,14 @@ require_tag BuildRequires 'systemd-rpm-macros'
 # second copy cannot hide behind the gated one. Only the double-quoted
 # spelling is read; any other value (a single-quoted one would come
 # back as the whole line) is reported rather than turned into a needle.
-msrv="$(grep -m1 '^rust-version = ' "$CARGO" | cut -d'"' -f2 || true)"
-if [ -z "$msrv" ]; then
-    echo "$CARGO: no 'rust-version = \"…\"' line to derive the spec's rust floor from" >&2
-    status=1
-fi
-case $msrv in
-    *[!0-9.]*)
+msrv_status=0
+msrv="$(read_msrv "$CARGO")" || msrv_status=$?
+case $msrv_status in
+    1)
+        echo "$CARGO: no 'rust-version = \"…\"' line to derive the spec's rust floor from" >&2
+        status=1
+        ;;
+    2)
         echo "$CARGO: rust-version '$msrv' is not digits and dots (only the double-quoted spelling is read)" >&2
         status=1
         msrv=""

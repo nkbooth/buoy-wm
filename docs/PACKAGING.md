@@ -49,21 +49,31 @@ rewrites `~` in asset names, and `rpm -qp` on an RPM reports
 and packages as subjects, and
 `gh attestation verify <file> --repo nkbooth/buoy-wm` works for each.
 
-Three jobs produce that, each in a container the workflow pins; the
+Four jobs produce that, each in a container the workflow pins; the
 runner is only the host (ADR-015). `build`, in a `ubuntu:26.04`
 container with rustup `1.99.1`, validates the tag, cuts the notes, builds
 and tests, stages the tarball, runs `cargo vendor --locked
 --versioned-dirs` and tars the result reproducibly, and makes a
 `git archive --prefix=buoy-wm-<version>/` of the tag as the spec's
 `Source0` — relayed to the next job and never published, because GitHub
-serves the tag archive itself. `packages` is one leg per tier-1 release
-in the README's Supported platforms table, each in that release's own
+serves the tag archive itself. `packages` is one leg per tier-1 or
+tier-2 release in the README's Supported platforms table (tier 2 is
+empty today), each in that release's own
 container. The Fedora legs run `dnf builddep packaging/rpm/buoy-wm.spec`
 and then `scripts/build-rpm.sh sources dist`: a full `rpmbuild -bb` with
 `%check`, on the release's own rustc (ADR-014). The Ubuntu legs run
 `apt-get build-dep ./packaging/deb`, then `scripts/build-deb.sh sources
 dist` (`dpkg-buildpackage -b` with the tests, offline, on the release's
-own rustc) and `lintian --fail-on error` on the result. `publish` makes
+own rustc) and `lintian --fail-on error` on the result. `verify` is one
+leg per package, in a fresh container of that package's release — not
+the `packages` leg's, which has every build dependency installed and
+would hide a missing runtime one: it installs the package with
+`dnf install` or `apt-get install --no-install-recommends` and runs
+`scripts/check-installed.sh`, which runs the three binaries'
+`--version` from `/usr/bin` and `/usr/libexec/buoy-wm` and requires
+each to print its name and the tag's version. `publish` waits for every
+`packages` and `verify` leg, so a package that fails to install or start
+on any target blocks the release (NFR6). `publish` makes
 the one attestation and runs `gh release create` with the `CHANGELOG.md`
 entry for the tag as the release notes (cut in `build` by
 `scripts/release-notes.sh`)
@@ -92,7 +102,10 @@ third copies of the number, and `tests/rpm-spec.sh`,
 hold both packages and these sentences to it, so the copies cannot
 drift. CI's `msrv` job builds the locked workspace on exactly that
 toolchain, so a dependency bump that needs a newer compiler is red there
-before any distribution build sees it.
+before any distribution build sees it. Beside it, `ci.yml`'s `targets`
+job builds and tests every push in a container of each supported
+release with that release's own toolchain, so a change one
+distribution's rustc rejects is red on the push, not the tag.
 
 Distribution packages are built by the distribution's own rustc — the
 RPMs by `rpmbuild` in `fedora:44` and `fedora:45`, and the `.deb`s by
@@ -355,16 +368,18 @@ buys nothing.
    container, 254 s for `fedora:45` on 2026-11-08; the Ubuntu legs about
    five and a half minutes each with four legs sharing one machine,
    338–342 s on 2026-11-08: apt 31–41 s, `dpkg-buildpackage` with the
-   tests 281–305 s)
+   tests 281–305 s),
+   the four `verify` legs (replayed 2026-11-08 in fresh containers:
+   `fedora:44` 30 s and `fedora:45` 40 s, `dnf` pulling 274 and 319
+   packages; the Ubuntu legs 7–8 s, `apt` pulling five; each prints the
+   three `--version` lines `scripts/check-installed.sh` read)
    and `publish` (one attestation with six subjects in the step summary,
    twelve assets, the pre-release flag on an rc).
 4. Verify. Download each RPM, each `.deb` and the tarball;
-   `sha256sum -c` and `gh attestation verify` each. `dnf install` each RPM
-   in a fresh container of its own release (`fedora:44`, `fedora:45`), and
-   `apt-get update && apt install ./<file>.deb` each `.deb` in a fresh
-   container of its own (`ubuntu:26.04`, `ubuntu:26.10`), to prove the
-   dependency resolution; `/usr/bin/buoy-wm` must stop at
-   `Error: NoCompositor` in each. Then on a real
+   `sha256sum -c` and `gh attestation verify` each. The `verify` legs
+   already installed every package in a clean container of its release
+   and ran its binaries — `publish` would not have run otherwise. Then
+   on a real
    Fedora host pick **buoy** at the display manager and check the portal
    (ScreenCast, Screenshot), the bar and logout. Extract the tarball on a
    clean machine, run `install.sh` and start a nested river before trusting
