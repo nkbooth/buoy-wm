@@ -130,49 +130,77 @@ esac
 # control_field <name>: the field's value with its continuation lines
 # joined, `#` comment lines dropped (deb822 allows them).
 control_field() {
-    awk -v want="$1:" '
+    awk -v want="$1" -v stanza="$2" '
+        BEGIN { want = tolower(want) ":"; n = 1 }
         /^#/ { next }
+        /^$/ { in_field = 0; if (seen) { n++; seen = 0 }; next }
+        { seen = 1 }
         /^[^ \t]/ { in_field = 0 }
-        /^$/ { in_field = 0; next }
+        n != stanza { next }
         in_field { sub(/^[ \t]+/, ""); value = value " " $0; next }
-        index($0, want) == 1 { in_field = 1; value = substr($0, length(want) + 1) }
+        index(tolower($0), want) == 1 { in_field = 1; value = substr($0, length(want) + 1) }
         END { print value }' "$CONTROL"
+}
+
+# field_count <field> [<stanza>]: how many lines open <field>, in one
+# stanza or (no stanza) the whole file. dpkg ignores a binary field in
+# the source stanza and drops it from the .deb, so where a field sits
+# is part of the contract.
+field_count() {
+    awk -v want="$1" -v stanza="${2:-0}" '
+        BEGIN { want = tolower(want) ":"; n = 1 }
+        /^#/ { next }
+        /^$/ { if (seen) { n++; seen = 0 }; next }
+        { seen = 1 }
+        (stanza == 0 || n == stanza) && index(tolower($0), want) == 1 { count++ }
+        END { print count + 0 }' "$CONTROL"
 }
 
 # relations <field>: one relation per line, whitespace trimmed.
 relations() {
-    control_field "$1" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' || true
+    control_field "$1" "$2" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' || true
 }
 
 # expect_field_once <field> <value>: exactly one line starting with the
 # field, carrying exactly this value.
+readonly SOURCE_STANZA=1 BINARY_STANZA=2
+stanza_name() {
+    if [ "$1" -eq "$SOURCE_STANZA" ]; then echo source; else echo binary; fi
+}
+
 expect_field_once() {
-    local field=$1 value=$2 n
-    n="$(grep -c "^$field:" "$CONTROL" || true)"
+    local field=$1 value=$2 stanza=$3 n
+    n="$(field_count "$field")"
     if [ "$n" -ne 1 ]; then
         fail "$(rel "$CONTROL"): expected exactly one '$field:' line, found $n"
+    elif [ "$(field_count "$field" "$stanza")" -ne 1 ]; then
+        fail "$(rel "$CONTROL"): '$field:' is not in the $(stanza_name "$stanza") stanza"
     elif ! grep -qxF -- "$field: $value" "$CONTROL"; then
         fail "$(rel "$CONTROL"): '$field:' is not '$value'"
     fi
 }
 
 if have "$CONTROL"; then
-    expect_field_once Source buoy-wm
-    expect_field_once Package buoy-wm
+    expect_field_once Source buoy-wm "$SOURCE_STANZA"
+    expect_field_once Package buoy-wm "$BINARY_STANZA"
     # The spec's ExclusiveArch, in Debian's names.
-    expect_field_once Architecture 'amd64 arm64'
-    expect_field_once Section x11
-    expect_field_once Rules-Requires-Root no
+    expect_field_once Architecture 'amd64 arm64' "$BINARY_STANZA"
+    expect_field_once Section x11 "$SOURCE_STANZA"
+    expect_field_once Rules-Requires-Root no "$SOURCE_STANZA"
 
     # The relation sets (AC 2). Build-Depends is the one list the Ubuntu
     # legs install from; Depends lets shlibs name the libraries the
     # binaries link (libc6 and libgcc-s1; libwayland is not linked).
     for field in Build-Depends Depends Recommends Suggests; do
-        n="$(grep -c "^$field:" "$CONTROL" || true)"
+        stanza=$BINARY_STANZA
+        if [ "$field" = Build-Depends ]; then stanza=$SOURCE_STANZA; fi
+        n="$(field_count "$field")"
         if [ "$n" -ne 1 ]; then
             fail "$(rel "$CONTROL"): expected exactly one '$field:' field, found $n"
+        elif [ "$(field_count "$field" "$stanza")" -ne 1 ]; then
+            fail "$(rel "$CONTROL"): '$field:' is not in the $(stanza_name "$stanza") stanza"
         fi
-        relations "$field" >"$tmp/$field.actual"
+        relations "$field" "$stanza" >"$tmp/$field.actual"
     done
     {
         echo 'debhelper-compat (= 13)'
@@ -198,11 +226,14 @@ if have "$CONTROL"; then
 
     # No Ubuntu archive carries river or zellij (ADR-013): a relation on
     # either is uninstallable or inert, and the README's PPA and zellij
-    # steps cover them. Every relation field, not only the four above.
+    # steps cover them. Every relation field, not only the four above, in
+    # either stanza and in any case (dpkg reads field names that way).
     for field in Pre-Depends Depends Recommends Suggests Enhances Build-Depends Build-Depends-Indep Build-Depends-Arch; do
-        if relations "$field" | grep -qE '^(river|zellij)([[:space:](|]|$)'; then
-            fail "$(rel "$CONTROL"): $field names river or zellij (no Ubuntu archive carries either, ADR-013)"
-        fi
+        for stanza in "$SOURCE_STANZA" "$BINARY_STANZA"; do
+            if relations "$field" "$stanza" | grep -qE '^(river|zellij)([[:space:](|]|$)'; then
+                fail "$(rel "$CONTROL"): $field names river or zellij (no Ubuntu archive carries either, ADR-013)"
+            fi
+        done
     done
 fi
 
@@ -244,14 +275,51 @@ require_rules_line() {
     fi
 }
 
+# rules_recipe <target>: the recipe of one make target, its tab lines
+# and the make conditionals among them, up to the next blank line.
+rules_recipe() {
+    awk -v target="$1:" '
+        $0 == target { on = 1; next }
+        on && /^(\t|ifeq |ifneq |else$|endif$)/ { print; next }
+        { on = 0 }' "$RULES"
+}
+
+# expect_recipe <target> <line>...: the target exists once and its
+# recipe is exactly these lines, so a gated command cannot move to a
+# target dh never calls or behind an inverted condition.
+expect_recipe() {
+    local target=$1 n
+    shift
+    n="$(grep -cxF -- "$target:" "$RULES" || true)"
+    if [ "$n" -ne 1 ]; then
+        fail "$(rel "$RULES"): expected the target '$target:' exactly once, found $n"
+        return 0
+    fi
+    rules_recipe "$target" >"$tmp/recipe.actual"
+    printf '%s\n' "$@" >"$tmp/recipe.expected"
+    if ! cmp -s "$tmp/recipe.actual" "$tmp/recipe.expected"; then
+        fail "$(rel "$RULES"): the $target recipe differs from the contract (- expected, + actual):"
+        diff -u --label expected --label actual "$tmp/recipe.expected" "$tmp/recipe.actual" |
+            tail -n +3 >>"$tmp/report" || true
+    fi
+}
+
 if have "$RULES"; then
     # dh_clean deletes every *.orig in the tree, which takes each vendored
     # crate's Cargo.toml.orig with it, and cargo then refuses the vendored
     # source ("failed to calculate checksum of: …/Cargo.toml.orig").
     require_rules_line $'\tdh_clean -XCargo.toml.orig'
-    # The spec's %build and %check: offline, from the lock.
+    expect_recipe override_dh_clean $'\tdh_clean -XCargo.toml.orig'
+    # The spec's %build and %check: offline, from the lock, and the tests
+    # skipped only on an explicit nocheck.
     require_rules_line $'\tcargo build --workspace --release --offline --locked'
     require_rules_line $'\tcargo test --workspace --release --offline --locked'
+    expect_recipe override_dh_auto_build $'\tcargo build --workspace --release --offline --locked'
+    # shellcheck disable=SC2016 # make syntax, literal
+    expect_recipe override_dh_auto_test \
+        'ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))' \
+        $'\tcargo test --workspace --release --offline --locked' \
+        'endif'
     # shellcheck disable=SC2016 # make syntax, literal
     require_rules_line 'export CARGO_HOME = $(CURDIR)/debian/cargo-home'
     if grep -qF -- 'vendor.tar' "$RULES"; then
@@ -266,6 +334,8 @@ if have "$RULES"; then
         on' "$SPEC")"
     if [ "$printf_lines" -ne 1 ]; then
         fail "$(rel "$RULES"): expected exactly one \"printf '…' > .cargo/config.toml\" recipe line, found $printf_lines"
+    elif ! rules_recipe override_dh_auto_configure | grep -qE "^"$'\t'"printf '[^']*' > \.cargo/config\.toml$"; then
+        fail "$(rel "$RULES"): the .cargo/config.toml printf is not in the override_dh_auto_configure recipe"
     elif [ -z "$heredoc" ]; then
         fail "$(rel "$SPEC"): no %prep heredoc for .cargo/config.toml to compare debian/rules' printf with"
     else

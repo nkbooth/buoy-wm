@@ -194,12 +194,28 @@ fi
 # and inside the packages job, so a comment quoting a command, a second
 # copy or a step in another job cannot stand in for it. The checkout
 # and the upload serve both families, so neither may carry an `if:`
-# (read: the line after the `uses:` is not an `if:` line); with one
-# unconditional upload, check (g)'s exactly-one artifact name holds for
-# the Ubuntu legs too.
+# anywhere in its step; with one unconditional upload, check (g)'s
+# exactly-one artifact name holds for the Ubuntu legs too. Each family's
+# build step, and the lint step, carries exactly its family's guard, so
+# a dead condition cannot skip one quietly.
 # count_lines_matching <file> <regex>: how many whole lines match.
 count_lines_matching() {
     grep -cxE -- "$2" "$1" || true
+}
+# step_with <file> <regex>: every step of the job's `steps:` list that
+# holds a line matching <regex>, from its `- ` line to the next step.
+step_with() {
+    # Through the environment: `-v` would turn the regex's `\.` into `.`.
+    STEP_PAT="$2" awk '
+        BEGIN { pat = ENVIRON["STEP_PAT"] }
+        function flush() { if (hit) printf "%s", buf; buf = ""; hit = 0 }
+        /^[[:space:]]*steps:[[:space:]]*$/ { in_steps = 1; next }
+        !in_steps { next }
+        !have_indent && match($0, /^[[:space:]]*- /) { indent = RLENGTH - 2; have_indent = 1 }
+        have_indent && match($0, /^[[:space:]]*[^[:space:]]/) && RLENGTH - 1 < indent { flush(); in_steps = 0; next }
+        have_indent && match($0, /^[[:space:]]*- /) && RLENGTH - 2 == indent { flush() }
+        { buf = buf $0 "\n"; if ($0 ~ pat) hit = 1 }
+        END { flush() }' "$1"
 }
 for run_line in 'scripts/build-rpm\.sh sources dist' 'scripts/build-deb\.sh sources dist' \
     'lintian --fail-on error( [^ ]+)* dist/\*\.deb'; do
@@ -216,17 +232,30 @@ for action in actions/checkout actions/upload-artifact; do
     n="$(grep -cE -- "^[[:space:]]*- uses: $action@" "$tmp/packages" || true)"
     if [ "$n" -ne 1 ]; then
         fail "release.yml: expected exactly one '- uses: $action@' step in the packages job, found $n"
-    elif awk -v pat="^[[:space:]]*- uses: $action@" '
-            found { exit !($0 ~ /^[[:space:]]*if:/) }
-            $0 ~ pat { found = 1 }
-            END { if (!found) exit 1 }' "$tmp/packages"; then
+    elif step_with "$tmp/packages" "^[[:space:]]*- uses: $action@" | grep -qE '^[[:space:]]*if:'; then
         fail "release.yml: the packages job's $action step has an 'if:' (both families need it)"
     fi
 done
+while IFS='|' read -r anchor family; do
+    step_with "$tmp/packages" "^[[:space:]]*run: $anchor" >"$tmp/step"
+    ifs="$(grep -E '^[[:space:]]*if:' "$tmp/step" | sed 's/^[[:space:]]*//' || true)"
+    if [ "$ifs" != "if: startsWith(matrix.target, '$family-')" ]; then
+        fail "release.yml: the packages job's 'run: ${anchor//\\/}' step is not guarded by exactly 'if: startsWith(matrix.target, '$family-')' (found: ${ifs:-none})"
+    fi
+done <<'EOF'
+scripts/build-rpm\.sh sources dist|fedora
+scripts/build-deb\.sh sources dist|ubuntu
+lintian --fail-on error|ubuntu
+EOF
+# The attestation's subjects: the lines of publish's `subject-path:`
+# block, not any bare line elsewhere in the job.
+awk '/^[[:space:]]*subject-path:[[:space:]]*\|[[:space:]]*$/ { match($0, /^[[:space:]]*/); indent = RLENGTH; on = 1; next }
+    on && match($0, /^[[:space:]]*/) && (RLENGTH <= indent || $0 ~ /^[[:space:]]*$/) { on = 0 }
+    on { sub(/^[[:space:]]+/, ""); print }' "$tmp/publish" >"$tmp/subjects"
 for subject in 'dist/*.tar.gz' 'dist/*.rpm' 'dist/*.deb'; do
-    n="$(sed 's/^[[:space:]]*//' "$tmp/publish" | grep -cxF -- "$subject" || true)"
+    n="$(grep -cxF -- "$subject" "$tmp/subjects" || true)"
     if [ "$n" -ne 1 ]; then
-        fail "release.yml: publish's attestation does not list '$subject' exactly once as a whole line (found $n)"
+        fail "release.yml: publish's attestation subject-path does not list '$subject' exactly once as a whole line (found $n)"
     fi
 done
 

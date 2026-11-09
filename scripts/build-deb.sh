@@ -142,6 +142,14 @@ if ! command -v dpkg-buildpackage >/dev/null 2>&1; then
     report "dpkg-buildpackage: not found on PATH (install dpkg-dev)"
 fi
 
+# The published .deb is the tested one: a nocheck inherited from the
+# environment would skip debian/rules' cargo test and still exit 0.
+for build_var in DEB_BUILD_OPTIONS DEB_BUILD_PROFILES; do
+    case " ${!build_var:-} " in
+        *" nocheck "*) report "$build_var: holds 'nocheck'; the published .deb is built with its tests" ;;
+    esac
+done
+
 # The version is the changelog's top entry, the one dpkg-buildpackage
 # builds; scripts/release-version.sh holds it to the tag.
 changelog="$debian/changelog"

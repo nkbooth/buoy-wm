@@ -18,7 +18,8 @@
 # Builds the release tarball, one RPM per supported Fedora release and
 # one .deb per supported Ubuntu release on a `v*` tag and attaches them,
 # the vendored-crates tarball and their checksums to the GitHub release
-# under one build-provenance attestation, with the tag's CHANGELOG.md entry as the release notes.
+# under one build-provenance attestation, with the tag's CHANGELOG.md
+# entry as the release notes.
 # The runner is only the host (ADR-015); every build runs in a container
 # this file pins. Three jobs: `build` makes the tarball in a
 # `ubuntu:26.04` container with a pinned rustup toolchain, cuts the notes

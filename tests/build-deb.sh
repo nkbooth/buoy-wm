@@ -290,6 +290,26 @@ expect_stderr_mentions 'missing os-release' "$tmp/no-such-os-release"
 expect_stderr_lines 'missing os-release' 1
 expect_stub_not_run 'missing os-release'
 
+# An inherited nocheck, in either variable, would publish a package
+# debian/rules never tested, with exit 0; the preflight names each.
+set +e
+DEB_BUILD_OPTIONS='parallel=4 nocheck' DEB_BUILD_PROFILES='nocheck' \
+    "$SCRIPT" "${common[@]}" "$tmp/sources" "$tmp/out-nocheck" >"$tmp/out" 2>"$tmp/err"
+rc=$?
+set -e
+expect_rc nocheck 1
+expect_stderr_mentions nocheck DEB_BUILD_OPTIONS DEB_BUILD_PROFILES
+expect_stderr_lines nocheck 2
+expect_empty_stdout nocheck
+expect_stub_not_run nocheck
+set +e
+DEB_BUILD_OPTIONS='nocheckers' "$SCRIPT" "${common[@]}" "$tmp/sources" "$tmp/out-nocheck-word" >"$tmp/out" 2>"$tmp/err"
+rc=$?
+set -e
+expect_rc 'nocheck as a substring' 0
+rm -rf "$tmp/out-nocheck-word"
+rm -f "$STUB_LOG"
+
 # The build: the tree assembled, `-b -us -uc` and nothing else, the one
 # package published under its release-labelled name with its checksum,
 # the dbgsym package left behind, and nothing but the path on stdout.

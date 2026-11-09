@@ -64,8 +64,9 @@ and then `scripts/build-rpm.sh sources dist`: a full `rpmbuild -bb` with
 `apt-get build-dep ./packaging/deb`, then `scripts/build-deb.sh sources
 dist` (`dpkg-buildpackage -b` with the tests, offline, on the release's
 own rustc) and `lintian --fail-on error` on the result. `publish` makes
-the one attestation and runs `gh release create` with the `CHANGELOG.md` entry for
-the tag as the release notes (cut in `build` by `scripts/release-notes.sh`)
+the one attestation and runs `gh release create` with the `CHANGELOG.md`
+entry for the tag as the release notes (cut in `build` by
+`scripts/release-notes.sh`)
 — `--prerelease` for an rc, and `--clobber` on a re-run so a transient
 failure replaces the assets instead of failing on the existing release.
 
@@ -136,7 +137,8 @@ checkout (it detects binaries sitting beside it), so there is no second copy
 to drift.
 
 Installs to `~/.local/lib/buoy-wm` and, when `~/.local/bin` exists, a
-symlink there — no root, and nothing that a broken build can take out of the system.
+symlink there — no root, and nothing that a broken build can take out
+of the system.
 
 ### 2. GitHub release RPM — Fedora 44 and 45
 
@@ -340,8 +342,8 @@ buys nothing.
 1. Bump: `version` in `[workspace.package]` and `cargo update -w`; the
    spec's `Version:`, `%global upstream_version` and a `%changelog` entry;
    a `debian/changelog` entry (`packaging/deb/debian/changelog`, the `deb`
-   form, above the previous one); the formula's `url`. Run `scripts/release-version.sh --check v<x.y.z>`
-   until it is quiet — it names every file that disagrees. `ci.yml` runs
+   form, above the previous one); the formula's `url`. Run
+   `scripts/release-version.sh --check v<x.y.z>` until it is quiet — it names every file that disagrees. `ci.yml` runs
    the tagless form on every push, so a half-bump is red before the tag.
 2. `cargo build --workspace --release && cargo test --workspace` — green.
 3. Commit, `git tag -s v<x.y.z> -m 'buoy-wm <x.y.z>'` (signed, as every
