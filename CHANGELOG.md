@@ -22,8 +22,7 @@ Notable changes per release. Format follows
 - Every release now installs each package into a clean container of its
   own release and runs the three binaries' `--version` before anything is
   published, so a package that cannot install or start never reaches the
-  release page; every push is also built and tested on each supported
-  release's own toolchain.
+  release page.
 
 ### Changed
 

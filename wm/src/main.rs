@@ -72,7 +72,14 @@ fn print_version_and_exit(line: &str) -> ! {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Before the panic reporter and the connect: a release's `verify` job
     // runs this in a clean container with no compositor (NFR6).
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Only the first argument, through `args_os`: buoy-wm ignores every
+    // other argument, and `args()` panics on one that is not UTF-8 —
+    // here, before the panic reporter, so the session would log nothing.
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .take(1)
+        .filter_map(|arg| arg.into_string().ok())
+        .collect();
     if let Some(line) = version_line(&args, env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")) {
         print_version_and_exit(&line);
     }

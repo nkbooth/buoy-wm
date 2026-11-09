@@ -66,9 +66,6 @@ spec_path() {
     p="${p//'%{name}'/buoy-wm}"
     p="${p//'%{_libexecdir}'//usr/libexec}"
     p="${p//'%{_bindir}'//usr/bin}"
-    case $p in
-        *%*) fail "packaging/rpm/buoy-wm.spec" "%files path '$1' uses a macro this test does not map" ;;
-    esac
     printf '%s' "${p#/}"
 }
 
@@ -82,7 +79,12 @@ for name in "${BINARIES[@]}"; do
         fail "packaging/rpm/buoy-wm.spec" "%files has no %{_bindir} or %{_libexecdir}/%{name} line for $name"
         continue
     fi
+    # Checked here, not inside spec_path: its `fail` would run in the
+    # command substitution's subshell and the status would be lost.
     installed[$name]="$(spec_path "$line")"
+    case ${installed[$name]} in
+        *%*) fail "packaging/rpm/buoy-wm.spec" "%files path '$line' uses a macro this test does not map" ;;
+    esac
 done
 if [ "$status" -ne 0 ]; then
     exit "$status"
@@ -92,15 +94,26 @@ fi
 # usage error (2) must be told apart.
 run_script() {
     set +e
-    "$SCRIPT" "$@" >"$tmp/out" 2>"$tmp/err"
+    # A script that waits forever on a binary turns this test red, not
+    # the job into a six-hour hang.
+    timeout -k 5 60 "$SCRIPT" "$@" >"$tmp/out" 2>"$tmp/err"
     rc=$?
     set -e
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        fail "check-installed.sh $*" "did not return within 60 s"
+    fi
 }
 
-# write_stub <path> <body>: an executable sh script.
+# write_stub <path> <body>: an executable sh script that runs <body> only
+# when called with exactly `--version`, so a script that stops passing
+# the flag fails every case (the real binaries would start the WM, or
+# parse an output id or a mode).
 write_stub() {
     mkdir -p "$(dirname "$1")"
-    printf '#!/bin/sh\n%s\n' "$2" >"$1"
+    # shellcheck disable=SC2016 # the stub's own guard, expanded when it runs
+    printf '#!/bin/sh\n%s\n%s\n' \
+        '[ "$#" -eq 1 ] && [ "$1" = --version ] || { echo "called without --version: $*" >&2; exit 3; }' \
+        "$2" >"$1"
     chmod 0755 "$1"
 }
 
@@ -150,7 +163,9 @@ if [ -s "$tmp/err" ]; then
 fi
 
 # break_one <case> <name>: a fresh root with one binary broken. The
-# hanging one answers correctly after 30 s, so only the timeout fails it.
+# hanging one answers correctly after 30 s, so only the timeout fails it;
+# the TERM-ignoring one never answers and only the timeout's KILL ends it
+# (the whole group dies on TERM but its shell, so the loop runs on).
 break_one() {
     local path="$tmp/root/${installed[$2]}"
     make_root "$tmp/root"
@@ -162,6 +177,7 @@ break_one() {
         missing) rm -f "$path" ;;
         not-executable) chmod 0644 "$path" ;;
         hanging) write_stub "$path" "sleep 30; echo '$2 $VERSION'" ;;
+        ignores-term) write_stub "$path" "trap '' TERM; while :; do sleep 1; done" ;;
     esac
 }
 
@@ -170,7 +186,7 @@ names() {
     grep -qF -- "/${installed[$1]}:" "$tmp/err"
 }
 
-for case in wrong-version exit-1 stderr two-lines missing not-executable hanging; do
+for case in wrong-version exit-1 stderr two-lines missing not-executable hanging ignores-term; do
     for name in "${BINARIES[@]}"; do
         break_one "$case" "$name"
         run_script --root "$tmp/root" --timeout 1 "$VERSION"

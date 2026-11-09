@@ -19,9 +19,12 @@
 //!
 //! `release.yml`'s `verify` job runs it from the installed package in a
 //! clean container (NFR6). Every other argument goes through
-//! `mode::parse_args`, whose usage error spawns `notify-send`; the cleared
-//! environment (no `PATH`, no `XDG_RUNTIME_DIR`) means this test fails
-//! rather than spawns if the flag ever reaches that path.
+//! `mode::parse_args`, whose usage error spawns `notify-send`. A cleared
+//! `PATH` does not stop that spawn (the C library then searches `/bin`
+//! and `/usr/bin`), but with no `DBUS_SESSION_BUS_ADDRESS`,
+//! `XDG_RUNTIME_DIR` or `DISPLAY` the notification reaches no desktop,
+//! and the exit status turns this test red if the flag ever reaches
+//! that path.
 
 use std::process::Command;
 

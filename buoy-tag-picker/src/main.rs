@@ -151,8 +151,8 @@ fn connect_and_get_state()
 }
 
 /// Everything `main` does past `--version`, with its failures returned
-/// rather than exited on — so there is exactly one failure exit in this
-/// binary and it is the last thing that happens.
+/// rather than exited on — so past `--version` there is exactly one
+/// failure exit in this binary and it is the last thing that happens.
 fn run(args: &[String]) -> Result<(), String> {
     let mode = mode::parse_args(args)?;
     let mut launcher = Fuzzel;

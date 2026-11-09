@@ -74,3 +74,21 @@ fn version_is_printed_before_any_wayland_connect() {
         run_version(clean_command().env("WAYLAND_DISPLAY", "/nonexistent/buoy-wm-version-test"));
     assert_prints_the_version(&output);
 }
+
+// `buoy-wm` ignores its other arguments, including one that is not
+// UTF-8: reading only the first, through `args_os`, never panics. With
+// no compositor it then fails to connect, as it always has.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_argument_is_ignored_not_a_panic() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let output = clean_command()
+        .arg(std::ffi::OsStr::from_bytes(b"\xff"))
+        .output()
+        .expect("run the real buoy-wm");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(output.status.code(), Some(101), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    assert!(output.stdout.is_empty());
+}

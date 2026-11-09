@@ -127,8 +127,11 @@ check() {
         echo "$path: not executable" >>"$tmp/report"
         return
     fi
-    timeout "$timeout_seconds" "$path" --version >"$tmp/out" 2>"$tmp/err" </dev/null || rc=$?
-    if [ "$rc" -eq 124 ]; then
+    # `-k`: a binary that ignores TERM (a compositor's signal handler)
+    # would otherwise outlive the timeout; KILL follows 2 s later and
+    # timeout then exits 137 instead of 124.
+    timeout -k 2 "$timeout_seconds" "$path" --version >"$tmp/out" 2>"$tmp/err" </dev/null || rc=$?
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
         echo "$path: did not answer within ${timeout_seconds}s (killed by timeout)" >>"$tmp/report"
         return
     fi

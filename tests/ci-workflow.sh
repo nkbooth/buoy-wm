@@ -64,8 +64,14 @@ on_block="$(awk '/^on:[[:space:]]*$/ { on = 1; next } on && /^[^[:space:]#]/ { o
 if ! printf '%s\n' "$on_block" | grep -qxF -- '  push:'; then
     fail "ci.yml: no 'push:' trigger"
 fi
-if [ "$(printf '%s\n' "$on_block" | grep -cxF -- '    branches: ["**"]' || true)" -ne 1 ]; then
-    fail "ci.yml: the push trigger is not filtered by exactly 'branches: [\"**\"]' (tag pushes would re-run CI)"
+# The push trigger's own block, comments dropped, is that one line: the
+# filter belongs to `push:` (under `pull_request:` it would leave tags
+# unfiltered), and a `paths:` or `branches-ignore:` beside it would skip
+# CI on pushes it should gate.
+push_block="$(printf '%s\n' "$on_block" |
+    awk '/^  push:[[:space:]]*$/ { on = 1; next } on && /^  [^[:space:]#]/ { on = 0 } on && !/^[[:space:]]*(#|$)/')"
+if [ "$push_block" != '    branches: ["**"]' ]; then
+    fail "ci.yml: the push trigger is not filtered by exactly 'branches: [\"**\"]' and nothing else (tag pushes would re-run CI, or pushes skip it); found: ${push_block:-nothing}"
 fi
 if printf '%s\n' "$on_block" | grep -qE '^[[:space:]]+tags(-ignore)?:'; then
     fail "ci.yml: the push trigger has a 'tags:' key (release.yml is the tag's gate)"
@@ -93,11 +99,19 @@ else
         fail "ci.yml: the targets matrix $difference"
     done < <(matrix_differences "$tmp/expected" "$tmp/actual")
     # shellcheck disable=SC2016 # the literal text of the workflow lines
-    for line in '    runs-on: ubuntu-24.04' '      fail-fast: false' '      image: ${{ matrix.image }}'; do
+    for line in '    runs-on: ubuntu-24.04' '    container:' '      fail-fast: false' '      image: ${{ matrix.image }}'; do
         if [ "$(grep -cxF -- "$line" "$tmp/targets" || true)" -ne 1 ]; then
             fail "ci.yml: the targets job does not have exactly one line '${line#"${line%%[! ]*}"}'"
         fi
     done
+    # Nothing downstream needs `targets`, so a skipped job or a dropped
+    # leg turns nothing red: no job-level `if:`, no `exclude:`.
+    if grep -qE '^    if:' "$tmp/targets"; then
+        fail "ci.yml: the targets job has a job-level 'if:' (every push must build and test on every target)"
+    fi
+    if grep -qE '^[[:space:]]*exclude:' "$tmp/targets"; then
+        fail "ci.yml: the targets matrix has an 'exclude:' (it would drop a leg the include list names)"
+    fi
     # Build and test are whole `run:` lines, once each, and no `if:` in
     # either step can skip them for a family.
     for run_line in 'cargo build --workspace --locked' 'cargo test --workspace --locked'; do
@@ -157,6 +171,15 @@ else
     fi
     if ! grep -qE '(^|[[:space:](])shell_files([[:space:])]|$)' "$tmp/shellcheck"; then
         fail "ci.yml: the shellcheck step does not run shell_files"
+    fi
+    # Mentioning the list is not linting it: one whole line lints every
+    # file, and nothing in the step can skip it or swallow its status.
+    # shellcheck disable=SC2016 # the literal text of the workflow line
+    if [ "$(grep -cxE '[[:space:]]*shellcheck -x "\$\{list\[@\]\}"' "$tmp/shellcheck" || true)" -ne 1 ]; then
+        fail "ci.yml: the shellcheck step does not have exactly one whole line 'shellcheck -x \"\${list[@]}\"'"
+    fi
+    if grep -vE '^[[:space:]]*#' "$tmp/shellcheck" | grep -qE '^[[:space:]]*if:|\|\||(^|[;&[:space:]])(set \+e|true)([;[:space:]]|$)'; then
+        fail "ci.yml: the shellcheck step has an 'if:', '||', 'true' or 'set +e' that could skip it or swallow its status"
     fi
 fi
 

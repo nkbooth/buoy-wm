@@ -139,6 +139,18 @@ job_body "$RELEASE" publish >"$tmp/publish"
 if ! grep -qxF -- '    needs: [build, packages, verify]' "$tmp/publish"; then
     fail "release.yml: publish does not say 'needs: [build, packages, verify]' (a failed leg or a failed install must block the release, NFR6)"
 fi
+# A job-level `if:` (`always()`, `!cancelled()`) would run publish past
+# a failed need, undoing the `needs:` line.
+if grep -qE '^    if:' "$tmp/publish"; then
+    fail "release.yml: publish has a job-level 'if:' (it could run past a failed leg or install, NFR6)"
+fi
+# An `exclude:` drops a leg the include list names, unseen by the matrix
+# comparison: a release built, or published, without being installed.
+for job in packages verify; do
+    if job_body "$RELEASE" "$job" | grep -qE '^[[:space:]]*exclude:'; then
+        fail "release.yml: the $job matrix has an 'exclude:' (it would drop a leg the include list names)"
+    fi
+done
 if ! grep -qxF -- '          pattern: package-*' "$tmp/publish"; then
     fail "release.yml: publish does not download 'pattern: package-*' (every leg's package)"
 fi
@@ -296,8 +308,14 @@ else
 dnf -y install \./dist/\*\.rpm|fedora
 apt-get install -y --no-install-recommends \./dist/\*\.deb|ubuntu
 EOF
-    if ! grep -qE '^[[:space:]]*(run: )?(cd dist && )?sha256sum -c' "$tmp/verify"; then
-        fail "release.yml: the verify job does not check the download with 'sha256sum -c'"
+    n="$(count_lines_matching "$tmp/verify" '[[:space:]]*run: cd dist && sha256sum -c -- \*\.sha256')"
+    if [ "$n" -ne 1 ]; then
+        fail "release.yml: the verify job does not have exactly one whole line 'run: cd dist && sha256sum -c -- *.sha256' (found $n)"
+    elif step_with "$tmp/verify" '^[[:space:]]*run: cd dist && sha256sum -c' | grep -qE '^[[:space:]]*if:'; then
+        fail "release.yml: the verify job's sha256sum step has an 'if:' (every leg must check its download)"
+    fi
+    if grep -qE '^    if:' "$tmp/verify"; then
+        fail "release.yml: the verify job has a job-level 'if:' (every package must be installed)"
     fi
     for tool in builddep build-dep cargo rpmbuild dpkg-buildpackage lintian; do
         if grep -qF -- "$tool" "$tmp/verify"; then
