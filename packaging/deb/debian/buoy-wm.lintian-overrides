@@ -19,4 +19,4 @@
 # `E: bogus-mail-host`: its domain list does not know the .radio
 # top-level domain, which IANA delegated in 2017. The address is real
 # and is the one the maintainer answers at.
-bogus-mail-host Maintainer nick@onlyhams.radio
+bogus-mail-host Maintainer n1cck@onlyhams.radio

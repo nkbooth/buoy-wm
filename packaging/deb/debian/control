@@ -33,7 +33,7 @@
 Source: buoy-wm
 Section: x11
 Priority: optional
-Maintainer: Nick Booth <nick@onlyhams.radio>
+Maintainer: Nick Booth <n1cck@onlyhams.radio>
 Build-Depends: debhelper-compat (= 13),
                cargo,
                rustc (>= 1.93),

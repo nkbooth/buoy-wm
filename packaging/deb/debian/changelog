@@ -4,4 +4,4 @@ buoy-wm (1.0.0~rc.2-1) unstable; urgency=medium
     release, built with that release's own toolchain and installing the
     buoy login session.
 
- -- Nick Booth <nick@onlyhams.radio>  Sun, 08 Nov 2026 13:34:53 -0500
+ -- Nick Booth <n1cck@onlyhams.radio>  Sun, 08 Nov 2026 13:34:53 -0500

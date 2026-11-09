@@ -237,34 +237,71 @@ if have "$CONTROL"; then
     done
 fi
 
-# The installed layout is the spec's %install exactly: the three
-# binaries and the supervisor in one directory (they resolve each other
-# as siblings), the session entry, target and portal routing where the
-# login path looks, and only buoy-wm on PATH.
-if have "$DEB/buoy-wm.install"; then
-    content "$DEB/buoy-wm.install" >"$tmp/install.actual"
-    {
-        echo 'target/release/buoy-wm usr/libexec/buoy-wm'
-        echo 'target/release/buoy-tag-picker usr/libexec/buoy-wm'
-        echo 'target/release/buoy-status-bar usr/libexec/buoy-wm'
-        echo 'packaging/buoy-session usr/libexec/buoy-wm'
-        echo 'packaging/buoy.desktop usr/share/wayland-sessions'
-        echo 'packaging/buoy-session.target usr/lib/systemd/user'
-        echo 'packaging/buoy-portals.conf usr/share/xdg-desktop-portal'
-        echo 'docs/config.example.toml usr/share/buoy-wm'
-    } >"$tmp/install.expected"
-    expect_set "$(rel "$DEB/buoy-wm.install")" "$tmp/install.actual" "$tmp/install.expected"
-fi
-if have "$DEB/buoy-wm.links"; then
-    content "$DEB/buoy-wm.links" >"$tmp/links.actual"
-    echo 'usr/libexec/buoy-wm/buoy-wm usr/bin/buoy-wm' >"$tmp/links.expected"
-    expect_set "$(rel "$DEB/buoy-wm.links")" "$tmp/links.actual" "$tmp/links.expected"
-fi
-if have "$DEB/buoy-wm.docs"; then
-    content "$DEB/buoy-wm.docs" >"$tmp/docs.actual"
-    printf '%s\n' README.md NOTICE.md >"$tmp/docs.expected"
-    expect_set "$(rel "$DEB/buoy-wm.docs")" "$tmp/docs.actual" "$tmp/docs.expected"
-fi
+# The installed layout is the spec's %install, enumerated from it rather
+# than restated: each `install` line becomes a debhelper `.install` line,
+# the `ln -s` the `.links` line, and `%doc` the `.docs` list, so a path
+# added to or moved in the spec is a difference here. A spec line of any
+# other shape, or a macro without a Debian mapping, is a finding, never
+# silently dropped.
+# spec_path <path>: a spec path with its macros expanded to the Debian
+# layout, relative to the package root.
+spec_path() {
+    local p=$1
+    p="${p//'%{buildroot}'/}"
+    p="${p//'%{name}'/buoy-wm}"
+    p="${p//'%{_libexecdir}'//usr/libexec}"
+    p="${p//'%{_bindir}'//usr/bin}"
+    p="${p//'%{_datadir}'//usr/share}"
+    p="${p//'%{_userunitdir}'//usr/lib/systemd/user}"
+    case $p in
+        *%*) fail "$(rel "$SPEC"): %install path '$1' uses a macro this test does not map to the Debian layout" ;;
+    esac
+    printf '%s' "${p#/}"
+}
+
+# spec_install_lines: the %install section, continuation lines joined.
+spec_install_lines() {
+    awk '/^%install$/ { on = 1; next } /^%/ { on = 0 } on' "$SPEC" |
+        sed -e ':a' -e '/\\$/N' -e 's/\\\n//' -e 'ta'
+}
+
+: >"$tmp/install.expected"
+: >"$tmp/links.expected"
+while read -r -a words; do
+    if [ "${#words[@]}" -eq 0 ] || [ "${words[0]:0:1}" = '#' ]; then
+        continue
+    fi
+    case "${words[*]}" in
+        'install -d '*) ;;
+        'install -m '[0-7]*' -t '*)
+            dir="$(spec_path "${words[4]}")"
+            for src in "${words[@]:5}"; do
+                echo "$src $dir" >>"$tmp/install.expected"
+            done
+            ;;
+        'install -Dpm '[0-7]*)
+            dest="$(spec_path "${words[4]:-}")"
+            if [ "${#words[@]}" -ne 5 ] || [ "${words[3]##*/}" != "${dest##*/}" ]; then
+                fail "$(rel "$SPEC"): '${words[*]}' is not one source to the same name (dh_install keeps the source's basename)"
+            fi
+            echo "${words[3]} ${dest%/*}" >>"$tmp/install.expected"
+            ;;
+        'ln -s '*)
+            echo "$(spec_path "${words[2]}") $(spec_path "${words[3]:-}")" >>"$tmp/links.expected"
+            ;;
+        *) fail "$(rel "$SPEC"): %install line '${words[*]}' is not a form this test maps to debhelper" ;;
+    esac
+done < <(spec_install_lines)
+sed -n 's/^%doc //p' "$SPEC" | tr ' ' '\n' | grep -v '^$' >"$tmp/docs.expected" || true
+for kind in install links docs; do
+    if [ ! -s "$tmp/$kind.expected" ]; then
+        fail "$(rel "$SPEC"): nothing to derive buoy-wm.$kind from"
+    fi
+    if have "$DEB/buoy-wm.$kind"; then
+        content "$DEB/buoy-wm.$kind" >"$tmp/$kind.actual"
+        expect_set "$(rel "$DEB/buoy-wm.$kind") (from the spec)" "$tmp/$kind.actual" "$tmp/$kind.expected"
+    fi
+done
 
 # require_rules_line <line>: the whole line, exactly once.
 require_rules_line() {
@@ -432,6 +469,14 @@ if have "$CONTROL"; then
     maintainer="$(sed -n 's/^Maintainer: //p' "$CONTROL" | head -n1)"
     if [ -z "$maintainer" ]; then
         fail "$(rel "$CONTROL"): no 'Maintainer:' field"
+    fi
+    # One packager identity for both formats: the spec's newest
+    # %changelog entry names it.
+    spec_identity="$(sed -n '/^%changelog$/{n;s/^\* [A-Z][a-z][a-z] [A-Z][a-z][a-z] [0-9][0-9] [0-9]\{4\} \(.*>\) - .*/\1/p;q;}' "$SPEC")"
+    if [ -z "$spec_identity" ]; then
+        fail "$(rel "$SPEC"): no '* <date> <name> <<address>> - <version>' line under %changelog to compare the Maintainer with"
+    elif [ -n "$maintainer" ] && [ "$maintainer" != "$spec_identity" ]; then
+        fail "$(rel "$CONTROL"): Maintainer '$maintainer' is not the spec's %changelog identity '$spec_identity'"
     fi
 fi
 if have "$CHANGELOG" && [ -n "$maintainer" ]; then

@@ -167,7 +167,7 @@ write_tree() {
         echo
         echo '  * Fixture entry.'
         echo
-        echo ' -- Nick Booth <nick@onlyhams.radio>  Sun, 08 Nov 2026 13:30:00 -0500'
+        echo ' -- Nick Booth <n1cck@onlyhams.radio>  Sun, 08 Nov 2026 13:30:00 -0500'
     } >"$dir/packaging/deb/debian/changelog"
 }
 

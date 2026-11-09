@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: buoy-wm
-Upstream-Contact: Nick Booth <nick@onlyhams.radio>
+Upstream-Contact: Nick Booth <n1cck@onlyhams.radio>
 Source: https://github.com/nkbooth/buoy-wm
 
 Files: *
