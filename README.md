@@ -47,10 +47,20 @@ and then left alone.
 `zellij` is a default, not a dependency: the default `pinned_terminal_args`
 runs it inside each tag's pinned terminal, and the WM never calls it
 otherwise. **Fedora 44 and 45 do not package it**, so the RPM's
-`Recommends: zellij` is ignored by dnf. Take the upstream release asset
-`zellij-x86_64-unknown-linux-musl.tar.gz` and put the binary at
-`/usr/bin/zellij` or `~/.local/bin/zellij`, or use `tmux`, which every
-Fedora and Ubuntu archive carries:
+`Recommends: zellij` is ignored by dnf. Put the upstream release asset's
+binary in `/usr/local/bin`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/zellij-org/zellij/releases/latest/download/zellij-x86_64-unknown-linux-musl.tar.gz | sudo tar -xz -C /usr/local/bin zellij
+```
+
+`/usr/bin/zellij` works too. `~/.local/bin` and `~/.cargo/bin` do not: the
+packaged session runs no shell profile, so its `PATH` is the systemd user
+manager's (`/usr/local/bin:/usr/bin` on Fedora). `cargo install --locked zellij`
+builds it instead; on Fedora it needs `sudo dnf install cargo perl-core`
+first (its bundled OpenSSL build runs perl), and the binary is then copied
+with `sudo install ~/.cargo/bin/zellij /usr/local/bin/`. Or use `tmux`,
+which every Fedora and Ubuntu archive carries:
 
 ```toml
 [defaults]
@@ -107,8 +117,9 @@ provides river for it, its xdg-desktop-portal is 1.18 and its rustc 1.75.
 
 A session multiplexer is a default, not a dependency, and no release above
 packages zellij. Take the upstream release asset
-`zellij-x86_64-unknown-linux-musl.tar.gz` and put the binary on your `PATH`,
-or `cargo install zellij`; or use `tmux` from the archive with the
+`zellij-x86_64-unknown-linux-musl.tar.gz` and put the binary in `/usr/local/bin`,
+or `cargo install zellij` and copy it there, as [Requirements](#requirements)
+shows; or use `tmux` from the archive with the
 `pinned_terminal_args` block in [Requirements](#requirements); or set
 `pinned_terminals = false` to run with no multiplexer and no pinned terminal
 at all.
@@ -138,6 +149,9 @@ sudo dnf install "$workdir/$rpm"
 # Silverblue, Kinoite and other atomic hosts: this line instead, then reboot.
 # sudo rpm-ostree install "$workdir/$rpm"
 rm -rf "$workdir"
+
+# Optional, for the status bar:
+sudo dnf install waybar
 ```
 
 `rpm-ostree install` also takes the `https://` URL directly, as RPM Fusion's
@@ -179,7 +193,8 @@ sudo apt install waybar
 `tmux` is on that line because no Ubuntu archive has zellij: either get
 zellij as [Supported platforms](#supported-platforms) says and leave the
 default alone, or put the `tmux` `pinned_terminal_args` block from
-[Requirements](#requirements) in `~/.config/buoy/config.toml`. Then install
+[Requirements](#requirements) in `~/.config/buoy/config.toml` and
+`chmod 600` it ([why](#when-something-in-the-file-is-wrong)). Then install
 `buoy` itself from the `.deb` built for your release:
 
 ```sh
@@ -411,26 +426,22 @@ itself, so waybar needs neither `interval` nor `signal`:
 [
   {
     "layer": "top",
-    "output": "eDP-1",
     "modules-right": ["custom/tag"],
     "custom/tag": {
-      "exec": "~/.local/lib/buoy-wm/buoy-status-bar 0",
-      "return-type": "json",
-      "escape": true
-    }
-  },
-  {
-    "layer": "top",
-    "output": "DP-2",
-    "modules-right": ["custom/tag"],
-    "custom/tag": {
-      "exec": "~/.local/lib/buoy-wm/buoy-status-bar 1",
+      "exec": "/usr/libexec/buoy-wm/buoy-status-bar 0",
       "return-type": "json",
       "escape": true
     }
   }
 ]
 ```
+
+That is one bar, drawn on every monitor, for buoy's output `0`: right for a
+single monitor. With more, give each bar an `"output"` (the connector name
+river logs, such as `eDP-1`) and its own id, `buoy-status-bar 1` and so on.
+The path is the packaged one; the tarball installs the binary as
+`~/.local/lib/buoy-wm/buoy-status-bar`. Then enable the bar as
+[Running it](#running-it) says.
 
 `"escape": true` is not optional. Tag names are arbitrary strings and waybar
 renders module text as Pango markup with `escape` defaulting to `false`, so a
@@ -493,12 +504,14 @@ login that never completes.
 This file is as trusted as `~/.bashrc`: an `{ exec = "..." }` binding runs
 through `sh -c` in your session. So if it is group- or world-**writable**, or
 owned by another user, buoy loads it anyway and tells you — the same warning
-bash gives a world-writable profile. `chmod 600 ~/.config/buoy/config.toml`
-clears it. The default `644` is fine; who can *read* the file is not the
-concern.
+bash gives a world-writable profile. Fedora and Ubuntu give a new file
+`664` (the umask leaves your own group writable), which counts, so after
+creating the file run `chmod 600 ~/.config/buoy/config.toml` once; `644` is
+fine too. Who can *read* the file is not the concern.
 
-Both cases raise a desktop notification naming the file and the problem, and
-log it. To read the log:
+Both cases are logged, and raised as a desktop notification naming the file
+and the problem when a notification daemon (mako, dunst, swaync) runs in the
+session. A fresh install has none, so read the log:
 
 ```sh
 journalctl --user -b --identifier=buoy-wm

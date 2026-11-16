@@ -317,6 +317,40 @@ fi
 require_text "$README" "$exec_line" \
     "the packaged-session section must quote the entry's Exec= line"
 
+# What a clean machine following the README verbatim tripped on (Story
+# 5.7). The status-bar example is the packaged session's: its `exec`
+# names the directory the login entry runs the supervisor from, with no
+# `output` key, because the connector names of the old example matched
+# no real machine and a bar pinned to a missing output is never drawn.
+packaged_libexec="${exec_line##* }"
+packaged_libexec="${packaged_libexec%/*}"
+require_text "$README" "\"exec\": \"$packaged_libexec/buoy-status-bar 0\"" \
+    "the status-bar example must run the packaged binary"
+# Fedora's waybar is not pulled by the RPM, and "Running it" enables its
+# unit, which does not exist until it is installed.
+require_text "$README" 'sudo dnf install waybar' \
+    "the RPM block installs the bar the packaged session enables"
+# The packaged session's PATH is the user manager's (/usr/local/bin:/usr/bin
+# on Fedora): no shell profile runs, so ~/.local/bin and ~/.cargo/bin are
+# not on it and a zellij there is never found.
+# shellcheck disable=SC2088 # the literal text a reader would copy, not a path here
+forbid_text "$README" '~/.local/bin/zellij' \
+    "the packaged session cannot find a zellij there"
+require_text "$README" 'sudo tar -xz -C /usr/local/bin zellij' \
+    "zellij goes where the packaged session's PATH finds it"
+# OpenSSL's vendored build in `cargo install zellij` runs perl's Configure,
+# which needs core modules a clean Fedora does not have.
+require_text "$README" 'sudo dnf install cargo perl-core' \
+    "cargo install zellij needs perl's core modules on Fedora"
+# Fedora's and Ubuntu's umask makes a new file 664, which the trust check
+# reports, and a clean session has no notification daemon.
+forbid_text "$README" "The default \`644\` is fine" \
+    "a new file is 664 on Fedora and Ubuntu"
+require_text "$README" 'chmod 600 ~/.config/buoy/config.toml' \
+    "the step that clears the trust warning on a new file"
+require_text "$README" 'notification daemon' \
+    "desktop notifications need one, and a clean session has none"
+
 # Strings earlier reviews caught as drifts: a file or a path that no
 # longer exists, or a release that never existed. The project's first
 # tag is v1.0.0-rc.1 (ADR-012), so any 0.x release a document describes
