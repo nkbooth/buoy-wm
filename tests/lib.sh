@@ -19,11 +19,11 @@
 # The readers the gates share, each written once. Sourced, never
 # executed (mode 100644; the shebang names the dialect for shellcheck
 # and the shebang rule). Callers: tests/docs.sh, tests/rpm-spec.sh,
-# tests/deb-package.sh, tests/release-workflow.sh, tests/ci-workflow.sh,
-# and ci.yml's `msrv` and `shellcheck` steps. Every reader prints or
-# returns a status and never reports, so each caller keeps its own
-# message. grep, awk and sed only: the gates run on hosts and in images
-# with no Rust toolchain, no yq and no YAML library.
+# tests/deb-package.sh, tests/man.sh, tests/release-workflow.sh,
+# tests/ci-workflow.sh, and ci.yml's `msrv` and `shellcheck` steps.
+# Every reader prints or returns a status and never reports, so each
+# caller keeps its own message. grep, awk and sed only: the gates run on
+# hosts and in images with no Rust toolchain, no yq and no YAML library.
 #
 # Blind spots of read_msrv, kept on purpose: only the first double-quoted
 # `rust-version = "…"` line is read, so a `rust-version.workspace = true`
@@ -63,6 +63,24 @@ platform_rows() {
             if (separator) next
             printf "%s\t%s\t%s\n", trim($2), trim($3), trim($4)
         }' "$1"
+}
+
+# expand_spec_path <path>: prints a spec path with the macros the spec's
+# %install and %files use expanded to their Fedora and Debian values (the
+# two agree for every one of them). Status 1 when a macro is left, so the
+# caller names the line rather than gating a path with `%{` in it.
+expand_spec_path() {
+    local p=$1
+    p="${p//'%{name}'/buoy-wm}"
+    p="${p//'%{_libexecdir}'//usr/libexec}"
+    p="${p//'%{_bindir}'//usr/bin}"
+    p="${p//'%{_mandir}'//usr/share/man}"
+    p="${p//'%{_datadir}'//usr/share}"
+    p="${p//'%{_userunitdir}'//usr/lib/systemd/user}"
+    printf '%s\n' "$p"
+    case $p in
+        *%*) return 1 ;;
+    esac
 }
 
 # release_target <name>: prints `<target> <image>` for a README release

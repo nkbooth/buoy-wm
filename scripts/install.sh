@@ -94,6 +94,7 @@ if [[ -d "$bin_dir" ]]; then
     printf 'linked %s -> %s\n' "$bin_dir/buoy-wm" "$install_dir/buoy-wm"
 fi
 
-# Two ways to start it now, and this script sets up neither: the README
-# section is the one place both are described.
-printf 'next: start it from ~/.config/river/init, or install the RPM for the login entry (README, "Running it")\n'
+# Two ways to start it now, and this script sets up neither: the README's
+# First login section describes the package's entry, CONTRIBUTING.md the
+# hand-written river init.
+printf 'next: install the RPM or .deb for the login entry (README, "First login"), or start it from ~/.config/river/init (CONTRIBUTING.md)\n'

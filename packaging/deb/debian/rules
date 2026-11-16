@@ -50,6 +50,7 @@ override_dh_auto_configure:
 # vendored crates are the only source.
 override_dh_auto_build:
 	cargo build --workspace --release --offline --locked
+	scripts/build-man.sh target/man
 
 # The spec's %check: the test suite runs on this release's own rustc,
 # unless the builder asked for nocheck.

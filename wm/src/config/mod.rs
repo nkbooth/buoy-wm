@@ -22,6 +22,8 @@
 //! behavior exactly — a missing or empty config file is not an error and
 //! changes nothing.
 
+#[cfg(test)]
+mod docs_drift;
 pub mod glob;
 pub mod keysym;
 
@@ -181,9 +183,10 @@ impl Defaults {
     /// [`Defaults::pinned_terminal_args`] with its placeholders filled in:
     /// `{app_id}` becomes `app_id`, `{session}` becomes `session_name`.
     ///
-    /// Substitution is per-argument and whole-token, so a tag name can
-    /// contain anything at all — the result is passed to `Command` as
-    /// separate argv entries, never through a shell.
+    /// Each placeholder is replaced wherever it occurs inside each
+    /// argument, `{app_id}` first, so `--class={app_id}` works too. A tag
+    /// name can contain anything at all: the result is passed to
+    /// `Command` as separate argv entries, never through a shell.
     pub fn pinned_terminal_argv(&self, app_id: &str, session_name: &str) -> Vec<String> {
         self.pinned_terminal_args
             .iter()

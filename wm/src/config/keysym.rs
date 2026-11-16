@@ -199,4 +199,20 @@ mod tests {
             assert!(from_name(name).is_some(), "{name} failed to resolve");
         }
     }
+
+    /// `buoy-config(5)` lists every name this table accepts, so a key added
+    /// here and not documented there is red rather than undiscoverable.
+    #[test]
+    fn every_named_key_is_a_bold_term_in_buoy_config_5() {
+        let page = include_str!("../../../docs/man/buoy-config.5.scd");
+        let missing: Vec<&str> = NAMED
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| !page.contains(&format!("*{name}*")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "buoy-config.5.scd does not name these keys: {missing:?}"
+        );
+    }
 }

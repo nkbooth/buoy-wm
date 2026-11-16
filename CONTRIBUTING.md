@@ -198,6 +198,74 @@ Test from a TTY or a nested river before trusting a build as your login
 session. A `buoy-wm` that fails to start means a black screen and a bounce
 back to the display manager.
 
+## Running a checkout as your session
+
+Without the package there is no `buoy` login entry; a hand-written
+`~/.config/river/init` starts the session instead. `buoy-wm` is the command
+river runs at startup:
+
+```sh
+river -c ~/.local/lib/buoy-wm/buoy-wm
+```
+
+To start helpers alongside it, point river at a script instead and `exec` the
+WM last, so its lifetime is the session's:
+
+```sh
+#!/bin/sh
+# ~/.config/river/init
+waybar &
+exec ~/.local/lib/buoy-wm/buoy-wm
+```
+
+That gives you window management only: no portals, and no units bound to
+the session. To get the packaged session's plumbing from a checkout, reuse
+the shipped files unchanged. Copy the supervisor beside the binaries — it
+resolves `buoy-wm` as its own sibling, which is why it must sit there and
+why `install.sh` does not do it for you (the tarball does not carry it):
+
+```sh
+install -m 0755 packaging/buoy-session ~/.local/lib/buoy-wm/
+install -Dm 0644 packaging/buoy-session.target ~/.config/systemd/user/buoy-session.target
+systemctl --user daemon-reload
+install -Dm 0644 packaging/buoy-portals.conf ~/.config/xdg-desktop-portal/buoy-portals.conf
+```
+
+`~/.config/xdg-desktop-portal` is the first directory xdg-desktop-portal
+searches. Then make the init export the name both the portal file and the
+session entry key on — a river session started from Fedora's own
+`river.desktop` sets a different one — and `exec` the supervisor, with any
+helpers started before it or, better, as the user units the README's
+"First login" describes:
+
+```sh
+#!/bin/sh
+# ~/.config/river/init
+export XDG_CURRENT_DESKTOP=buoy
+exec ~/.local/lib/buoy-wm/buoy-session
+```
+
+This recipe is written from the files and has not been exercised at a live
+login; the packaged session, which installs the same files, is the form
+that gets verified before a release.
+
+## IPC
+
+The WM listens on a Unix socket at `$XDG_RUNTIME_DIR/buoy-wm.sock`, speaking
+newline-delimited JSON. `buoy-tag-picker` and `buoy-status-bar` are its only clients,
+but the protocol is plain enough to script against:
+
+```sh
+echo '{"type":"get-state"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/buoy-wm.sock
+```
+
+There is no fallback path. If `$XDG_RUNTIME_DIR` is unset, empty, relative,
+or names a directory that is not yours or that other users can reach, the WM
+logs the reason and runs with no IPC: `Super+A`, `Super+S` and every status
+bar are inert for that session, and window management is unaffected. Every
+connection is also checked with `SO_PEERCRED` at both ends and refused unless
+both processes run as the same user.
+
 ## Wanted but not scheduled
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) holds work that is wanted and not
@@ -205,7 +273,8 @@ scheduled. If you are looking for something worth doing, start there.
 
 ## Design history
 
-[`docs/adrs.md`](docs/adrs.md) records the decisions that shaped `buoy`, and
-the code cites several of them by number. Beyond that, the comments are the
-documentation — if you are wondering why something is the way it is, the
-answer is usually sitting next to it.
+[`docs/adrs.md`](docs/adrs.md) records the decisions that shaped `buoy` —
+the tag model, the river-over-Hyprland choice and the fuzzel-driven picker
+among them — and the code cites several of them by number. Beyond that, the
+comments are the documentation — if you are wondering why something is the
+way it is, the answer is usually sitting next to it.

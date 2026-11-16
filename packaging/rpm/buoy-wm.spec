@@ -48,6 +48,9 @@ BuildRequires:  pkgconfig(wayland-client)
 # file triggers that reload the user manager when a unit is installed or
 # removed are in the systemd package itself, which is Required below.
 BuildRequires:  systemd-rpm-macros
+# buoy-wm(1) and buoy-config(5) are scdoc sources, rendered at build time
+# by scripts/build-man.sh (the .deb runs the same script).
+BuildRequires:  scdoc
 
 # river is a hard dependency: the session entry runs `river -c` and the
 # package is meaningless without it. Fedora 44 and 45 ship river 0.5.0 in
@@ -73,7 +76,8 @@ Suggests:       waybar
 %description
 buoy manages windows for the river Wayland compositor (0.4+) via
 river-window-management-v1. It owns all tag state itself and gives each tag
-a persistent fullscreen zellij terminal pinned behind every other window,
+a persistent fullscreen terminal running a terminal multiplexer session
+(zellij by default), pinned behind every other window,
 with graphical applications floating above it. Every operation is bound to
 the keyboard and every binding is rebindable through one TOML file.
 
@@ -99,6 +103,7 @@ EOF
 
 %build
 cargo build --workspace --release --offline --locked
+scripts/build-man.sh target/man
 
 %install
 # All three binaries in one directory: the WM resolves buoy-tag-picker as a
@@ -128,6 +133,10 @@ install -Dpm 0644 packaging/buoy-portals.conf %{buildroot}%{_datadir}/xdg-deskto
 install -Dpm 0644 docs/config.example.toml \
     %{buildroot}%{_datadir}/%{name}/config.example.toml
 
+# brp-compress gzips both; %files globs the suffix.
+install -Dpm 0644 target/man/buoy-wm.1 %{buildroot}%{_mandir}/man1/buoy-wm.1
+install -Dpm 0644 target/man/buoy-config.5 %{buildroot}%{_mandir}/man5/buoy-config.5
+
 %check
 cargo test --workspace --release --offline --locked
 
@@ -148,6 +157,8 @@ cargo test --workspace --release --offline --locked
 %{_datadir}/xdg-desktop-portal/buoy-portals.conf
 %dir %{_datadir}/%{name}
 %{_datadir}/%{name}/config.example.toml
+%{_mandir}/man1/buoy-wm.1*
+%{_mandir}/man5/buoy-config.5*
 
 %changelog
 * Sun Nov 15 2026 Nick Booth <n1cck@onlyhams.radio> - 1.0.0~rc.3-1

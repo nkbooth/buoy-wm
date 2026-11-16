@@ -44,6 +44,8 @@ readonly EXAMPLE="$REPO_ROOT/docs/config.example.toml"
 readonly ADRS="$REPO_ROOT/docs/adrs.md"
 readonly CONTRIBUTING="$REPO_ROOT/CONTRIBUTING.md"
 readonly RELEASE="$REPO_ROOT/.github/workflows/release.yml"
+readonly MAN_WM="$REPO_ROOT/docs/man/buoy-wm.1.scd"
+readonly MAN_CONFIG="$REPO_ROOT/docs/man/buoy-config.5.scd"
 
 tmp="$(mktemp -d)"
 readonly tmp
@@ -61,7 +63,7 @@ fail() {
 
 for file in "$README" "$PACKAGING" "$SPEC" "$DESKTOP" \
     "$FORMULA" "$INSTALL" "$CARGO" "$CHANGELOG" "$SECURITY" "$EXAMPLE" \
-    "$ADRS" "$CONTRIBUTING" "$RELEASE"; do
+    "$ADRS" "$CONTRIBUTING" "$RELEASE" "$MAN_WM" "$MAN_CONFIG"; do
     if [ ! -r "$file" ]; then
         fail "${file#"$REPO_ROOT/"}: missing or unreadable"
     fi
@@ -402,7 +404,7 @@ fi
 # shellcheck disable=SC2088 # the literal text a reader would copy, not a path here
 forbid_text "$README" '"exec": "~/.local/lib/buoy-wm/buoy-status-bar' \
     "a bar example that runs the tarball's binary under the packaged session"
-# Fedora's waybar is not pulled by the RPM, and "Running it" enables its
+# Fedora's waybar is not pulled by the RPM, and "First login" enables its
 # unit, which does not exist until it is installed.
 block_line "$rpm_block" "the RPM block" 'sudo dnf install waybar' \
     "installs the bar the packaged session enables"
@@ -416,7 +418,7 @@ forbid_text "$README" '~/.local/bin/zellij' \
     "the packaged session cannot find a zellij there"
 forbid_text "$README" 'sudo tar' \
     "tar run as root keeps the archive's owner"
-zellij_block="$(fenced_block "$README" '## Requirements' 1)"
+zellij_block="$(fenced_block "$README" '### Session multiplexer' 1)"
 # shellcheck disable=SC2016 # literal shell the reader runs, not expanded here
 {
     block_line "$zellij_block" "the zellij block" 'zellij_asset="zellij-x86_64-unknown-linux-musl"' "the asset the session runs"
@@ -636,6 +638,65 @@ require_text "$PACKAGING" 'scripts/check-installed.sh' \
 forbid_text "$PACKAGING" 'in a fresh container of its own release' \
     "the verify legs install every package; the runbook's by-hand container installs are gone"
 
+# Every in-page link must land on a heading of the same file, by
+# GitHub's slug rule: lowercased, every character but letters, digits,
+# space, `-` and `_` dropped (backticks and punctuation included), each
+# space turned into `-`, and `-1`, `-2` appended to repeats. A `#` line
+# inside a fence is a comment in a code block, not a heading.
+# dangling_anchors <file>: each `](#slug)` link with no such heading.
+dangling_anchors() {
+    awk '
+        /^```/ { fence = !fence; next }
+        fence { next }
+        /^#+ / {
+            slug = $0
+            sub(/^#+ /, "", slug)
+            slug = tolower(slug)
+            gsub(/[^a-z0-9 _-]/, "", slug)
+            gsub(/ /, "-", slug)
+            if (slug in repeats) { repeats[slug]++; slug = slug "-" repeats[slug] } else repeats[slug] = 0
+            anchors[slug] = 1
+        }
+        {
+            line = $0
+            while (match(line, /\]\(#[^)]*\)/)) {
+                links[++n] = substr(line, RSTART + 3, RLENGTH - 4)
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }
+        END { for (i = 1; i <= n; i++) if (!(links[i] in anchors)) print links[i] }
+    ' "$1"
+}
+for doc in "$README" "$CONTRIBUTING"; do
+    while IFS= read -r slug; do
+        fail "${doc#"$REPO_ROOT/"}: the link '](#$slug)' names no heading in the same file"
+    done < <(dangling_anchors "$doc")
+done
+
+# The journal query the documents give is the one that works once the
+# supervisor hands the WM's output to journald under its own name (Story
+# 6.2): before that, GDM's stream carried the lines with neither the
+# identifier nor the severity, so `--identifier=buoy-wm -p err` matched
+# nothing. The README's troubleshooting section opens with it as a line
+# a reader copies; the example, SECURITY.md and both man pages name it.
+journal_query='journalctl --user -b --identifier=buoy-wm -p err'
+troubleshooting_block="$(fenced_block "$README" '## Troubleshooting' 1)"
+block_line "$troubleshooting_block" "the Troubleshooting section's first block" \
+    "$journal_query" "the failures-only query, once the supervisor names the stream"
+# shellcheck disable=SC2016 # a literal journalctl match a reader copies
+require_text "$README" "journalctl --user -b _COMM=buoy-wm --grep '^<3>'" \
+    "rc.3 and earlier log through the display manager's stream, where only _COMM finds the WM"
+for doc in "$EXAMPLE" "$SECURITY" "$MAN_WM" "$MAN_CONFIG"; do
+    require_text "$doc" "$journal_query" "the documented failures-only query"
+done
+# shellcheck disable=SC2016 # Markdown backticks, literal
+forbid_text "$README" 'beside the WM'"'"'s `--identifier=buoy-wm` lines' \
+    "the supervisor's own lines stay in the display manager's stream, under _COMM=buoy-session"
+# A malformed config raises a notification and a journal line; nothing
+# reads the WM's stderr in the packaged session.
+forbid_text "$SECURITY" 'check stderr' \
+    "the problem is a desktop notification plus a journal line"
+
 # install.sh's last line points at the README section that explains how
 # to start a session, now that there are two ways. A fixture build dir
 # with stub executables keeps the test free of the toolchain; HOME has
@@ -662,8 +723,8 @@ done
 if [ -e "$tmp/home/.local/bin/buoy-wm" ]; then
     fail "scripts/install.sh: made a symlink although ~/.local/bin does not exist"
 fi
-if ! tail -n1 "$tmp/out" | grep -qF 'Running it'; then
-    fail "scripts/install.sh: last line does not point at the README's 'Running it' section, got: $(tail -n1 "$tmp/out")"
+if ! tail -n1 "$tmp/out" | grep -qF 'First login'; then
+    fail "scripts/install.sh: last line does not point at the README's 'First login' section, got: $(tail -n1 "$tmp/out")"
 fi
 
 if [ "$status" -ne 0 ]; then

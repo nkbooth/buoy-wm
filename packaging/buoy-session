@@ -92,18 +92,34 @@ dbus-update-activation-environment --systemd $session_vars \
 systemctl --user start buoy-session.target \
     || echo 'buoy-session: could not start buoy-session.target' >&2
 
-"$wm_dir/buoy-wm" &
-wm_pid=$!
+# The WM's stdout and stderr go to journald through systemd-cat, under
+# its own identifier and with its `<N>` level prefixes parsed. Inherited
+# as they are, they would land in the display manager's stream: GDM logs
+# this whole session as /usr/libexec/gdm-wayland-session, at one priority,
+# with the `<3>` left in the message, so `journalctl --identifier=buoy-wm
+# -p err` matched nothing (checked on rc.3, 2026-11-16). systemd-cat
+# execs the WM, so `$!` is still the WM's pid and the trap above still
+# reaches it; the pickers the WM spawns inherit the same stream.
+#
+# A WM that cannot be executed exits 127, the status a shell gives a
+# command it could not run, after both stops below; checked here because
+# systemd-cat's own failure to execute it would exit 1 instead.
+status=''
+if [ -x "$wm_dir/buoy-wm" ]; then
+    systemd-cat --identifier=buoy-wm --level-prefix=true "$wm_dir/buoy-wm" &
+    wm_pid=$!
+else
+    echo "buoy-session: $wm_dir/buoy-wm is not executable" >&2
+    status=127
+fi
 
 # A trapped signal returns from `wait` before the WM has gone, so wait
 # again in that case only; the flag decides, not the status. The trap can
 # also fire just after `wait` has reported the real status: the job is
 # gone by then, and a second wait on it returns 127 in bash (dash repeats
 # the status), so a 127 after a status has already been collected keeps
-# the collected one rather than replacing it. A 127 with nothing collected
-# is real: buoy-wm could not be executed.
-status=''
-while :; do
+# the collected one rather than replacing it.
+while [ -n "$wm_pid" ]; do
     signalled=0
     wait "$wm_pid" 2>/dev/null
     rc=$?

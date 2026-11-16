@@ -27,3 +27,5 @@ packaging/buoy.desktop usr/share/wayland-sessions
 packaging/buoy-session.target usr/lib/systemd/user
 packaging/buoy-portals.conf usr/share/xdg-desktop-portal
 docs/config.example.toml usr/share/buoy-wm
+target/man/buoy-wm.1 usr/share/man/man1
+target/man/buoy-config.5 usr/share/man/man5

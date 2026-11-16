@@ -28,12 +28,18 @@
 # those four, one of which runs `~/bin/toggle-bluetooth.sh`, a script you
 # almost certainly do not have. Delete what you do not want.
 #
-# If one entry in this file is wrong, that entry is skipped and reported —
-# everything else still applies. A file that is not valid TOML, or a wrong
-# value in [defaults], has no single entry to drop and falls back to the
-# built-in defaults in full, keybinds included. Either way a desktop
-# notification names the problem; `journalctl --user -b --identifier=buoy-wm`
-# has the detail.
+# An entry the parser can read but the WM cannot use — an unknown key name,
+# an uppercase letter without "shift", `move` or `resize` on a key, a
+# duplicate binding, or an [[input]] block with an empty or repeated
+# `name`, no setting or an out-of-range `accel_speed` — is skipped and
+# reported, and everything else still applies. Anything the parser itself
+# refuses rejects the whole file: invalid TOML, a misspelled field, action,
+# modifier, button or input value, a wrong type, a missing `key`, `button`,
+# `action` or `name`, and any wrong value in [defaults]. A rejected file
+# falls back to the built-in defaults in full, keybinds included. Either way
+# a desktop notification names the problem, and
+#   journalctl --user -b --identifier=buoy-wm -p err
+# shows it in the journal. `man 5 buoy-config` has the full reference.
 
 [defaults]
 # Spawned by the `terminal` action, and used for each tag's pinned terminal.
@@ -47,8 +53,10 @@ default_tag = "default"
 # Argv passed to `terminal` to spawn a tag's pinned terminal. `{app_id}` is
 # required — it is how the WM recognizes that window, and which tag it
 # belongs to, and is replaced per tag with `pinned-term-<tag id>` — and
-# `{session}` is replaced with the tag's zellij session name. The default is foot's
-# spelling; most other terminals use `--class` instead of `-a`, e.g.
+# `{session}` is replaced with `tag-<tag name>`, the session name for
+# whichever multiplexer runs there. Both are replaced inside each argument,
+# never through a shell. The default is foot's spelling; most other
+# terminals use `--class` instead of `-a`, e.g.
 #   pinned_terminal_args = ["--class", "{app_id}", "-e", "zellij", "attach", "--create", "{session}"]
 pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]
 # Whether each tag gets a pinned terminal at all. Turn it off — this is the
@@ -63,13 +71,14 @@ pinned_terminals = true
 # Declaring ANY [[keybind]] replaces the entire built-in set, so list every
 # binding you want. Mousebinds are a separate list with the same rule.
 #
-#   mod    = any of "super" ("mod4"), "ctrl" ("control"), "alt" ("mod1"),
-#            "shift". Optional — omit it for an unmodified key. The
-#            PascalCase spellings ("Super", "Ctrl", …) are accepted as
-#            well, and always will be.
-#   key    = a keysym name: a single character ("a", "1", "?"), a named key
-#            ("Return", "Space", "Tab", "Escape", "Left", "Page_Up"), or a
-#            function key ("F1".."F35"). Named keys are case-insensitive;
+#   mod    = any of "super" ("mod4", "logo", "win"), "ctrl" ("control"),
+#            "alt" ("mod1"), "shift". Optional — omit it for an unmodified
+#            key. The PascalCase spellings ("Super", "Ctrl", …) are
+#            accepted as well, and always will be.
+#   key    = a keysym name: a single character ("a", "1", "?"), one of the
+#            named keys `man 5 buoy-config` lists ("Return", "Tab",
+#            "Escape", …), or a function key ("F1".."F35", "f1" too).
+#            Named keys are case-insensitive;
 #            single characters are NOT — "a" and "A" are different keysyms,
 #            and an uppercase letter is the *shifted* symbol, so it must be
 #            bound with "Shift" or it can never fire. Write "q", not "Q",
@@ -84,10 +93,13 @@ pinned_terminals = true
 # The older spellings `tag_picker` and `tag_switch` still work; they were
 # renamed because `tag_switch` (open the picker) and `switch_tag` (switch
 # now) were one transposition apart.
-# `move` and `resize` drive a pointer drag, so they are mousebind-only.
+# `move` and `resize` drive a pointer drag, so they are mousebind-only; a
+# mousebind takes any action.
 #
 # Binding the same mod+key twice is reported rather than a silent race: the
-# second binding is skipped.
+# second binding is skipped. Two bindings count as the same only when they
+# are written the same way: ["super", "shift"] and ["shift", "super"], or
+# "Space" and "space", are not caught.
 
 [[keybind]]
 mod = ["super"]
@@ -195,9 +207,10 @@ action = "resize"
 # if you add a block for some other device, restate `tap = true` here too or
 # your touchpad silently loses tap-to-click.
 #
-# Rejected at load (rather than looking configured and doing nothing):
-# an empty `name`, a block that sets nothing, a repeated `name`, and an
-# `accel_speed` outside -1.0..=1.0.
+# Skipped and reported at load (rather than looking configured and doing
+# nothing): an empty `name`, a block that sets nothing, a repeated `name`,
+# and an `accel_speed` outside -1.0..=1.0. A `name` that matches no device
+# is accepted silently, so check it against `libinput list-devices`.
 
 # The built-in default, written out explicitly. libinput ships tap-to-click
 # DISABLED on any device that has physical buttons, which is every laptop
@@ -215,8 +228,8 @@ tap = true
 #   "button_areas" — the bottom of the pad is split into left/right zones
 #   "clickfinger"  — the finger count decides, anywhere on the pad
 #   "none"         — no physical click buttons
-# Leave unset to keep whatever the device defaults to; the WM logs the
-# current method at startup for any device configured here.
+# Leave unset to keep whatever the device defaults to; for any device
+# configured here the WM logs `click method is …` and `tap-to-click is …`.
 # click_method = "button_areas"
 # natural_scroll = true
 # libinput calls this "dwt": ignore the touchpad briefly while typing.

@@ -38,7 +38,8 @@ Build-Depends: debhelper-compat (= 13),
                cargo,
                rustc (>= 1.93),
                libwayland-dev,
-               pkgconf
+               pkgconf,
+               scdoc
 Standards-Version: 4.7.2
 Homepage: https://github.com/nkbooth/buoy-wm
 Rules-Requires-Root: no

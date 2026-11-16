@@ -43,7 +43,10 @@ from vms import vm as lookup  # noqa: E402
 
 FEDORA = "### Fedora 44 and 45: the RPM"
 UBUNTU = "### Ubuntu 26.04 and 26.10: river from a PPA, then the .deb"
-REQUIREMENTS = "## Requirements"
+# The `# ---- … ----` labels written into a script keep the section names
+# rc.3's run recorded ("Requirements", "Running it"), so a heading rename
+# leaves every generated script byte-identical; only these lookups follow.
+REQUIREMENTS = "### Session multiplexer"
 STATUS_BAR = "## Status bar"
 TRUST = "### When something in the file is wrong"
 PACKAGED_SESSION = "### The packaged session"

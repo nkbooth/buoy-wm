@@ -95,6 +95,14 @@ require_line '%{_datadir}/xdg-desktop-portal/buoy-portals.conf'
 # %{_userunitdir} is unexpanded without the macros package.
 require_tag BuildRequires 'systemd-rpm-macros'
 
+# The man pages are rendered in %build by the one script both package
+# formats run, and installed where %files lists them (tests/man.sh holds
+# buoy-wm(1)'s FILES section to that list).
+require_tag BuildRequires 'scdoc'
+require_line 'scripts/build-man.sh target/man'
+require_line '%{_mandir}/man1/buoy-wm.1*'
+require_line '%{_mandir}/man5/buoy-config.5*'
+
 # The toolchain floor is read from the manifest, never spelled here.
 # ADR-014 makes it the rustc of the oldest tier-1 release, and
 # Cargo.toml's `rust-version` is its one home: the msrv CI job reads

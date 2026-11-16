@@ -341,10 +341,12 @@ version. ADR-014's MSRV keeps it buildable with Ubuntu's own rustc (see
 manager is the session, needs the compositor's private protocol socket, and
 spawns arbitrary user programs.
 
-**Static musl builds.** Would remove the glibc floor, but `wayland-client`
-links the system libwayland, so a musl target needs a musl libwayland
-sysroot. The 2.43 glibc floor the build container sets ("Toolchain
-floor") solves the same problem for materially less work.
+**Static musl builds.** Would remove the glibc floor. The 2.43 glibc
+floor the build container sets ("Toolchain floor") already solves the same
+problem, and a second target is a second build, test and release leg to
+keep. `wayland-client` is no obstacle: its pure-Rust backend loads no
+libwayland, and `readelf -d` on rc.3's three binaries lists only
+`libc.so.6` and `libgcc_s.so.1` as `NEEDED`.
 
 **AppImage.** Solves distribution for GUI applications launched by a user.
 A WM is `exec`'d by a compositor at session start; the extra indirection

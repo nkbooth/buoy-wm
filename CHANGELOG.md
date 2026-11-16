@@ -6,7 +6,36 @@ Notable changes per release. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- Man pages: `buoy-wm(1)` for the program, the session, its files, exit
+  statuses and diagnostics, and `buoy-config(5)` for every configuration
+  key, action, key name and value. The RPM and the `.deb` install both;
+  tests hold their names to the code.
+- A Troubleshooting section in the README: the journal query, then the
+  log line or notification to look for and the fix for each failure a new
+  session meets.
+- An Uninstall section in the README.
+
+### Changed
+
+- The README follows a new reader's path: platforms, install, first
+  login, everyday use, configuration, troubleshooting. Building from a
+  checkout, starting the session without the package and the IPC protocol
+  moved to CONTRIBUTING.md. Every install step is unchanged.
+- The README's default keybindings are listed as the cheat-sheet labels
+  them (`Super+space`, `Super+Escape`, `Super+LeftClick`).
+
 ### Fixed
+
+- Under the packaged session the WM's log lines reached the journal under
+  the display manager's name and without severity, so
+  `journalctl --user -b --identifier=buoy-wm -p err` matched nothing. The
+  session supervisor now hands them to journald as `buoy-wm`.
+- The documents said a misspelled action, modifier or button only skipped
+  that entry; it rejects the whole file, as any field the parser refuses
+  does. They also said an `[[input]]` pattern matching no device was
+  reported; it is accepted silently.
 
 - The README's zellij step pins the release the clean machines ran
   (0.46.0), checks the binary against upstream's published checksum and

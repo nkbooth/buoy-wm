@@ -141,8 +141,8 @@ def main(readme: str, generator: str, rows_file: str) -> int:
 
     rpm = blocks(lines, "### Fedora 44 and 45: the RPM", "sh")
     ubuntu = blocks(lines, "### Ubuntu 26.04 and 26.10: river from a PPA, then the .deb", "sh")
-    zellij = blocks(lines, "## Requirements", "sh")
-    toml = blocks(lines, "## Requirements", "toml")
+    zellij = blocks(lines, "### Session multiplexer", "sh")
+    toml = blocks(lines, "### Session multiplexer", "toml")
     jsonc = blocks(lines, "## Status bar", "jsonc")
     for what, found, count in [("Fedora sh", rpm, 1), ("Ubuntu sh", ubuntu, 2), ("Requirements sh", zellij, 1),
                                ("Requirements toml", toml, 1), ("Status bar jsonc", jsonc, 1)]:
@@ -151,8 +151,14 @@ def main(readme: str, generator: str, rows_file: str) -> int:
     if failures:
         return 1
     text = "\n".join(lines)
-    start = lines.index("## Requirements")
-    end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("## "))
+    start = lines.index("### Session multiplexer")
+    end, fence = len(lines), False
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("```"):
+            fence = not fence
+        elif not fence and re.match(r"#+ ", lines[i]):
+            end = i
+            break
     requirements = "\n".join(lines[start:end])
     cargo = []
     for command in (r"sudo dnf install cargo perl-core", r"cargo install --locked zellij",

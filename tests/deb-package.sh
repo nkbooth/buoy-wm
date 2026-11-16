@@ -209,6 +209,7 @@ if have "$CONTROL"; then
         echo "rustc (>= ${msrv:-<rust-version>})"
         echo 'libwayland-dev'
         echo 'pkgconf'
+        echo 'scdoc'
     } >"$tmp/Build-Depends.expected"
     # shellcheck disable=SC2016 # debhelper substitution variables, literal
     printf '%s\n' '${shlibs:Depends}' '${misc:Depends}' dbus-bin systemd >"$tmp/Depends.expected"
@@ -247,16 +248,10 @@ fi
 # spec_path <path>: a spec path with its macros expanded to the Debian
 # layout, relative to the package root.
 spec_path() {
-    local p=$1
-    p="${p//'%{buildroot}'/}"
-    p="${p//'%{name}'/buoy-wm}"
-    p="${p//'%{_libexecdir}'//usr/libexec}"
-    p="${p//'%{_bindir}'//usr/bin}"
-    p="${p//'%{_datadir}'//usr/share}"
-    p="${p//'%{_userunitdir}'//usr/lib/systemd/user}"
-    case $p in
-        *%*) fail "$(rel "$SPEC"): %install path '$1' uses a macro this test does not map to the Debian layout" ;;
-    esac
+    local p
+    if ! p="$(expand_spec_path "${1//'%{buildroot}'/}")"; then
+        fail "$(rel "$SPEC"): %install path '$1' uses a macro this test does not map to the Debian layout"
+    fi
     printf '%s' "${p#/}"
 }
 
@@ -348,11 +343,15 @@ if have "$RULES"; then
     # source ("failed to calculate checksum of: …/Cargo.toml.orig").
     require_rules_line $'\tdh_clean -XCargo.toml.orig'
     expect_recipe override_dh_clean $'\tdh_clean -XCargo.toml.orig'
-    # The spec's %build and %check: offline, from the lock, and the tests
-    # skipped only on an explicit nocheck.
+    # The spec's %build and %check: offline, from the lock, the man pages
+    # from the same script, and the tests skipped only on an explicit
+    # nocheck.
     require_rules_line $'\tcargo build --workspace --release --offline --locked'
+    require_rules_line $'\tscripts/build-man.sh target/man'
     require_rules_line $'\tcargo test --workspace --release --offline --locked'
-    expect_recipe override_dh_auto_build $'\tcargo build --workspace --release --offline --locked'
+    expect_recipe override_dh_auto_build \
+        $'\tcargo build --workspace --release --offline --locked' \
+        $'\tscripts/build-man.sh target/man'
     # shellcheck disable=SC2016 # make syntax, literal
     expect_recipe override_dh_auto_test \
         'ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))' \

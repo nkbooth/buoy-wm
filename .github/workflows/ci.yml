@@ -271,8 +271,9 @@ jobs:
           pipx install 'pre-commit==4.6.2'
           sudo apt-get update
           # `rpm` for `rpmspec`, the spec test's parser tier; `dpkg-dev`
-          # for `dpkg-parsechangelog`, the debian/ test's.
-          sudo apt-get install -y --no-install-recommends shellcheck rpm dpkg-dev
+          # for `dpkg-parsechangelog`, the debian/ test's; `scdoc` and
+          # `groff-base` for the man page test's build and render.
+          sudo apt-get install -y --no-install-recommends shellcheck rpm dpkg-dev scdoc groff-base
 
       # `--offline`: no online audits, so this needs no token and cannot
       # be made to fail by a rate limit.
@@ -358,6 +359,14 @@ jobs:
       # were caught when Story 6.1 was written.
       - name: docs agree
         run: tests/docs.sh
+
+      # The man pages are built from scdoc sources by the one script the
+      # RPM and the .deb run; this builds and renders them on every push
+      # and holds buoy-wm(1)'s FILES and ENVIRONMENT to the spec's %files
+      # and to the variables the crates read. buoy-config(5)'s names are
+      # held to the parser by cargo test (wm/src/config/docs_drift.rs).
+      - name: man pages
+        run: tests/man.sh
 
       # scripts/clean-vm/ runs by hand once before a final tag and builds
       # each VM's install script from the README's blocks by heading, so

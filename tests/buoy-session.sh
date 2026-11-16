@@ -17,9 +17,12 @@
 # language governing rights and limitations under the RPL.
 #
 # Runs packaging/buoy-session against stub `systemctl`,
-# `dbus-update-activation-environment` and `buoy-wm` and asserts the
-# supervisor contract: the exact argv of every systemd call in order, that
-# the WM runs as a child of the supervisor (not exec'd), that TERM, INT and
+# `dbus-update-activation-environment`, `systemd-cat` and `buoy-wm` and
+# asserts the supervisor contract: the exact argv of every systemd call in
+# order, that the WM is launched through `systemd-cat` under its own
+# journal identifier with level prefixes parsed (the display manager's
+# stream carries neither), that the WM runs as a child of the supervisor
+# (not exec'd; systemd-cat execs it in turn), that TERM, INT and
 # HUP sent to the supervisor all reach the WM as SIGTERM, that the session
 # target and then graphical-session.target are stopped, in that order,
 # only after the WM has exited (the stub logs its exit, so the order is
@@ -28,7 +31,8 @@
 # never fires), that a signal during the systemd steps still stops both
 # targets, that a failing systemctl never stops the WM from launching, and
 # that the supervisor's exit status is always the WM's, including a WM
-# killed by a signal.
+# killed by a signal, and 127 with both targets stopped when the WM is not
+# executable (systemd-cat's own failure would be 1).
 #
 # The stub log is the contract CI checks, so the five environment names
 # and their order are compared byte for byte, and the PATH stubs reject an
@@ -160,6 +164,23 @@ EOF
 cp "$tmp/bin/systemctl" "$tmp/bin/dbus-update-activation-environment"
 chmod 0755 "$tmp/bin/systemctl" "$tmp/bin/dbus-update-activation-environment"
 
+# The systemd-cat stub logs its argv and execs the command after its own
+# options, as the real one does (it execs its command with stdout and
+# stderr connected to the journal), so the WM is still the supervisor's
+# child and every signal and status case below runs through it.
+cat > "$tmp/bin/systemd-cat" <<'EOF'
+#!/bin/sh
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$STUB_LOG"
+while [ $# -gt 0 ]; do
+    case $1 in
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+exec "$@"
+EOF
+chmod 0755 "$tmp/bin/systemd-cat"
+
 # The stub WM logs the pid of its parent, which must be the supervisor,
 # and logs `buoy-wm exit` on its way out so the test can see that the
 # target is stopped after the WM has gone, not merely after it started.
@@ -229,7 +250,8 @@ dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT
 systemctl --user start buoy-session.target'
 readonly stop='systemctl --user stop buoy-session.target
 systemctl --user stop graphical-session.target'
-readonly wm_start='buoy-wm ppid=SUPERVISOR WAYLAND_DISPLAY=wayland-test'
+readonly wm_start='systemd-cat --identifier=buoy-wm --level-prefix=true WM_DIR/buoy-wm
+buoy-wm ppid=SUPERVISOR WAYLAND_DISPLAY=wayland-test'
 
 # The WM ran and left on its own terms (or via a forwarded signal).
 readonly expected_run="$setup
@@ -240,8 +262,9 @@ $stop"
 readonly expected_killed="$setup
 $wm_start
 $stop"
-# A signal landed before the launch: no WM at all, the target is still
-# stopped because the start may already have gone through.
+# A signal landed before the launch, or the WM is not executable: no WM
+# at all, the target is still stopped because the start may already have
+# gone through.
 readonly expected_no_wm="$setup
 $stop"
 
@@ -310,10 +333,12 @@ run_case() {
     fi
 
     # A wrong ppid shows up in the diff rather than being filtered out:
-    # only the supervisor's own pid is rewritten to the placeholder.
+    # only the supervisor's own pid is rewritten to the placeholder, and
+    # the stub directory to WM_DIR.
     if ! diff -u --label expected --label actual \
         <(printf '%s\n' "$expected_log") \
-        <(sed "s/^buoy-wm ppid=$pid /buoy-wm ppid=SUPERVISOR /" "$STUB_LOG") >&2; then
+        <(sed -e "s/^buoy-wm ppid=$pid /buoy-wm ppid=SUPERVISOR /" \
+            -e "s|$tmp/libexec/|WM_DIR/|" "$STUB_LOG") >&2; then
         fail "$name" "stub log differs from the expected sequence"
         cat "$tmp/stderr" >&2
     fi
@@ -341,6 +366,16 @@ run_case INT signal ok INT 7 "$expected_run"
 run_case HUP signal ok HUP 7 "$expected_run"
 run_case TERM-during-start exit0 slow-start TERM 143 "$expected_no_wm"
 run_case systemctl-fails exit3 fail "" 3 "$expected_run"
+
+# A WM that cannot be executed keeps the status the shell gave it before
+# the launch went through systemd-cat, and says why.
+chmod 0644 "$tmp/libexec/buoy-wm"
+run_case not-executable exit0 ok "" 127 "$expected_no_wm"
+if ! grep -qxF -- "buoy-session: $tmp/libexec/buoy-wm is not executable" "$tmp/stderr"; then
+    fail not-executable "missing stderr line: buoy-session: $tmp/libexec/buoy-wm is not executable"
+    cat "$tmp/stderr" >&2
+fi
+chmod 0755 "$tmp/libexec/buoy-wm"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures case(s) failed" >&2

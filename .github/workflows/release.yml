@@ -382,8 +382,8 @@ jobs:
 
       # The .deb and not the .changes: the changes file's `Distribution:
       # unstable` is an error under Ubuntu's lintian profile and is not
-      # shipped. Warnings (no-manual-page until the man pages exist,
-      # initial-upload-closes-no-bugs) print but do not fail.
+      # shipped. Warnings (initial-upload-closes-no-bugs) print but do not
+      # fail.
       - name: Lint the .deb
         if: startsWith(matrix.target, 'ubuntu-')
         run: lintian --fail-on error --no-tag-display-limit dist/*.deb

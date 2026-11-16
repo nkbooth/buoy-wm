@@ -18,8 +18,9 @@
 #
 # check.sh: runs ON the VM, over ssh, while the buoy session is up. Prints
 # the evidence summary.py reads, one `== ` section each: the process tree
-# from GDM down, the session environment and units, the portals, what
-# screen sharing offers and whether screenshots answer, the bar, buoy's own state, the pinned terminal,
+# from GDM down, the session environment and units, the WM's journal
+# identifier, the portals, what screen sharing offers and whether
+# screenshots answer, the bar, buoy's own state, the pinned terminal,
 # and every other process the test user has (a stray one could keep the
 # user manager alive and hide a logout defect).
 uid="$(id -u)"
@@ -37,6 +38,10 @@ for unit in buoy-session.target graphical-session.target xdg-desktop-portal.serv
 done
 echo "== (b) failed units"
 systemctl --user list-units --failed --no-legend
+# The supervisor hands the WM's output to journald as `buoy-wm` (Story
+# 6.2); on rc.3 and earlier this query is empty in the packaged session.
+echo "== (b) journal identity"
+journalctl --user -b -q --no-pager --identifier=buoy-wm -o cat | head -n 3 | grep . || echo "(none)"
 echo "== (c) portal backend errors"
 journalctl --user -b --no-pager | grep -E 'Requested backend|does not exist' || echo "(none)"
 echo "== (c) AvailableSourceTypes"
