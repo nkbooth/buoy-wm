@@ -101,10 +101,53 @@ count_lines() {
     grep -cE -- "$regex" "$file" || true
 }
 
+# fenced_block <file> <heading> <n>: the body of the n-th fenced code
+# block under the exact heading line, up to the next heading outside a
+# fence (a `# comment` inside a shell block is not one). A reader copies
+# one block, so a line that must be in it is looked for there and not
+# anywhere in the file. Empty when there is no such block.
+fenced_block() {
+    HEADING=$2 awk -v want="$3" '
+        $0 == ENVIRON["HEADING"] { inside = 1; next }
+        !inside { next }
+        !fence && /^#+ / { exit }
+        /^```/ {
+            if (fence) { fence = 0; if (n == want) exit } else { fence = 1; n++ }
+            next
+        }
+        fence && n == want { print }
+    ' "$1"
+}
+
+# section_text <file> <heading>: everything under the exact heading line
+# up to the next heading outside a fence, as one line with whitespace
+# runs squeezed, so a phrase a line break splits is still one phrase.
+section_text() {
+    HEADING=$2 awk '
+        $0 == ENVIRON["HEADING"] { inside = 1; next }
+        !inside { next }
+        /^```/ { fence = !fence }
+        !fence && /^#+ / { exit }
+        { print }
+    ' "$1" | tr -s ' \n\t' '   '
+}
+
+# block_line <block> <where> <line> <why>: the line occurs in the block
+# exactly once, whole, so a commented-out copy, an indented one or a
+# second one cannot stand in for it.
+block_line() {
+    local block=$1 where=$2 line=$3 why=$4 found
+    found="$(printf '%s\n' "$block" | grep -cxF -- "$line" || true)"
+    if [ "$found" -ne 1 ]; then
+        fail "README.md: $where has $found whole lines '$line', not one ($why)"
+    fi
+}
+
 # The README's pinned version is the one it ships with: the file travels
 # in the tarball and the RPM, so it must name the release Cargo.toml
 # builds. The RPM and .deb blocks each open with their own line, since a
-# reader copies one block, so every 'version=' line must be that version.
+# reader copies one block (each block's own line is required below), so
+# every 'version=' line, indented or not, must be that version.
 # The `|| true` keeps an absent line on the report: under `set -e` a failed
 # grep in the substitution would otherwise end the run before the message
 # is written.
@@ -112,7 +155,7 @@ cargo="$(grep -m1 '^version = ' "$CARGO" | cut -d'"' -f2 || true)"
 if [ -z "$cargo" ]; then
     fail "Cargo.toml: no 'version = \"…\"' line to derive the README version from"
 fi
-version_lines="$(count_lines "$README" '^version=')"
+version_lines="$(count_lines "$README" '^[[:space:]]*version=')"
 # Whole-line match: a substring check would accept rc.10 against rc.1.
 cargo_version_lines="$(grep -cxF -- "version=$cargo" "$README" || true)"
 if [ "$version_lines" -eq 0 ]; then
@@ -253,34 +296,76 @@ for ubuntu in $ubuntu_releases; do
         "the release model must name every .deb asset release.yml builds"
 done
 # The README's platforms table names each release's own asset, read from
-# the same matrix, and its install blocks derive the file name from the
-# running system rather than naming one release, so a reader on any
-# supported release downloads the package built for it. Whole lines,
-# because each is the line a reader copies.
+# the same matrix, in the Download cell of exactly one row: the cell, not
+# a mention anywhere in the file.
+download_cells="$(awk -F'|' '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    /^## Supported platforms$/ { in_section = 1; next }
+    /^## / { in_section = 0 }
+    in_section && /^\|/ { print trim($(NF - 1)) }
+' "$README")"
+# shellcheck disable=SC2016 # the cell names the reader's ${version}, not expanded here
 for fedora in $fedora_releases; do
-    require_text "$README" "-1.fc$fedora.x86_64.rpm" \
-        "the platforms table must name every RPM asset release.yml builds"
+    cell='`buoy-wm-${version}-1.fc'"$fedora"'.x86_64.rpm`'
+    found="$(printf '%s\n' "$download_cells" | grep -cxF -- "$cell" || true)"
+    if [ "$found" -ne 1 ]; then
+        fail "README.md: $found Supported platforms Download cells are $cell, not one (release.yml builds that RPM)"
+    fi
 done
+# shellcheck disable=SC2016 # the cell names the reader's ${version}, not expanded here
 for ubuntu in $ubuntu_releases; do
-    require_text "$README" "-1.ubuntu${ubuntu}_amd64.deb" \
-        "the platforms table must name every .deb asset release.yml builds"
+    cell='`buoy-wm_${version}-1.ubuntu'"$ubuntu"'_amd64.deb`'
+    found="$(printf '%s\n' "$download_cells" | grep -cxF -- "$cell" || true)"
+    if [ "$found" -ne 1 ]; then
+        fail "README.md: $found Supported platforms Download cells are $cell, not one (release.yml builds that .deb)"
+    fi
 done
+# Each install block derives the file name from the running system
+# rather than naming one release, so a reader on any supported release
+# downloads the package built for it, and installs it only once its
+# checksum passed: a pasted block has no `set -e`, so a 404 or a mismatch
+# would otherwise go on to install whatever arrived. Each line is held
+# whole and once inside its own block, the one a reader copies.
 # shellcheck disable=SC2016 # literal shell the reader runs, not expanded here
-rpm_line='rpm="buoy-wm-${version}-1.fc$(rpm -E %fedora).x86_64.rpm"'
+{
+    rpm_line='rpm="buoy-wm-${version}-1.fc$(rpm -E %fedora).x86_64.rpm"'
+    deb_line='deb="buoy-wm_${version}-1.ubuntu$(. /etc/os-release && echo "$VERSION_ID")_amd64.deb"'
+    base_line='base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"'
+}
+rpm_block="$(fenced_block "$README" '### Fedora 44 and 45: the RPM' 1)"
+deb_block="$(fenced_block "$README" '### Ubuntu 26.04 and 26.10: river from a PPA, then the .deb' 2)"
+tarball_block="$(fenced_block "$README" '### From a release' 1)"
 # shellcheck disable=SC2016 # literal shell the reader runs, not expanded here
-deb_line='deb="buoy-wm_${version}-1.ubuntu$(. /etc/os-release && echo "$VERSION_ID")_amd64.deb"'
-if ! grep -qxF -- "$rpm_line" "$README"; then
-    fail "README.md: no whole line '$rpm_line' (the Fedora block derives its RPM from the running release)"
-fi
-if ! grep -qxF -- "$deb_line" "$README"; then
-    fail "README.md: no whole line '$deb_line' (the Ubuntu block derives its .deb from the running release)"
+{
+    block_line "$rpm_block" "the RPM block" "version=$cargo" "the asset name is built from it"
+    block_line "$rpm_block" "the RPM block" "$rpm_line" "the Fedora block derives its RPM from the running release"
+    block_line "$rpm_block" "the RPM block" "$base_line" "the release the version names"
+    block_line "$rpm_block" "the RPM block" 'curl --proto '"'"'=https'"'"' --tlsv1.2 -fsSL -o "$workdir/$rpm" "$base/$rpm"' "the package download"
+    block_line "$rpm_block" "the RPM block" '(cd "$workdir" && sha256sum -c "$rpm.sha256") &&' "install only after the checksum passes"
+    block_line "$rpm_block" "the RPM block" 'sudo dnf install "$workdir/$rpm"' "installs the file just checked"
+    block_line "$deb_block" "the .deb block" "version=$cargo" "the asset name is built from it"
+    block_line "$deb_block" "the .deb block" "$deb_line" "the Ubuntu block derives its .deb from the running release"
+    block_line "$deb_block" "the .deb block" "$base_line" "the release the version names"
+    block_line "$deb_block" "the .deb block" 'curl --proto '"'"'=https'"'"' --tlsv1.2 -fsSL -o "$workdir/$deb" "$base/$deb"' "the package download"
+    block_line "$deb_block" "the .deb block" '(cd "$workdir" && sha256sum -c "$deb.sha256") &&' "install only after the checksum passes"
+    block_line "$deb_block" "the .deb block" 'sudo apt install "$workdir/$deb"' "installs the file just checked"
+    block_line "$tarball_block" "the tarball block" '(cd "$workdir" && sha256sum -c "$archive.sha256") &&' "extract only after the checksum passes"
+    block_line "$tarball_block" "the tarball block" 'tar -xzf "$workdir/$archive" -C "$workdir" &&' "install only what extracted"
+}
+# A clean Fedora or Ubuntu has no GitHub CLI, so an uncommented `gh`
+# line in a block is `command not found` for every reader.
+gh_lines="$(count_lines "$README" '^gh ')"
+if [ "$gh_lines" -ne 0 ]; then
+    fail "README.md: $gh_lines uncommented 'gh ...' lines in an install block (a clean machine has no gh; leave it commented for the reader who does)"
 fi
 # Every supported release has its package now, so nothing is promised
-# for a later one.
-forbid_text "$README" 'arrives with the next release' \
-    "every tier-1 release has its own asset"
-forbid_text "$README" "no \`.deb\` yet" \
-    "the Ubuntu install path is the .deb"
+# for a later one, also not across a line break.
+readme_joined="$(tr -s ' \n\t' '   ' <"$README")"
+for promise in 'arrives with the next release' "no \`.deb\` yet"; do
+    if printf '%s\n' "$readme_joined" | grep -qF -- "$promise"; then
+        fail "README.md: still says '$promise' (every tier-1 release has its own asset; the Ubuntu install path is the .deb)"
+    fi
+done
 # The .deb exists now, so the runbook describes it in the present tense
 # and names no story it is waiting for: the version table's "(Story
 # 5.5)", the jobs paragraph's "arrives with Story 5.5" and the toolchain
@@ -324,20 +409,53 @@ require_text "$README" "$exec_line" \
 # no real machine and a bar pinned to a missing output is never drawn.
 packaged_libexec="${exec_line##* }"
 packaged_libexec="${packaged_libexec%/*}"
-require_text "$README" "\"exec\": \"$packaged_libexec/buoy-status-bar 0\"" \
-    "the status-bar example must run the packaged binary"
+bar_block="$(fenced_block "$README" '## Status bar' 1)"
+bar_exec="$(printf '%s\n' "$bar_block" | grep -F '"exec":' | sed 's/^[[:space:]]*//' || true)"
+if [ "$bar_exec" != "\"exec\": \"$packaged_libexec/buoy-status-bar 0\"," ]; then
+    fail "README.md: the Status bar example's exec lines are '$bar_exec', not the one packaged binary '$packaged_libexec/buoy-status-bar 0'"
+fi
+if printf '%s\n' "$bar_block" | grep -qF '"output":'; then
+    fail "README.md: the Status bar example pins an \"output\" (a connector name that matches no clean machine leaves the bar undrawn)"
+fi
+# shellcheck disable=SC2088 # the literal text a reader would copy, not a path here
+forbid_text "$README" '"exec": "~/.local/lib/buoy-wm/buoy-status-bar' \
+    "a bar example that runs the tarball's binary under the packaged session"
 # Fedora's waybar is not pulled by the RPM, and "Running it" enables its
 # unit, which does not exist until it is installed.
-require_text "$README" 'sudo dnf install waybar' \
-    "the RPM block installs the bar the packaged session enables"
+block_line "$rpm_block" "the RPM block" 'sudo dnf install waybar' \
+    "installs the bar the packaged session enables"
 # The packaged session's PATH is the user manager's (/usr/local/bin:/usr/bin
 # on Fedora): no shell profile runs, so ~/.local/bin and ~/.cargo/bin are
-# not on it and a zellij there is never found.
+# not on it and a zellij there is never found. The binary is checked
+# against upstream's checksum and installed by `install`, owned by root:
+# a `sudo tar` into the PATH keeps the archive's owner, uid 1001.
 # shellcheck disable=SC2088 # the literal text a reader would copy, not a path here
 forbid_text "$README" '~/.local/bin/zellij' \
     "the packaged session cannot find a zellij there"
-require_text "$README" 'sudo tar -xz -C /usr/local/bin zellij' \
-    "zellij goes where the packaged session's PATH finds it"
+forbid_text "$README" 'sudo tar' \
+    "tar run as root keeps the archive's owner"
+zellij_block="$(fenced_block "$README" '## Requirements' 1)"
+# shellcheck disable=SC2016 # literal shell the reader runs, not expanded here
+{
+    block_line "$zellij_block" "the zellij block" 'zellij_asset="zellij-x86_64-unknown-linux-musl"' "the asset the session runs"
+    block_line "$zellij_block" "the zellij block" '(cd "$zdir" && awk '"'"'{ print $1 "  zellij" }'"'"' "$zellij_asset.sha256sum" | sha256sum -c) &&' "install only after upstream's checksum passes"
+    block_line "$zellij_block" "the zellij block" 'sudo install -m 755 "$zdir/zellij" /usr/local/bin/zellij' "zellij goes where the packaged session's PATH finds it, owned by root"
+}
+# The pin is one bare version, and the runbook moves it to upstream's
+# current release before each tag, so the tier-1 check verifies the
+# zellij the README names and nothing else notices a newer one.
+zellij_pins="$(printf '%s\n' "$zellij_block" | grep -cE '^zellij_version=[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+if [ "$zellij_pins" -ne 1 ]; then
+    fail "README.md: the zellij block has $zellij_pins 'zellij_version=X.Y.Z' lines, not one (the asset URL and the runbook's bump step read it)"
+fi
+require_text "$PACKAGING" "\`zellij_version\`" \
+    "the runbook bumps the README's zellij pin before each tier-1 check"
+# The Ubuntu flow writes the config, so it carries the step that clears
+# the trust warning a new file raises; the trust-check section saying it
+# is not enough.
+if ! section_text "$README" '### Ubuntu 26.04 and 26.10: river from a PPA, then the .deb' | grep -qF -- "and \`chmod 600\` it"; then
+    fail "README.md: the Ubuntu install section no longer says to 'chmod 600' the config it has the reader write"
+fi
 # OpenSSL's vendored build in `cargo install zellij` runs perl's Configure,
 # which needs core modules a clean Fedora does not have.
 require_text "$README" 'sudo dnf install cargo perl-core' \

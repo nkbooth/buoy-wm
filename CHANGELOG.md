@@ -4,6 +4,24 @@ Notable changes per release. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semantic](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The README's zellij step pins the release the clean machines ran
+  (0.46.0), checks the binary against upstream's published checksum and
+  installs it owned by root. The one-line `sudo tar` it replaces left
+  `/usr/local/bin/zellij` owned by the archive's uid, 1001, which on a
+  desktop with a second account is that account's.
+- Each install block in the README installs only once its checksum has
+  passed; pasted, the blocks went on to install whatever a failed or
+  tampered download left. The optional `gh attestation verify` lines are
+  commented out, since a clean machine has no GitHub CLI.
+- Smaller README corrections: atomic hosts get the `rpm-ostree` line for
+  waybar too, the zellij rows name `cargo install --locked` and where its
+  binary goes, Ubuntu's waybar ships the same unit as Fedora's, and apt's
+  harmless `_apt` notice on a local `.deb` is explained.
+
 ## [1.0.0-rc.3]
 
 Third release candidate: a package for every supported Fedora and Ubuntu
@@ -44,6 +62,24 @@ release, each verified on a clean machine by following the README.
   tarball in Ubuntu 26.04 with a pinned Rust 1.99.1 (glibc 2.43 promised,
   was 2.35), and one RPM per supported Fedora release built with that
   release's own toolchain, so Fedora 45 gets its own `fc45` RPM.
+
+### Fixed
+
+What a clean machine of each supported release tripped on while following
+the README verbatim:
+
+- zellij goes in `/usr/local/bin`. The packaged session runs no shell
+  profile, so its `PATH` is the systemd user manager's and a zellij in
+  `~/.local/bin` or `~/.cargo/bin` was never found. `cargo install zellij`
+  on Fedora needs `cargo` and `perl-core` first.
+- The RPM block installs waybar, whose unit "Running it" enables; the
+  status-bar example runs the packaged `/usr/libexec/buoy-wm/buoy-status-bar`
+  as one bar on every monitor, where the old one named a tarball path and
+  two connector names no clean machine has.
+- A config file created on Fedora or Ubuntu is `664`, which the trust check
+  reports at every login, so the steps that create it now `chmod 600` it.
+- A clean session runs no notification daemon, so the warnings buoy raises
+  are in the journal only; the README says so and names the command.
 
 ## [1.0.0-rc.2]
 
@@ -231,6 +267,7 @@ changed.
 - Release candidates, tagged `vX.Y.Z-rc.N` and published as pre-releases
   (`1.0.0~rc.1` in the RPM).
 
+[Unreleased]: https://github.com/nkbooth/buoy-wm/compare/v1.0.0-rc.3...HEAD
 [1.0.0-rc.3]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.1

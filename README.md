@@ -40,7 +40,7 @@ and then left alone.
 | **foot** | default terminal — swappable, see [Configuration](#configuration) |
 | **fuzzel** | drives the tag pickers and the hotkey cheat-sheet — fixed, see [Programs](#programs) |
 | **zellij** | the *default* multiplexer in each tag's pinned terminal, not a requirement — see below |
-| **waybar** | *optional* — renders the current-tag indicator. Fedora's package ships `waybar.service`, which is how to start it under the packaged session, see [Running it](#running-it) |
+| **waybar** | *optional* — renders the current-tag indicator. Fedora's and Ubuntu's packages ship `waybar.service`, which is how to start it under the packaged session, see [Running it](#running-it) |
 | **xdg-desktop-portal-wlr**, **xdg-desktop-portal-gtk** | *optional* — the packaged session sends ScreenCast and Screenshot to wlr and everything else to gtk; without them screen sharing is silently absent. The RPM recommends both |
 | **systemd** (user manager), **dbus-update-activation-environment** (`dbus-tools`) | what the packaged session's supervisor calls on every login; present on every Fedora and Ubuntu, listed so this table is the whole set |
 
@@ -48,12 +48,28 @@ and then left alone.
 runs it inside each tag's pinned terminal, and the WM never calls it
 otherwise. **Fedora 44 and 45 do not package it**, so the RPM's
 `Recommends: zellij` is ignored by dnf. Put the upstream release asset's
-binary in `/usr/local/bin`:
+binary in `/usr/local/bin`, checked against upstream's published checksum
+first; the checksum names the binary, not the archive, so it is checked
+after extracting:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/zellij-org/zellij/releases/latest/download/zellij-x86_64-unknown-linux-musl.tar.gz | sudo tar -xz -C /usr/local/bin zellij
+zellij_version=0.46.0
+zellij_asset="zellij-x86_64-unknown-linux-musl"
+zellij_base="https://github.com/zellij-org/zellij/releases/download/v${zellij_version}"
+
+zdir="$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fsSL -o "$zdir/$zellij_asset.tar.gz" "$zellij_base/$zellij_asset.tar.gz"
+curl --proto '=https' --tlsv1.2 -fsSL -o "$zdir/$zellij_asset.sha256sum" "$zellij_base/$zellij_asset.sha256sum"
+tar -xzf "$zdir/$zellij_asset.tar.gz" -C "$zdir" zellij &&
+(cd "$zdir" && awk '{ print $1 "  zellij" }' "$zellij_asset.sha256sum" | sha256sum -c) &&
+sudo install -m 755 "$zdir/zellij" /usr/local/bin/zellij
+rm -rf "$zdir"
 ```
 
+0.46.0 is the release the clean-machine checks ran; a newer one installs
+the same way. `sudo install` leaves the binary owned by root; tar run as root
+straight into `/usr/local/bin` would not, because it keeps the archive's
+owner, uid 1001, the second account on a typical desktop.
 `/usr/bin/zellij` works too. `~/.local/bin` and `~/.cargo/bin` do not: the
 packaged session runs no shell profile, so its `PATH` is the systemd user
 manager's (`/usr/local/bin:/usr/bin` on Fedora). `cargo install --locked zellij`
@@ -89,9 +105,9 @@ and every device keeps libinput's own defaults.
 
 | Release | Tier | river 0.4+ | Session multiplexer | Download |
 | --- | --- | --- | --- | --- |
-| Fedora 44 | 1 | 0.5.0 in the archive; the RPM requires it | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | `buoy-wm-${version}-1.fc44.x86_64.rpm` |
+| Fedora 44 | 1 | 0.5.0 in the archive; the RPM requires it | zellij is not packaged: the upstream asset or `cargo install --locked zellij`, either in `/usr/local/bin`, or `tmux` from the archive | `buoy-wm-${version}-1.fc44.x86_64.rpm` |
 | Fedora 45 | 1 | 0.5.0 in the archive; the RPM requires it | as Fedora 44 | `buoy-wm-${version}-1.fc45.x86_64.rpm` |
-| Ubuntu 26.04 LTS | 1 | not in the archive: `ppa:tchavadar/river` (0.4.1) or a source build; screen sharing is monitor-only on 0.4.1 | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | `buoy-wm_${version}-1.ubuntu26.04_amd64.deb` |
+| Ubuntu 26.04 LTS | 1 | not in the archive: `ppa:tchavadar/river` (0.4.1) or a source build; screen sharing is monitor-only on 0.4.1 | zellij is not packaged: the upstream asset or `cargo install --locked zellij`, either in `/usr/local/bin`, or `tmux` from the archive | `buoy-wm_${version}-1.ubuntu26.04_amd64.deb` |
 | Ubuntu 26.10 | 1 | not in the archive: `ppa:tchavadar/river-unstable` (0.4.5) or a source build | as Ubuntu 26.04 | `buoy-wm_${version}-1.ubuntu26.10_amd64.deb` |
 | Ubuntu 24.04 LTS and older | unsupported | no river from any apt source | — | the tarball may run if you build river yourself; nothing here is verified on it |
 
@@ -118,7 +134,7 @@ provides river for it, its xdg-desktop-portal is 1.18 and its rustc 1.75.
 A session multiplexer is a default, not a dependency, and no release above
 packages zellij. Take the upstream release asset
 `zellij-x86_64-unknown-linux-musl.tar.gz` and put the binary in `/usr/local/bin`,
-or `cargo install zellij` and copy it there, as [Requirements](#requirements)
+or `cargo install --locked zellij` and copy it there, as [Requirements](#requirements)
 shows; or use `tmux` from the archive with the
 `pinned_terminal_args` block in [Requirements](#requirements); or set
 `pinned_terminals = false` to run with no multiplexer and no pinned terminal
@@ -139,18 +155,18 @@ base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"
 workdir="$(mktemp -d)"
 curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$rpm" "$base/$rpm"
 curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$rpm.sha256" "$base/$rpm.sha256"
-(cd "$workdir" && sha256sum -c "$rpm.sha256")
+# Optional and stronger, with the GitHub CLI installed: proves this exact
+# file came out of this repo's release workflow. See SECURITY.md.
+# gh attestation verify "$workdir/$rpm" --repo nkbooth/buoy-wm
 
-# Optional and stronger: proves this exact file came out of this repo's
-# release workflow. See SECURITY.md.
-gh attestation verify "$workdir/$rpm" --repo nkbooth/buoy-wm
-
+(cd "$workdir" && sha256sum -c "$rpm.sha256") &&
 sudo dnf install "$workdir/$rpm"
-# Silverblue, Kinoite and other atomic hosts: this line instead, then reboot.
+# Silverblue, Kinoite and other atomic hosts: this line instead of the
+# dnf one, then reboot.
 # sudo rpm-ostree install "$workdir/$rpm"
 rm -rf "$workdir"
 
-# Optional, for the status bar:
+# Optional, for the status bar (atomic hosts: sudo rpm-ostree install waybar):
 sudo dnf install waybar
 ```
 
@@ -205,23 +221,25 @@ base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"
 workdir="$(mktemp -d)"
 curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$deb" "$base/$deb"
 curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$deb.sha256" "$base/$deb.sha256"
-(cd "$workdir" && sha256sum -c "$deb.sha256")
+# Optional and stronger, with the GitHub CLI installed: proves this exact
+# file came out of this repo's release workflow. See SECURITY.md.
+# gh attestation verify "$workdir/$deb" --repo nkbooth/buoy-wm
 
-# Optional and stronger: proves this exact file came out of this repo's
-# release workflow. See SECURITY.md.
-gh attestation verify "$workdir/$deb" --repo nkbooth/buoy-wm
-
+(cd "$workdir" && sha256sum -c "$deb.sha256") &&
 sudo apt install "$workdir/$deb"
 rm -rf "$workdir"
 ```
 
 The `.deb` installs the same files as the RPM, listed in the Fedora section
-above, including the `buoy` login entry.
+above, including the `buoy` login entry. apt prints a `Notice: Download is
+performed unsandboxed as root` line for it, because `mktemp -d` makes a
+directory only you can read and apt's `_apt` user cannot look inside; the
+install is unaffected.
 
 ### From a release
 
-The same `version=` as in the RPM block above; set it even if you skipped
-that block.
+Run the `version=` line of the install block for your release first; the
+archive name is built from it.
 
 ```sh
 archive="buoy-wm-${version}-x86_64-unknown-linux-gnu.tar.gz"
@@ -230,13 +248,12 @@ base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"
 workdir="$(mktemp -d)"
 curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$archive" "$base/$archive"
 curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$archive.sha256" "$base/$archive.sha256"
-(cd "$workdir" && sha256sum -c "$archive.sha256")
+# Optional and stronger, with the GitHub CLI installed: proves this exact
+# archive came out of this repo's release workflow. See SECURITY.md.
+# gh attestation verify "$workdir/$archive" --repo nkbooth/buoy-wm
 
-# Optional and stronger: proves this exact archive came out of this repo's
-# release workflow. See SECURITY.md.
-gh attestation verify "$workdir/$archive" --repo nkbooth/buoy-wm
-
-tar -xzf "$workdir/$archive" -C "$workdir"
+(cd "$workdir" && sha256sum -c "$archive.sha256") &&
+tar -xzf "$workdir/$archive" -C "$workdir" &&
 "$workdir/buoy-wm-${version}-x86_64-unknown-linux-gnu/install.sh"
 rm -rf "$workdir"
 ```
@@ -296,7 +313,7 @@ Screenshot to `xdg-desktop-portal-wlr` and everything else to gtk.
 
 What follows from that: helpers belong in user units bound to
 `graphical-session.target`, not in a script. `systemctl --user enable
-waybar.service` uses Fedora's own unit; its `-c`/`-s` arguments go in a
+waybar.service` uses the distribution's own unit; its `-c`/`-s` arguments go in a
 drop-in (`systemctl --user edit waybar.service`, an `[Service]` section with
 an empty `ExecStart=` and then yours), because the `custom/tag` module
 config is per output. `kanshi.service` likewise. `Super+Esc` ends the WM,

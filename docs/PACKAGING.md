@@ -358,6 +358,12 @@ buys nothing.
    form, above the previous one); the formula's `url`. Run
    `scripts/release-version.sh --check v<x.y.z>` until it is quiet — it names every file that disagrees. `ci.yml` runs
    the tagless form on every push, so a half-bump is red before the tag.
+   Also move the README's `zellij_version` to zellij's current release
+   (`gh release view -R zellij-org/zellij --json tagName`): nothing else
+   notices a newer one, and the tier-1 check in step 4 then verifies the
+   zellij the README names. If upstream changed the asset's layout, the
+   block stops before installing (the `tar` member or the checksum
+   fails); fix the block, not the pin.
 2. `cargo build --workspace --release && cargo test --workspace` — green.
 3. Commit, `git tag -s v<x.y.z> -m 'buoy-wm <x.y.z>'` (signed, as every
    commit in this repository is; `-rc.N` for a release candidate), push
@@ -379,7 +385,7 @@ buys nothing.
    before every final release, the tier-1 check the README defines: on a
    clean machine of each tier-1 release (Fedora 44 and 45 Workstation,
    Ubuntu 26.04 and 26.10 desktop), follow the README's install blocks
-   verbatim, pick **buoy** at GDM, and check the portals
+   verbatim (zellij from the pin step 1 moved), pick **buoy** at GDM, and check the portals
    (`AvailableSourceTypes`), the bar, outputs and tags, logout and a
    second login. For v1.0.0-rc.3 each was a VM made from the release's
    own cloud image plus its desktop package set, driven over ssh and QMP;
