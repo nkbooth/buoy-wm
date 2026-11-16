@@ -363,29 +363,32 @@ buys nothing.
    commit in this repository is; `-rc.N` for a release candidate), push
    the tag. The release notes are the `CHANGELOG.md` entry for the tag,
    so a tag whose entry is missing fails in `build`'s first minute.
-   `release.yml` builds and publishes: watch `build`, the four
-   `packages` legs (the Fedora legs four to five minutes each in the
-   container, 254 s for `fedora:45` on 2026-11-08; the Ubuntu legs about
-   five and a half minutes each with four legs sharing one machine,
-   338–342 s on 2026-11-08: apt 31–41 s, `dpkg-buildpackage` with the
-   tests 281–305 s),
-   the four `verify` legs (replayed 2026-11-08 in fresh containers:
-   `fedora:44` 30 s and `fedora:45` 40 s, `dnf` pulling 274 and 319
-   packages; the Ubuntu legs 7–8 s, `apt` pulling five; each prints the
-   three `--version` lines `scripts/check-installed.sh` read)
-   and `publish` (one attestation with six subjects in the step summary,
-   twelve assets, the pre-release flag on an rc).
+   `release.yml` builds and publishes. The v1.0.0-rc.3 run, the first
+   with every job live, took about six minutes: `build` 96 s; the four
+   `packages` legs side by side, `fedora:45` 146 s, `ubuntu:26.10`
+   154 s, `fedora:44` 174 s, `ubuntu:26.04` 186 s; the four `verify`
+   legs 19 s on each Ubuntu (`apt` pulling five packages), 34 s on
+   `fedora:44` and 46 s on `fedora:45`, each printing the three
+   `--version` lines `scripts/check-installed.sh` reads; and `publish`
+   30 s (one attestation with six subjects in the step summary, twelve
+   assets, the pre-release flag on an rc).
 4. Verify. Download each RPM, each `.deb` and the tarball;
    `sha256sum -c` and `gh attestation verify` each. The `verify` legs
    already installed every package in a clean container of its release
-   and ran its binaries — `publish` would not have run otherwise. Then
-   on a real
-   Fedora host pick **buoy** at the display manager and check the portal
-   (ScreenCast, Screenshot), the bar and logout. Extract the tarball on a
-   clean machine, run `install.sh` and start a nested river before trusting
-   it. This step is not optional: a `buoy-wm` binary that fails to start
-   means a black screen and a bounce back to the display manager, with no
-   shell to recover from.
+   and ran its binaries — `publish` would not have run otherwise. Then,
+   before every final release, the tier-1 check the README defines: on a
+   clean machine of each tier-1 release (Fedora 44 and 45 Workstation,
+   Ubuntu 26.04 and 26.10 desktop), follow the README's install blocks
+   verbatim, pick **buoy** at GDM, and check the portals
+   (`AvailableSourceTypes`), the bar, outputs and tags, logout and a
+   second login. For v1.0.0-rc.3 each was a VM made from the release's
+   own cloud image plus its desktop package set, driven over ssh and QMP;
+   that recipe is kept with the release plan (Story 5.7's harness) for
+   the next final release. Extract the tarball on a clean machine, run
+   `install.sh` and start a nested river before trusting it. This step
+   is not optional: a `buoy-wm` binary that fails to start means a black
+   screen and a bounce back to the display manager, with no shell to
+   recover from.
 5. Mirrors, after the tag (Story 6.5): `brew bump-formula-pr` against the
    tap, or edit `url`/`sha256` by hand; COPR from `Source0`'s URL plus the
    release's vendor tarball; once the crates are renamed, `cargo publish`
