@@ -1,3 +1,13 @@
+buoy-wm (1.0.0~rc.3-1) unstable; urgency=medium
+
+  * Install steps for Ubuntu 26.04 and 26.10 now use this .deb, and each
+    supported release was verified on a clean machine from the README.
+  * --version on the three binaries; every release installs the package
+    in a clean container and runs it before publishing.
+  * Minimum Rust lowered to 1.93, Ubuntu 26.04's rustc.
+
+ -- Nick Booth <n1cck@onlyhams.radio>  Sun, 15 Nov 2026 19:05:20 -0500
+
 buoy-wm (1.0.0~rc.2-1) unstable; urgency=medium
 
   * The release assets now include a .deb for each supported Ubuntu

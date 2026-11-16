@@ -80,9 +80,9 @@ and every device keeps libinput's own defaults.
 | Release | Tier | river 0.4+ | Session multiplexer | Download |
 | --- | --- | --- | --- | --- |
 | Fedora 44 | 1 | 0.5.0 in the archive; the RPM requires it | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | `buoy-wm-${version}-1.fc44.x86_64.rpm` |
-| Fedora 45 | 1 | 0.5.0 in the archive; the RPM requires it | as Fedora 44 | the same `fc44` RPM, which installs on 45; an `fc45` build arrives with the next release |
-| Ubuntu 26.04 LTS | 1 | not in the archive: `ppa:tchavadar/river` (0.4.1) or a source build; screen sharing is monitor-only on 0.4.1 | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | the tarball; a `.deb` arrives with the next release |
-| Ubuntu 26.10 | 1 | not in the archive: `ppa:tchavadar/river-unstable` (0.4.5) or a source build | as Ubuntu 26.04 | the tarball; a `.deb` arrives with the next release |
+| Fedora 45 | 1 | 0.5.0 in the archive; the RPM requires it | as Fedora 44 | `buoy-wm-${version}-1.fc45.x86_64.rpm` |
+| Ubuntu 26.04 LTS | 1 | not in the archive: `ppa:tchavadar/river` (0.4.1) or a source build; screen sharing is monitor-only on 0.4.1 | zellij is not packaged: the upstream asset, `cargo install zellij`, or `tmux` from the archive | `buoy-wm_${version}-1.ubuntu26.04_amd64.deb` |
+| Ubuntu 26.10 | 1 | not in the archive: `ppa:tchavadar/river-unstable` (0.4.5) or a source build | as Ubuntu 26.04 | `buoy-wm_${version}-1.ubuntu26.10_amd64.deb` |
 | Ubuntu 24.04 LTS and older | unsupported | no river from any apt source | — | the tarball may run if you build river yourself; nothing here is verified on it |
 
 **Tier 1** means the release is session-verified on a clean machine before
@@ -91,10 +91,8 @@ manager, get portals, bar and outputs, log out cleanly. **Tier 2** would mean
 the package builds, installs and passes its tests in CI with no session
 verified; the tier exists so that adding a release is a decision against a
 written rule, and it is empty today. A supported release leaves the table
-when it leaves standard support. The Ubuntu rows reach the tier-1 state
-with the next release's `.deb`; until then their path is the tarball plus
-the from-source session, as [Install](#install) says. Every release asset
-is x86_64; other architectures build from source.
+when it leaves standard support. Every release asset is x86_64; other
+architectures build from source.
 
 Ubuntu ships no `river` in any release. The two PPAs above are one person's
 unofficial archives — Launchpad's own banner calls them "unsupported
@@ -119,13 +117,12 @@ at all.
 
 ### Fedora 44 and 45: the RPM
 
-The `fc44` file is also the one to install on Fedora 45 until an `fc45`
-asset exists: it installs there against the archive's river 0.5.0
-(verified in a `fedora:45` container).
+Each Fedora release has its own RPM, built with that release's toolchain;
+the `rpm=` line picks the one for the release you are running.
 
 ```sh
-version=1.0.0-rc.2
-rpm="buoy-wm-${version}-1.fc44.x86_64.rpm"
+version=1.0.0-rc.3
+rpm="buoy-wm-${version}-1.fc$(rpm -E %fedora).x86_64.rpm"
 base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"
 
 workdir="$(mktemp -d)"
@@ -155,12 +152,12 @@ a `/usr/bin/buoy-wm` symlink, the login entry
 `/usr/lib/systemd/user/buoy-session.target`, the portal routing
 `/usr/share/xdg-desktop-portal/buoy-portals.conf` and
 `/usr/share/buoy-wm/config.example.toml`. `rpm -qp` reports the version as
-`1.0.0~rc.2` while the file is named with the tag's hyphen: rpm cannot
+`1.0.0~rc.3` while the file is named with the tag's hyphen: rpm cannot
 carry a hyphen in a version and GitHub rewrites `~` in asset names. The same
-release carries `buoy-wm-1.0.0-rc.2-vendor.tar.gz`, the vendored crates for
+release carries `buoy-wm-1.0.0-rc.3-vendor.tar.gz`, the vendored crates for
 rebuilding the RPM offline (`docs/PACKAGING.md`).
 
-### Ubuntu 26.04 and 26.10: river from a PPA, then the tarball
+### Ubuntu 26.04 and 26.10: river from a PPA, then the .deb
 
 Neither release has `river` in its archive, so add the PPA for your release
 first — [Supported platforms](#supported-platforms) says what these PPAs
@@ -183,13 +180,28 @@ sudo apt install waybar
 zellij as [Supported platforms](#supported-platforms) says and leave the
 default alone, or put the `tmux` `pinned_terminal_args` block from
 [Requirements](#requirements) in `~/.config/buoy/config.toml`. Then install
-`buoy` itself from the tarball, [From a release](#from-a-release) below,
-running the `version=` line from the RPM block first: the archive name is
-built from it. There is no `.deb` yet, and so no `buoy` login entry on
-Ubuntu: start the session from `~/.config/river/init` as
-[From source, without the RPM](#from-source-without-the-rpm) shows; the
-portal wiring there needs the session files from a checkout, which the
-tarball does not carry. The next release's `.deb` replaces that step.
+`buoy` itself from the `.deb` built for your release:
+
+```sh
+version=1.0.0-rc.3
+deb="buoy-wm_${version}-1.ubuntu$(. /etc/os-release && echo "$VERSION_ID")_amd64.deb"
+base="https://github.com/nkbooth/buoy-wm/releases/download/v${version}"
+
+workdir="$(mktemp -d)"
+curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$deb" "$base/$deb"
+curl --proto '=https' --tlsv1.2 -fsSL -o "$workdir/$deb.sha256" "$base/$deb.sha256"
+(cd "$workdir" && sha256sum -c "$deb.sha256")
+
+# Optional and stronger: proves this exact file came out of this repo's
+# release workflow. See SECURITY.md.
+gh attestation verify "$workdir/$deb" --repo nkbooth/buoy-wm
+
+sudo apt install "$workdir/$deb"
+rm -rf "$workdir"
+```
+
+The `.deb` installs the same files as the RPM, listed in the Fedora section
+above, including the `buoy` login entry.
 
 ### From a release
 

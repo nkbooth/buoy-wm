@@ -4,7 +4,10 @@ Notable changes per release. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semantic](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0-rc.3]
+
+Third release candidate: a package for every supported Fedora and Ubuntu
+release, each verified on a clean machine by following the README.
 
 ### Added
 
@@ -26,8 +29,8 @@ Notable changes per release. Format follows
 
 ### Changed
 
-- The RPM install section covers Fedora 45 as well as 44 (the `fc44` file
-  installs on both until an `fc45` asset exists), and `docs/PACKAGING.md`
+- The RPM install section covers Fedora 45 as well as 44, each with its
+  own RPM, and `docs/PACKAGING.md`
   separates archive inclusion (blocked by RPL 1.5 against the DFSG) from
   release-asset and PPA distribution (not blocked).
 - The README states, from running buoy against Ubuntu's PPA river in
@@ -228,6 +231,6 @@ changed.
 - Release candidates, tagged `vX.Y.Z-rc.N` and published as pre-releases
   (`1.0.0~rc.1` in the RPM).
 
-[Unreleased]: https://github.com/nkbooth/buoy-wm/compare/v1.0.0-rc.2...HEAD
+[1.0.0-rc.3]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/nkbooth/buoy-wm/releases/tag/v1.0.0-rc.1

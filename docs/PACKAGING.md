@@ -44,8 +44,8 @@ whose line carries the bare basename, so `sha256sum -c` works wherever
 the pair is downloaded. `<version>` is the tag without its `v`, so the
 packages are named with the hyphen while their headers say `~`: GitHub
 rewrites `~` in asset names, and `rpm -qp` on an RPM reports
-`1.0.0~rc.2-1.fc44`, `dpkg-deb -f <file> Version` on a `.deb`
-`1.0.0~rc.2-1`. The build-provenance attestation names the six archives
+`1.0.0~rc.3-1.fc44`, `dpkg-deb -f <file> Version` on a `.deb`
+`1.0.0~rc.3-1`. The build-provenance attestation names the six archives
 and packages as subjects, and
 `gh attestation verify <file> --repo nkbooth/buoy-wm` works for each.
 
@@ -186,7 +186,7 @@ to get it.
 **Offline rebuild.** The spec's `%build` runs `cargo --offline`, so the
 crates arrive as `Source1`, the vendor tarball, named exactly
 `%{name}-%{upstream_version}-vendor.tar.gz` —
-`buoy-wm-1.0.0-rc.2-vendor.tar.gz` for rc.2, the tag's hyphen and not the
+`buoy-wm-1.0.0-rc.3-vendor.tar.gz` for rc.3, the tag's hyphen and not the
 spec's `Version:`. To rebuild:
 
 1. Download the release's vendor tarball, or make one from the tag with

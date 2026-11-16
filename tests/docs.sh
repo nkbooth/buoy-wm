@@ -103,20 +103,22 @@ count_lines() {
 
 # The README's pinned version is the one it ships with: the file travels
 # in the tarball and the RPM, so it must name the release Cargo.toml
-# builds. Exactly one line, so both install blocks share it. The `|| true`
-# keeps an absent line on the report: under `set -e` a failed grep in the
-# substitution would otherwise end the run before the message is written.
+# builds. The RPM and .deb blocks each open with their own line, since a
+# reader copies one block, so every 'version=' line must be that version.
+# The `|| true` keeps an absent line on the report: under `set -e` a failed
+# grep in the substitution would otherwise end the run before the message
+# is written.
 cargo="$(grep -m1 '^version = ' "$CARGO" | cut -d'"' -f2 || true)"
 if [ -z "$cargo" ]; then
     fail "Cargo.toml: no 'version = \"…\"' line to derive the README version from"
 fi
 version_lines="$(count_lines "$README" '^version=')"
-if [ "$version_lines" -ne 1 ]; then
-    fail "README.md: expected exactly one 'version=' line, found $version_lines"
-fi
 # Whole-line match: a substring check would accept rc.10 against rc.1.
-if ! grep -qxF -- "version=$cargo" "$README"; then
-    fail "README.md: the 'version=' line is not 'version=$cargo' (the README's pinned version must be Cargo.toml's)"
+cargo_version_lines="$(grep -cxF -- "version=$cargo" "$README" || true)"
+if [ "$version_lines" -eq 0 ]; then
+    fail "README.md: no 'version=' line (the install blocks build the asset name from it)"
+elif [ "$cargo_version_lines" -ne "$version_lines" ]; then
+    fail "README.md: $((version_lines - cargo_version_lines)) of $version_lines 'version=' lines are not 'version=$cargo' (the README's pinned version must be Cargo.toml's)"
 fi
 
 # The toolchain floor is a contract, not prose: the number a packager
@@ -217,13 +219,6 @@ require_either "$README" "$vendor_literal" "$vendor_macro" \
     "the vendor tarball is a release asset"
 require_text "$PACKAGING" "$vendor_literal" \
     "the rebuild recipe must name the literal file a packager downloads"
-# A fixed string on purpose: the README's install block pins a release
-# that already exists (rc.2), whose only RPM is the fc44 one, so it can
-# name every RPM release.yml now builds only once the next release
-# makes them exist; Story 5.7's rc.3 bump turns this into a derived
-# needle like PACKAGING's below.
-require_text "$README" '-1.fc44.x86_64.rpm' \
-    "the RPM install block must name the asset"
 
 # PACKAGING.md describes what release.yml builds, so its facts are read
 # from the workflow: one RPM per Fedora target of the packages matrix,
@@ -257,6 +252,35 @@ for ubuntu in $ubuntu_releases; do
     require_text "$PACKAGING" "-1.ubuntu${ubuntu}_amd64.deb" \
         "the release model must name every .deb asset release.yml builds"
 done
+# The README's platforms table names each release's own asset, read from
+# the same matrix, and its install blocks derive the file name from the
+# running system rather than naming one release, so a reader on any
+# supported release downloads the package built for it. Whole lines,
+# because each is the line a reader copies.
+for fedora in $fedora_releases; do
+    require_text "$README" "-1.fc$fedora.x86_64.rpm" \
+        "the platforms table must name every RPM asset release.yml builds"
+done
+for ubuntu in $ubuntu_releases; do
+    require_text "$README" "-1.ubuntu${ubuntu}_amd64.deb" \
+        "the platforms table must name every .deb asset release.yml builds"
+done
+# shellcheck disable=SC2016 # literal shell the reader runs, not expanded here
+rpm_line='rpm="buoy-wm-${version}-1.fc$(rpm -E %fedora).x86_64.rpm"'
+# shellcheck disable=SC2016 # literal shell the reader runs, not expanded here
+deb_line='deb="buoy-wm_${version}-1.ubuntu$(. /etc/os-release && echo "$VERSION_ID")_amd64.deb"'
+if ! grep -qxF -- "$rpm_line" "$README"; then
+    fail "README.md: no whole line '$rpm_line' (the Fedora block derives its RPM from the running release)"
+fi
+if ! grep -qxF -- "$deb_line" "$README"; then
+    fail "README.md: no whole line '$deb_line' (the Ubuntu block derives its .deb from the running release)"
+fi
+# Every supported release has its package now, so nothing is promised
+# for a later one.
+forbid_text "$README" 'arrives with the next release' \
+    "every tier-1 release has its own asset"
+forbid_text "$README" "no \`.deb\` yet" \
+    "the Ubuntu install path is the .deb"
 # The .deb exists now, so the runbook describes it in the present tense
 # and names no story it is waiting for: the version table's "(Story
 # 5.5)", the jobs paragraph's "arrives with Story 5.5" and the toolchain

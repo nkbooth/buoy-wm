@@ -23,10 +23,10 @@
 # keeps its hyphen; rpm Version cannot carry one (ADR-012: 1.0.0-rc.1 is
 # packaged as 1.0.0~rc.1, which sorts before 1.0.0), so Source0 and
 # %%autosetup use the upstream form and Version the tilde form.
-%global upstream_version 1.0.0-rc.2
+%global upstream_version 1.0.0-rc.3
 
 Name:           buoy-wm
-Version:        1.0.0~rc.2
+Version:        1.0.0~rc.3
 Release:        1%{?dist}
 Summary:        Keyboard-driven window manager for the river Wayland compositor
 
@@ -150,6 +150,14 @@ cargo test --workspace --release --offline --locked
 %{_datadir}/%{name}/config.example.toml
 
 %changelog
+* Sun Nov 15 2026 Nick Booth <n1cck@onlyhams.radio> - 1.0.0~rc.3-1
+- Build one RPM per supported Fedora release with its own toolchain, so
+  Fedora 45 gets an fc45 package
+- Lower the minimum Rust to 1.93 so every supported release can rebuild
+  the package with its own rustc
+- Add --version to the three binaries; the release installs each package
+  in a clean container and runs it before publishing
+
 * Sat Nov 07 2026 Nick Booth <n1cck@onlyhams.radio> - 1.0.0~rc.2-1
 - Stop graphical-session.target on logout: the portal's Requisite= pins it,
   so the portals, waybar and kanshi outlived the session whenever the user
