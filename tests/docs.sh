@@ -101,24 +101,6 @@ count_lines() {
     grep -cE -- "$regex" "$file" || true
 }
 
-# fenced_block <file> <heading> <n>: the body of the n-th fenced code
-# block under the exact heading line, up to the next heading outside a
-# fence (a `# comment` inside a shell block is not one). A reader copies
-# one block, so a line that must be in it is looked for there and not
-# anywhere in the file. Empty when there is no such block.
-fenced_block() {
-    HEADING=$2 awk -v want="$3" '
-        $0 == ENVIRON["HEADING"] { inside = 1; next }
-        !inside { next }
-        !fence && /^#+ / { exit }
-        /^```/ {
-            if (fence) { fence = 0; if (n == want) exit } else { fence = 1; n++ }
-            next
-        }
-        fence && n == want { print }
-    ' "$1"
-}
-
 # section_text <file> <heading>: everything under the exact heading line
 # up to the next heading outside a fence, as one line with whitespace
 # runs squeezed, so a phrase a line break splits is still one phrase.
@@ -450,6 +432,13 @@ if [ "$zellij_pins" -ne 1 ]; then
 fi
 require_text "$PACKAGING" "\`zellij_version\`" \
     "the runbook bumps the README's zellij pin before each tier-1 check"
+# The tier-1 check's recipe is in the tree, so the runbook names where,
+# not a story record outside it.
+# shellcheck disable=SC2016 # the backticks are the Markdown the runbook carries
+require_text "$PACKAGING" '`scripts/clean-vm/`' \
+    "the runbook's tier-1 check names the harness that runs it"
+forbid_text "$PACKAGING" "Story 5.7's harness" \
+    "the harness is committed; a story record is not where it lives"
 # The Ubuntu flow writes the config, so it carries the step that clears
 # the trust warning a new file raises; the trust-check section saying it
 # is not enough.

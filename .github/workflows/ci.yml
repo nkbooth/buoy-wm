@@ -359,6 +359,14 @@ jobs:
       - name: docs agree
         run: tests/docs.sh
 
+      # scripts/clean-vm/ runs by hand once before a final tag and builds
+      # each VM's install script from the README's blocks by heading, so
+      # a README edit could break it silently until that day; Story 5.7's
+      # own review did. This builds every tier-1 script against the real
+      # README on every push.
+      - name: clean-vm harness reads the README
+        run: tests/clean-vm.sh
+
       # The release page's notes are cut from CHANGELOG.md by a script
       # release.yml runs only on a tag; this proves the cut on every push
       # against fixture changelogs and the real one.

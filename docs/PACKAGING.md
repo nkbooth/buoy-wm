@@ -387,10 +387,11 @@ buys nothing.
    Ubuntu 26.04 and 26.10 desktop), follow the README's install blocks
    verbatim (zellij from the pin step 1 moved), pick **buoy** at GDM, and check the portals
    (`AvailableSourceTypes`), the bar, outputs and tags, logout and a
-   second login. For v1.0.0-rc.3 each was a VM made from the release's
-   own cloud image plus its desktop package set, driven over ssh and QMP;
-   that recipe is kept with the release plan (Story 5.7's harness) for
-   the next final release. Extract the tarball on a clean machine, run
+   second login. Each machine is a VM made from the release's own cloud
+   image plus its desktop package set, driven over ssh and QMP by
+   `scripts/clean-vm/` (its README.md is the sequence): candidates built
+   from the commit to tag before the tag, the published assets after it,
+   `summary.py` passing every check on every VM. Extract the tarball on a clean machine, run
    `install.sh` and start a nested river before trusting it. This step
    is not optional: a `buoy-wm` binary that fails to start means a black
    screen and a bounce back to the display manager, with no shell to

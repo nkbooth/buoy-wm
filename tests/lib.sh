@@ -158,6 +158,24 @@ matrix_differences() {
     done <"$2"
 }
 
+# fenced_block <file> <heading> <n>: the body of the n-th fenced code
+# block under the exact heading line, up to the next heading outside a
+# fence (a `# comment` inside a shell block is not one). A reader copies
+# one block, so a line that must be in it is looked for there and not
+# anywhere in the file. Empty when there is no such block.
+fenced_block() {
+    HEADING=$2 awk -v want="$3" '
+        $0 == ENVIRON["HEADING"] { inside = 1; next }
+        !inside { next }
+        !fence && /^#+ / { exit }
+        /^```/ {
+            if (fence) { fence = 0; if (n == want) exit } else { fence = 1; n++ }
+            next
+        }
+        fence && n == want { print }
+    ' "$1"
+}
+
 # count_lines_matching <file> <regex>: how many whole lines match.
 count_lines_matching() {
     grep -cxE -- "$2" "$1" || true

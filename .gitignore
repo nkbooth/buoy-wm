@@ -46,5 +46,8 @@
 # otherwise offer tens of megabytes of third-party source to `git add`.
 /vendor/
 
+# Bytecode from importing scripts/clean-vm/vms.py.
+__pycache__/
+
 # Audit reports (/audit skill output) — local analysis, not part of the product.
 /audits/
