@@ -66,7 +66,8 @@ gain anything it did not already have as your user.
 `~/.config/buoy/config.toml` is therefore as trusted as your shell profile.
 Do not source one from an untrusted place. That expectation is checked, not
 merely stated: a config file that is group- or world-writable, or owned by
-another user, is loaded but reported. Only writability is checked — `644` is a normal, accepted mode.
+another user, is loaded but reported. Only writability is checked — `644`
+is a normal, accepted mode.
 
 **A malformed config does not stop startup.** `buoy` raises a desktop
 notification naming the file and the problem, logs the same line to the
@@ -75,7 +76,8 @@ availability trade: refusing to start would leave you in a session with no
 terminal from which to fix the file. It does mean a config error can leave
 you on default bindings rather than your own, and a session with no
 notification daemon shows nothing — if bindings are not what you expect,
-`journalctl --user -b --identifier=buoy-wm -p err` has the reason.
+`journalctl --user -b --identifier=buoy-wm -p err` shows the first line of
+the report, and the same query without `-p err` shows all of it.
 
 ## Supply chain
 

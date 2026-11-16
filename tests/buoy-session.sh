@@ -134,6 +134,8 @@ mkdir -p "$tmp/bin" "$tmp/libexec"
 #   fail        every call fails, the "systemd is broken at login" case
 #   slow-start  `start` touches $STUB_LOG.starting and then takes a while,
 #               so a signal can be delivered during the systemd steps
+#   slow-stop   the first `stop` touches $STUB_LOG.stopping and then takes
+#               a while, so a signal can be delivered during the stops
 # An argument containing whitespace is rejected and logged as such: the
 # real tools reject a name with a space in it, so one quoted word standing
 # in for five names must not pass as the same log line.
@@ -155,6 +157,12 @@ case "${STUB_SYSTEMCTL_MODE:-ok}" in
     slow-start)
         if [ "${2:-}" = start ]; then
             touch "$STUB_LOG.starting"
+            sleep 0.5
+        fi
+        ;;
+    slow-stop)
+        if [ "${2:-}" = stop ] && [ "${3:-}" = buoy-session.target ]; then
+            touch "$STUB_LOG.stopping"
             sleep 0.5
         fi
         ;;
@@ -284,13 +292,14 @@ fail() {
 # own pid, which is also what the stub WM logs as its $PPID.
 #
 # SIGNAL, when given, is sent once the stub WM is ready (mode `signal`),
-# or once the stub's `start` call is in progress (`slow-start`).
+# once the stub's `start` call is in progress (`slow-start`), or once its
+# first `stop` is (`slow-stop`).
 run_case() {
     local name="$1" mode="$2" systemctl_mode="$3" signal="$4"
     local expected_status="$5" expected_log="$6"
     local status=0 pid tries=0 marker
 
-    rm -f "$STUB_LOG" "$STUB_LOG.ready" "$STUB_LOG.starting" "$STUB_LOG.pid"
+    rm -f "$STUB_LOG" "$STUB_LOG.ready" "$STUB_LOG.starting" "$STUB_LOG.stopping" "$STUB_LOG.pid"
     : > "$STUB_LOG"
 
     STUB_WM_MODE="$mode" STUB_SYSTEMCTL_MODE="$systemctl_mode" \
@@ -301,6 +310,7 @@ run_case() {
     if [ -n "$signal" ]; then
         case "$systemctl_mode" in
             slow-start) marker="$STUB_LOG.starting" ;;
+            slow-stop) marker="$STUB_LOG.stopping" ;;
             *) marker="$STUB_LOG.ready" ;;
         esac
         # The markers are touched only once the thing being signalled is
@@ -368,13 +378,15 @@ run_case TERM-during-start exit0 slow-start TERM 143 "$expected_no_wm"
 run_case systemctl-fails exit3 fail "" 3 "$expected_run"
 
 # A WM that cannot be executed keeps the status the shell gave it before
-# the launch went through systemd-cat, and says why.
+# the launch went through systemd-cat, and says why; a signal during the
+# stops that follow neither repeats them nor turns the 127 into 143.
 chmod 0644 "$tmp/libexec/buoy-wm"
 run_case not-executable exit0 ok "" 127 "$expected_no_wm"
 if ! grep -qxF -- "buoy-session: $tmp/libexec/buoy-wm is not executable" "$tmp/stderr"; then
     fail not-executable "missing stderr line: buoy-session: $tmp/libexec/buoy-wm is not executable"
     cat "$tmp/stderr" >&2
 fi
+run_case not-executable-TERM-during-stop exit0 slow-stop TERM 127 "$expected_no_wm"
 chmod 0755 "$tmp/libexec/buoy-wm"
 
 if [ "$failures" -ne 0 ]; then

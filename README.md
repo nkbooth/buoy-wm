@@ -521,11 +521,16 @@ fine too. Who can *read* the file is not the concern.
 
 Each of these problems, a skipped entry, a rejected file or this warning, is
 logged, and raised as a desktop notification naming the file and the problem
-when a notification daemon (mako, dunst, swaync) runs in the session. A fresh install has none, so read the log:
+when a notification daemon (mako, dunst, swaync) runs in the session. A fresh
+install has none, so read the log:
 
 ```sh
 journalctl --user -b --identifier=buoy-wm -p err
 ```
+
+That shows the first line of each report. A report that runs over several
+lines, such as one listing every skipped entry, carries the error severity on
+its first line only, so drop `-p err` to read it whole.
 
 [Troubleshooting](#troubleshooting) has the rest.
 
@@ -533,7 +538,8 @@ journalctl --user -b --identifier=buoy-wm -p err
 
 **Declaring any `[[keybind]]` replaces the entire built-in set**, so list
 every binding you want. That is what makes a default rebindable *and*
-removable. `[[mousebind]]` is a separate list with the same rule. Binding the
+removable. `[[mousebind]]` is a separate list with the same rule. An empty
+list, or one whose every entry was skipped, keeps the built-ins. Binding the
 same trigger twice is reported, not a silent race: the second binding is
 skipped. Two bindings count as the same only when written the same way, so
 `["super", "shift"]` and `["shift", "super"]`, or `Space` and `space`, are
@@ -580,7 +586,8 @@ pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{sess
 escape hatch if your terminal or `zellij` is broken, or if you just do not
 want one. Tags, the pickers and the status bar work exactly as before; only
 the per-tag terminal and its backdrop go away. Emptying `pinned_terminal_args`
-is not the off switch and is rejected as a mistake, since it would spawn a
+is not the off switch and, unless `pinned_terminals = false` is set too, is
+rejected as a mistake, since it would spawn a
 terminal carrying no app id that nothing could recognise.
 
 Set `pinned_terminal_args` alongside `terminal` if your terminal spells the app-id flag
@@ -634,15 +641,17 @@ rejects is named in the log.
 
 ## Troubleshooting
 
-Start with the journal. This prints every failure the WM and the pickers
-reported since boot:
+Start with the journal. This prints the first line of every failure the WM
+and the pickers reported since boot:
 
 ```sh
 journalctl --user -b --identifier=buoy-wm -p err
 ```
 
-Drop `-p err` to see everything, replace `-b` with `-b -1` for the previous
-boot, and use `journalctl --user -b _COMM=buoy-session` for the session
+Drop `-p err` to see everything: the rest of a report that runs over
+several lines, and the output of the terminals and applications the WM
+starts, are logged at info. Replace `-b` with `-b -1` for the previous boot,
+and use `journalctl --user -b _COMM=buoy-session` for the session
 supervisor's own lines. On 1.0.0-rc.3 and earlier the WM's lines reach the
 journal under the display manager's name and without a severity, so the
 query above finds nothing there; use
@@ -671,7 +680,8 @@ from the console and log in again.
 
 ### Config rejected, or my bindings are gone
 
-A notification, and the same text in the journal, says either
+A notification, and the same text in the journal (without `-p err` for the
+lines after the first), says either
 `<path> was rejected (<reason>).` followed by
 `Running with built-in default keybinds until it is fixed.`, or
 `<path>: <reason>` followed by

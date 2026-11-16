@@ -38,10 +38,20 @@ for unit in buoy-session.target graphical-session.target xdg-desktop-portal.serv
 done
 echo "== (b) failed units"
 systemctl --user list-units --failed --no-legend
-# The supervisor hands the WM's output to journald as `buoy-wm` (Story
-# 6.2); on rc.3 and earlier this query is empty in the packaged session.
+# The supervisor hands the WM's output to journald as `buoy-wm` with its
+# severities (Story 6.2); on rc.3 and earlier this query is empty in the
+# packaged session. A healthy WM may log nothing, so a request for an
+# output that cannot exist is sent first: the WM refuses it, changes
+# nothing, and logs the refusal as an error, which the query must find.
 echo "== (b) journal identity"
-journalctl --user -b -q --no-pager --identifier=buoy-wm -o cat | head -n 3 | grep . || echo "(none)"
+python3 -c '
+import os, socket
+s = socket.socket(socket.AF_UNIX)
+s.connect(os.path.join(os.environ["XDG_RUNTIME_DIR"], "buoy-wm.sock"))
+s.sendall(b"{\"type\":\"switch-tag\",\"output_id\":4294967295,\"tag_id\":0}\n")
+s.makefile().readline()'
+sleep 1
+journalctl --user -b -q --no-pager --identifier=buoy-wm -p err -o cat | grep -F 'switch-tag from' | tail -n 1 | grep . || echo "(none)"
 echo "== (c) portal backend errors"
 journalctl --user -b --no-pager | grep -E 'Requested backend|does not exist' || echo "(none)"
 echo "== (c) AvailableSourceTypes"

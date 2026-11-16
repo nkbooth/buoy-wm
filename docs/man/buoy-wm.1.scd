@@ -159,6 +159,9 @@ The failures *buoy-wm* and the pickers report are in the journal:
 journalctl --user -b --identifier=buoy-wm -p err
 ```
 
+Only the first line of a report is logged as an error; the lines after
+it, and the output of the terminals and applications *buoy-wm* starts,
+are logged at info.
 Without *-p err* the query shows every line. The supervisor's own lines
 begin *buoy-session:* and are found with *journalctl --user -b
 \_COMM=buoy-session*. On 1.0.0-rc.3 and earlier the window manager's lines

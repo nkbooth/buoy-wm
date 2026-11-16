@@ -21,7 +21,10 @@
 //! variant names come from serde's own "expected one of" list in the
 //! error for a deliberately unknown name, and the built-in bindings are
 //! rendered with the cheat-sheet's label and description functions. A
-//! name the code accepts and the page does not mention is a failure.
+//! name the code accepts and the page does not mention, as a bold term in
+//! the section that documents it, is a failure. serde's lists include the
+//! `#[serde(alias)]` spellings, so an alias added in code is held to the
+//! page the same way.
 
 use super::*;
 
@@ -55,14 +58,35 @@ fn rejection(document: &str) -> String {
     }
 }
 
-fn require_bold_terms(what: &str, names: &[String]) {
-    let missing: Vec<&String> = names
+/// Where a name has to appear for it to count as documented.
+#[derive(Clone, Copy)]
+enum Placement {
+    /// Opening a line: the term of its own definition entry, so prose
+    /// that mentions it (`terminal` is both a key and an action) does
+    /// not stand in for the entry.
+    Term,
+    /// Anywhere in the section, for values listed inline.
+    Inline,
+}
+
+/// Each name must be a bold term inside one of `sections`, placed as
+/// `placement` says.
+fn require_bold_terms(what: &str, names: &[String], sections: &[&str], placement: Placement) {
+    let lines: Vec<&str> = sections
         .iter()
-        .filter(|name| !CONFIG_PAGE.contains(&format!("*{name}*")))
+        .flat_map(|title| page_section(CONFIG_PAGE, title))
         .collect();
+    let documented = |name: &String| {
+        let bold = format!("*{name}*");
+        lines.iter().any(|line| match placement {
+            Placement::Term => line.starts_with(&bold),
+            Placement::Inline => line.contains(&bold),
+        })
+    };
+    let missing: Vec<&String> = names.iter().filter(|name| !documented(name)).collect();
     assert!(
         missing.is_empty(),
-        "buoy-config.5.scd does not name these {what} as bold terms: {missing:?}"
+        "buoy-config.5.scd does not name these {what} as bold terms in {sections:?}: {missing:?}"
     );
 }
 
@@ -99,41 +123,59 @@ fn built_in_rows() -> Vec<(String, String)> {
 
 #[test]
 fn every_config_table_and_field_is_a_bold_term_in_buoy_config_5() {
-    for (what, document) in [
-        ("top-level tables", "bogus = 1"),
-        ("[defaults] keys", "[defaults]\nbogus = 1"),
-        ("[[keybind]] fields", "[[keybind]]\nbogus = 1"),
-        ("[[mousebind]] fields", "[[mousebind]]\nbogus = 1"),
-        ("[[input]] fields", "[[input]]\nbogus = 1"),
+    for (what, document, section) in [
+        ("top-level tables", "bogus = 1", "DESCRIPTION"),
+        ("[defaults] keys", "[defaults]\nbogus = 1", "DEFAULTS"),
+        (
+            "[[keybind]] fields",
+            "[[keybind]]\nbogus = 1",
+            "KEY BINDINGS",
+        ),
+        (
+            "[[mousebind]] fields",
+            "[[mousebind]]\nbogus = 1",
+            "POINTER BINDINGS",
+        ),
+        ("[[input]] fields", "[[input]]\nbogus = 1", "INPUT DEVICES"),
     ] {
         let message = rejection(document);
         assert!(
             message.contains("unknown field `bogus`"),
             "{what}: not an unknown-field rejection: {message}"
         );
-        require_bold_terms(what, &expected_names(&message));
+        require_bold_terms(what, &expected_names(&message), &[section], Placement::Term);
     }
 }
 
 #[test]
 fn every_enum_spelling_is_a_bold_term_in_buoy_config_5() {
-    for (what, document) in [
-        ("actions", "[[keybind]]\nkey = \"a\"\naction = \"bogus\""),
+    // An alias is documented in ALIASES, beside its canonical name's own
+    // section.
+    for (what, document, sections) in [
+        (
+            "actions",
+            "[[keybind]]\nkey = \"a\"\naction = \"bogus\"",
+            &["ACTIONS", "ALIASES"][..],
+        ),
         (
             "modifiers",
             "[[keybind]]\nmod = [\"bogus\"]\nkey = \"a\"\naction = \"close\"",
+            &["KEY BINDINGS", "ALIASES"][..],
         ),
         (
             "buttons",
             "[[mousebind]]\nbutton = \"bogus\"\naction = \"move\"",
+            &["POINTER BINDINGS", "ALIASES"][..],
         ),
         (
             "tap_button_map values",
             "[[input]]\nname = \"x\"\ntap_button_map = \"bogus\"",
+            &["INPUT DEVICES"][..],
         ),
         (
             "click_method values",
             "[[input]]\nname = \"x\"\nclick_method = \"bogus\"",
+            &["INPUT DEVICES"][..],
         ),
     ] {
         let message = rejection(document);
@@ -141,12 +183,12 @@ fn every_enum_spelling_is_a_bold_term_in_buoy_config_5() {
             message.contains("unknown variant `bogus`"),
             "{what}: not an unknown-variant rejection: {message}"
         );
-        require_bold_terms(what, &expected_names(&message));
+        require_bold_terms(what, &expected_names(&message), sections, Placement::Inline);
     }
 }
 
-/// The aliases serde's own list leaves out are documented by hand, so
-/// each one the page names must really parse as the variant it says.
+/// The page says which canonical name each alias stands for, so each
+/// such line must really parse as the variant it names.
 #[test]
 fn every_alias_the_page_documents_parses() {
     let aliases = page_section(CONFIG_PAGE, "ALIASES");

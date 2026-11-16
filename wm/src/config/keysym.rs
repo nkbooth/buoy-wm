@@ -205,10 +205,16 @@ mod tests {
     #[test]
     fn every_named_key_is_a_bold_term_in_buoy_config_5() {
         let page = include_str!("../../../docs/man/buoy-config.5.scd");
+        // Scoped to the section that lists key names, so a key name bold
+        // anywhere else on the page does not count.
+        let (_, rest) = page
+            .split_once("\n# KEY BINDINGS\n")
+            .expect("buoy-config.5.scd has a KEY BINDINGS section");
+        let section = rest.split("\n# ").next().unwrap_or(rest);
         let missing: Vec<&str> = NAMED
             .iter()
             .map(|(name, _)| *name)
-            .filter(|name| !page.contains(&format!("*{name}*")))
+            .filter(|name| !section.contains(&format!("*{name}*")))
             .collect();
         assert!(
             missing.is_empty(),

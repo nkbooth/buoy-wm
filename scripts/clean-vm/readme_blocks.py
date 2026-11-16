@@ -46,7 +46,7 @@ UBUNTU = "### Ubuntu 26.04 and 26.10: river from a PPA, then the .deb"
 # The `# ---- … ----` labels written into a script keep the section names
 # rc.3's run recorded ("Requirements", "Running it"), so a heading rename
 # leaves every generated script byte-identical; only these lookups follow.
-REQUIREMENTS = "### Session multiplexer"
+MULTIPLEXER = "### Session multiplexer"
 STATUS_BAR = "## Status bar"
 TRUST = "### When something in the file is wrong"
 PACKAGED_SESSION = "### The packaged session"
@@ -176,17 +176,17 @@ def multiplexer(script: Script, readme: Readme, vm: str) -> None:
     """The README route to a multiplexer this VM proves (vms.py)."""
     route = lookup(vm).multiplexer
     if route == "asset":
-        (block,) = readme.blocks(REQUIREMENTS, "sh", 1)
+        (block,) = readme.blocks(MULTIPLEXER, "sh", 1)
         script.add("# ---- README (Requirements): the zellij asset into /usr/local/bin ----", block,
                    "# HARNESS", "zellij --version")
     elif route == "cargo":
         script.add("# ---- PROSE (Requirements): cargo install zellij, then copy it into /usr/local/bin ----",
-                   readme.code_span(REQUIREMENTS, r"sudo dnf install cargo perl-core"),
-                   readme.code_span(REQUIREMENTS, r"cargo install --locked zellij"),
-                   readme.code_span(REQUIREMENTS, r"sudo install ~/\.cargo/bin/zellij /usr/local/bin/"),
+                   readme.code_span(MULTIPLEXER, r"sudo dnf install cargo perl-core"),
+                   readme.code_span(MULTIPLEXER, r"cargo install --locked zellij"),
+                   readme.code_span(MULTIPLEXER, r"sudo install ~/\.cargo/bin/zellij /usr/local/bin/"),
                    "# HARNESS", "zellij --version")
     elif route == "tmux":
-        (toml,) = readme.blocks(REQUIREMENTS, "toml", 1)
+        (toml,) = readme.blocks(MULTIPLEXER, "toml", 1)
         script.add("# ---- PROSE (Requirements, Ubuntu install): the tmux [defaults] block, then chmod 600 ----",
                    "# HARNESS", "mkdir -p ~/.config/buoy", script.heredoc("~/.config/buoy/config.toml", toml),
                    "# ---- PROSE (When something in the file is wrong) ----",
@@ -197,7 +197,7 @@ def multiplexer(script: Script, readme: Readme, vm: str) -> None:
 
 
 def status_bar(script: Script, readme: Readme) -> None:
-    """The Status bar config file (its first line names the path), then Running it's enable."""
+    """The Status bar config file (its first line names the path), then First login's enable."""
     (jsonc,) = readme.blocks(STATUS_BAR, "jsonc", 1)
     path = re.match(r"// (\S+)\n", jsonc)
     if not path:

@@ -36,7 +36,6 @@ Notable changes per release. Format follows
   that entry; it rejects the whole file, as any field the parser refuses
   does. They also said an `[[input]]` pattern matching no device was
   reported; it is accepted silently.
-
 - The README's zellij step pins the release the clean machines ran
   (0.46.0), checks the binary against upstream's published checksum and
   installs it owned by root. The one-line `sudo tar` it replaces left

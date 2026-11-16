@@ -111,6 +111,10 @@ if [ -x "$wm_dir/buoy-wm" ]; then
 else
     echo "buoy-session: $wm_dir/buoy-wm is not executable" >&2
     status=127
+    # With no WM to forward to, the trap's before-launch arm would stop the
+    # targets again and exit 143; the stops below are already the end, so a
+    # signal during them is ignored, as it is once the WM has gone.
+    trap : TERM INT HUP
 fi
 
 # A trapped signal returns from `wait` before the WM has gone, so wait

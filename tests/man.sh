@@ -119,7 +119,9 @@ mkdir -p "$tmp/no-scdoc-bin"
 for tool in bash mkdir dirname; do
     ln -s "$(command -v "$tool")" "$tmp/no-scdoc-bin/$tool"
 done
-expect_refusal no-scdoc 'scdoc' PATH="$tmp/no-scdoc-bin"
+# The needle is the script's own words: the fixture's directory name
+# holds "scdoc" too, so any error that prints a path would match that.
+expect_refusal no-scdoc 'scdoc is not installed' PATH="$tmp/no-scdoc-bin"
 
 # scd_section <file> <title>: the lines under `# <title>` up to the next
 # top-level heading.
@@ -153,9 +155,25 @@ while IFS= read -r line; do
     fi
 done <"$tmp/spec-files"
 
+# Every page the build renders is one the RPM ships (and, through the
+# spec's %install, the .deb: tests/deb-package.sh derives its .install
+# from that), so a page added to docs/man/ is red here until it is
+# packaged. The %files line is the man section's directory and the
+# page's name, globbed for brp-compress's suffix.
+for source in "$REPO_ROOT"/docs/man/*.scd; do
+    page="${source##*/}"
+    page="${page%.scd}"
+    want="%{_mandir}/man${page##*.}/$page*"
+    if ! grep -qxF -- "$want" "$tmp/spec-files"; then
+        fail "packaging/rpm/buoy-wm.spec: %files has no '$want' (docs/man/$page.scd is built but not packaged)"
+    fi
+done
+
 # ENVIRONMENT: every variable a crate's non-test source reads by literal
 # name, required as a bold term. A source file is read up to its test
-# module, by convention the last item in the file.
+# module, by convention the last item in the file, written on one line
+# or with the attribute on the line before. Vendored crates are not
+# ours, so a `vendor/` tree (cargo vendor, the package builds) is skipped.
 scd_section "$MAN_WM" ENVIRONMENT >"$tmp/environment"
 if [ ! -s "$tmp/environment" ]; then
     fail "docs/man/buoy-wm.1.scd: no ENVIRONMENT section"
@@ -163,12 +181,13 @@ fi
 : >"$tmp/variables"
 while IFS= read -r -d '' source; do
     awk '
-        /^[[:space:]]*#\[cfg\(test\)\]/ { pending = 1; next }
+        /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*(pub(\([a-z]+\))? )?mod [a-z_]+ \{/ { exit }
+        /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ { pending = 1; next }
         pending && /^[[:space:]]*(pub(\([a-z]+\))? )?mod [a-z_]+ \{/ { exit }
         { pending = 0; print }' "$source" |
         grep -oE 'env::var(_os)?\("[A-Za-z_][A-Za-z0-9_]*"\)' |
         sed -E 's/.*\("(.*)"\)/\1/' >>"$tmp/variables" || true
-done < <(find "$REPO_ROOT" -mindepth 1 \( -name '.*' -o -name target \) -prune -o -path '*/src/*.rs' -type f -print0)
+done < <(find "$REPO_ROOT" -mindepth 1 \( -name '.*' -o -name target -o -name vendor \) -prune -o -path '*/src/*.rs' -type f -print0)
 sort -u "$tmp/variables" -o "$tmp/variables"
 if [ ! -s "$tmp/variables" ]; then
     fail "no env::var(\"…\") reads found in */src (the ENVIRONMENT set is derived from them)"

@@ -57,7 +57,8 @@ def checks(entry: Vm, c: str, lo: str, rl: str) -> dict[str, bool]:
         "b both targets active": bool(re.search(r"buoy-session.target\s+active", c))
         and bool(re.search(r"graphical-session.target\s+active", c)),
         "b no failed units": has("(b) failed units", lambda t: t.strip() == ""),
-        "b WM logs as buoy-wm": has("(b) journal identity", lambda t: t.strip() not in ("", "(none)")),
+        "b WM logs as buoy-wm, errors at err": has(
+            "(b) journal identity", lambda t: "switch-tag from" in t and "rejected" in t),
         "c three portals active": all(re.search(rf"{u}\s+active", c) for u in [
             "xdg-desktop-portal.service", "xdg-desktop-portal-wlr.service", "xdg-desktop-portal-gtk.service"]),
         "c no backend errors": has("(c) portal backend errors", lambda t: "(none)" in t),

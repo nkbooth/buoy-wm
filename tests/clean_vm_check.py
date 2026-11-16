@@ -144,8 +144,8 @@ def main(readme: str, generator: str, rows_file: str) -> int:
     zellij = blocks(lines, "### Session multiplexer", "sh")
     toml = blocks(lines, "### Session multiplexer", "toml")
     jsonc = blocks(lines, "## Status bar", "jsonc")
-    for what, found, count in [("Fedora sh", rpm, 1), ("Ubuntu sh", ubuntu, 2), ("Requirements sh", zellij, 1),
-                               ("Requirements toml", toml, 1), ("Status bar jsonc", jsonc, 1)]:
+    for what, found, count in [("Fedora sh", rpm, 1), ("Ubuntu sh", ubuntu, 2), ("Session multiplexer sh", zellij, 1),
+                               ("Session multiplexer toml", toml, 1), ("Status bar jsonc", jsonc, 1)]:
         if len(found) != count:
             fail(f"README.md: {len(found)} {what} blocks, expected {count}")
     if failures:

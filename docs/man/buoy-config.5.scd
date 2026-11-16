@@ -62,9 +62,9 @@ table may set any subset.
 	["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]
 	```
 
-	Some argument must contain *{app_id}*; this is checked even when
-	*pinned_terminals* is false. An empty array is accepted only together
-	with *pinned_terminals = false*.
+	A non-empty array must have an argument containing *{app_id}*, and
+	this is checked even when *pinned_terminals* is false. An empty array is
+	accepted only together with *pinned_terminals = false*.
 
 *pinned_terminals* (boolean, default true)
 	Whether each tag gets a pinned terminal, started the first time the tag
@@ -285,7 +285,9 @@ applies in full, key bindings included:
   file.
 
 Either way *buoy-wm* still starts. It raises a desktop notification naming
-the file and every problem at once, and logs the same text:
+the file and every problem at once, and logs the same text. The first line
+is logged as an error and the rest at info, so this shows where each report
+begins, and the same query without *-p err* shows it whole:
 
 ```
 journalctl --user -b --identifier=buoy-wm -p err
