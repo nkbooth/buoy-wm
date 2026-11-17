@@ -267,10 +267,14 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
                 // this story's Technical notes); never re-triggers once
                 // any tag exists (AC 2), since `tag_count()` can never
                 // return to zero again once non-zero (ADR-006: no
-                // tag-deletion operation exists). Both `create_tag` and
-                // `switch_tag` are structurally near-impossible to fail
-                // here (a fresh registry, a just-registered output), but
-                // log-and-continue rather than panic either way (NFR2).
+                // tag-deletion operation exists). `switch_tag` cannot fail
+                // here (a fresh tag, a just-registered output), but
+                // `create_tag` can: `default_tag` is checked at config load
+                // only for being empty, so a name `validate_tag_name`
+                // refuses fails here, with the journal line below as the
+                // only trace (docs/ROADMAP.md, "Tag names in the config are
+                // checked only when used"). Log-and-continue rather than
+                // panic either way (NFR2).
                 let bootstrapped_tag_id = if wm_core_guard.tag_count() == 0 {
                     match wm_core_guard.create_tag(state.wm.config.defaults.default_tag.clone()) {
                         Ok(tag_id) => {

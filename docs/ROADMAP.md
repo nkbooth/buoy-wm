@@ -51,3 +51,60 @@ binds) or only real defaults — and if both, how to mark the difference so
 the "exactly the defaults" claim cannot be made again. Whether the
 drop-warning belongs at load or behind a `--check` subcommand a user runs
 deliberately.
+
+## A pinned terminal that exits early is not retried
+
+**The problem.** The first switch to a tag claims that tag's pinned
+terminal and spawns it. If the spawn itself fails, the claim is released
+and the next switch tries again. If the terminal *starts* and then exits —
+the multiplexer is not installed, its arguments are wrong, it crashes, or
+the user quits zellij — the claim stays. The tag then has no backdrop for
+the rest of the session, and nothing says why. The reaper in
+`compositor/child.rs` sees the exit but does not know which tag the child
+belonged to.
+
+**Direction.** Record the tag with the child when the pinned terminal is
+spawned. When the reaper collects a pinned terminal, release that tag's
+claim through `WmCore::release_pinned_terminal_claim` and tell the user
+through `notify_user`, so the next switch retries and the cause is on
+screen. A terminal that exits at once on every switch should be reported
+once, not on every switch.
+
+**Open questions.** Whether a terminal the user quits on purpose should be
+respawned on the next switch (as now after a failed spawn) or left closed
+until the next login.
+
+## Tag names in the config are checked only when used
+
+**The problem.** A tag name from IPC goes through `validate_tag_name`
+before it is created. A tag name from the config does not: `default_tag`
+is checked only for being empty, and the `switch_tag` names in keybinds
+not at all. A name the rules refuse fails when it is first used — at the
+first output for `default_tag`, at the keypress for a `switch_tag` bind —
+and the only trace is a journal line. The config loaded cleanly, so the
+user has no reason to look.
+
+**Direction.** Call `validate_tag_name` from config validation for
+`default_tag` and for every `switch_tag` name, and report a bad one
+through the skipped-entry path that already reports a bad keybind: the
+entry is dropped, the rest of the file applies, and the user is notified
+at load. Story 6.4 changes config loading too, so the two can share a
+review.
+
+## The compositor glue has no unit tests
+
+**The problem.** `compositor/manager.rs`, `compositor/seat.rs` and
+`compositor/dispatch.rs` hold the records that carry live river proxies
+and the code that acts on them. No unit test can build those records, so
+the three files sit outside the coverage floor (CONTRIBUTING.md, "The
+coverage floor"). Their decisions are already pushed into `WmCore` and the
+pure helpers, which are gated, but what is left — the order of requests in
+a manage or render sequence, which proxy a binding press reaches — is
+checked only by using the session.
+
+**Direction.** Split the Window, Output and Seat records into a proxy-free
+half that holds the state and the decisions, and a thin half that holds
+the proxies and sends requests. The proxy-free half can then be tested and
+gated. Do this when a feature next changes `compositor/`, not
+speculatively: the split costs about as much as the decomposition of the
+old `main.rs` did, and it should be paid for by a change that needs it.

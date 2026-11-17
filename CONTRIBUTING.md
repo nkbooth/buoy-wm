@@ -93,6 +93,42 @@ comments for the hidden constraint, the non-obvious invariant, or the
 workaround for specific upstream behaviour. There are a lot of those in this
 codebase already; they are the most valuable thing in it.
 
+### The coverage floor
+
+CI's `check` job fails when line coverage drops below **95%** across the
+workspace minus a short list of files (the `--ignore-filename-regex` of the
+step "cargo llvm-cov (floor below the composition roots)"). A file is on
+that list only when what is left in it is glue a test cannot drive: code
+that needs a live river, a real child process or the process's own exit.
+Everything else is gated, including the parts of `compositor/` that hold
+pure logic beside their proxies.
+
+The exempt files, and why:
+
+- `wm/src/main.rs` and `buoy-tag-picker/src/main.rs`: composition roots.
+  They connect, wire the pieces together and exit; the integration tier
+  runs the binaries instead.
+- `wm/src/compositor/dispatch.rs` and `wm/src/compositor/river.rs`: the
+  `Dispatch` impls and the generated protocol bindings. Only river sends
+  these events.
+- `wm/src/compositor/manager.rs`, `wm/src/compositor/seat.rs` and
+  `wm/src/compositor/libinput.rs`: the records that hold live protocol
+  proxies, and the manage/render sequences that act on them. Their
+  decisions are pushed down into `WmCore` and the pure helpers, which are
+  gated. Splitting these records into proxy-free halves is on the roadmap
+  ("The compositor glue has no unit tests") for when a feature next changes
+  them.
+- `wm/src/compositor/child.rs` and `wm/src/compositor/report.rs`: child
+  reaping and the panic and notification paths. Both hold a little tested
+  code, but the rest needs a real child or a real panic, and gating them
+  takes the workspace below the floor.
+
+When the list was last narrowed (v1.0.0), the gated workspace measured
+95.06%, with `buoy-status-bar/src/main.rs`, `compositor/launch.rs`,
+`compositor/wire.rs` and `compositor/window.rs` newly inside the gate. That
+leaves little headroom: a patch that adds untested lines to one of those
+files is expected to add the test, not to put the file back on the list.
+
 ## Naming and readability
 
 These are conventions the codebase already follows almost everywhere and
@@ -178,7 +214,9 @@ three paragraphs of history to find out.
 audit finding id is a citation attached to a reason — *"handled gracefully
 rather than panicking (NFR2)"* — never the reason itself. Roughly a
 hundred `Story N.N Task N:` prefixes predate this rule and are being left
-alone; do not add more.
+alone; do not add more. An audit finding id (`audit finding D-01`)
+resolves to its row in [`docs/audit-2026-08.md`](docs/audit-2026-08.md),
+which says how that finding was closed; the audit's full plan is private.
 
 **A backticked identifier is a reference.** In `///` this is enforced —
 `[`Foo::bar`]` is checked by CI's `cargo doc`, so a rename cannot leave it

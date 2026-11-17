@@ -44,6 +44,7 @@ readonly EXAMPLE="$REPO_ROOT/docs/config.example.toml"
 readonly ADRS="$REPO_ROOT/docs/adrs.md"
 readonly CONTRIBUTING="$REPO_ROOT/CONTRIBUTING.md"
 readonly RELEASE="$REPO_ROOT/.github/workflows/release.yml"
+readonly CI="$REPO_ROOT/.github/workflows/ci.yml"
 readonly MAN_WM="$REPO_ROOT/docs/man/buoy-wm.1.scd"
 readonly MAN_CONFIG="$REPO_ROOT/docs/man/buoy-config.5.scd"
 
@@ -63,7 +64,7 @@ fail() {
 
 for file in "$README" "$PACKAGING" "$SPEC" "$DESKTOP" \
     "$FORMULA" "$INSTALL" "$CARGO" "$CHANGELOG" "$SECURITY" "$EXAMPLE" \
-    "$ADRS" "$CONTRIBUTING" "$RELEASE" "$MAN_WM" "$MAN_CONFIG"; do
+    "$ADRS" "$CONTRIBUTING" "$RELEASE" "$CI" "$MAN_WM" "$MAN_CONFIG"; do
     if [ ! -r "$file" ]; then
         fail "${file#"$REPO_ROOT/"}: missing or unreadable"
     fi
@@ -696,6 +697,90 @@ forbid_text "$README" 'beside the WM'"'"'s `--identifier=buoy-wm` lines' \
 # reads the WM's stderr in the packaged session.
 forbid_text "$SECURITY" 'check stderr' \
     "the problem is a desktop notification plus a journal line"
+
+# The coverage floor's exempt files are listed twice: as ci.yml's
+# `--ignore-filename-regex` and, with a reason each, as the bullets of
+# CONTRIBUTING.md's "The coverage floor". The regex is the one that runs,
+# so the bullets are held to it both ways.
+
+# floor_regex_paths <regex>: the paths an ignore regex of the form
+# `prefix(a|b)suffix$|…` names, one per line; `!<part>` for a part that
+# does not expand to a plain path, so the caller names it.
+floor_regex_paths() {
+    local regex=$1 part="" depth=0 ch i parts=()
+    for ((i = 0; i < ${#regex}; i++)); do
+        ch=${regex:i:1}
+        case $ch in
+            '(') depth=$((depth + 1)) ;;
+            ')') depth=$((depth - 1)) ;;
+        esac
+        if [ "$ch" = '|' ] && [ "$depth" -eq 0 ]; then
+            parts+=("$part")
+            part=""
+        else
+            part+=$ch
+        fi
+    done
+    parts+=("$part")
+    local prefix group suffix alt alts path
+    for part in "${parts[@]}"; do
+        part=${part%'$'}
+        part=${part//'\.'/.}
+        if [[ $part == *'('*')'* ]]; then
+            prefix=${part%%'('*}
+            group=${part#*'('}
+            suffix=${group#*')'}
+            group=${group%%')'*}
+            IFS='|' read -ra alts <<<"$group"
+        else
+            prefix=$part suffix="" alts=("")
+        fi
+        for alt in "${alts[@]}"; do
+            path=$prefix$alt$suffix
+            if [[ $path =~ ^[A-Za-z0-9_./-]+$ ]]; then
+                printf '%s\n' "$path"
+            else
+                printf '!%s\n' "$part"
+            fi
+        done
+    done
+}
+
+floor_step="$(step_with "$CI" '^[[:space:]]*- name: cargo llvm-cov \(floor below the composition roots\)$')"
+floor_regex="$(printf '%s\n' "$floor_step" | sed -nE "s/.*--ignore-filename-regex '([^']+)'.*/\1/p")"
+if [ -z "$floor_regex" ]; then
+    fail "ci.yml: no '--ignore-filename-regex' in the step 'cargo llvm-cov (floor below the composition roots)'"
+else
+    # The bullet list under the heading, wrapped lines included, up to the
+    # blank line that ends it; only `….rs` paths in it count.
+    # shellcheck disable=SC2016 # literal Markdown backticks around a path
+    floor_bullets="$(awk '
+        $0 == "### The coverage floor" { inside = 1; next }
+        inside && /^#+ / { exit }
+        inside && /^- / { list = 1 }
+        list && /^$/ { exit }
+        list' "$CONTRIBUTING" | grep -oE '`[A-Za-z0-9_./-]+\.rs`' | tr -d '`' | sort -u || true)"
+    if [ -z "$floor_bullets" ]; then
+        fail "CONTRIBUTING.md: no '.rs' paths in the bullet list under '### The coverage floor'"
+    fi
+    floor_exempt="$(floor_regex_paths "$floor_regex")"
+    while IFS= read -r path; do
+        case $path in
+            '!'*) fail "ci.yml: the floor's ignore regex part '${path#!}' does not expand to a plain path" ;;
+            *)
+                if ! grep -qxF -- "$path" <<<"$floor_bullets"; then
+                    fail "CONTRIBUTING.md: '### The coverage floor' does not list '$path', which ci.yml's floor exempts"
+                fi
+                ;;
+        esac
+    done <<<"$floor_exempt"
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        if ! grep -qxF -- "$path" <<<"$floor_exempt"; then
+            fail "CONTRIBUTING.md: '### The coverage floor' lists '$path' as exempt, but ci.yml's floor gates it"
+        fi
+    done <<<"$floor_bullets"
+fi
 
 # install.sh's last line points at the README section that explains how
 # to start a session, now that there are two ways. A fixture build dir

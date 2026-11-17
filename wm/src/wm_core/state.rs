@@ -584,9 +584,10 @@ impl WmCore {
             return Ok(None);
         }
         // The `tag-` prefix is load-bearing security, not cosmetics: tag
-        // names are unvalidated, and this unconditional prefix is the only
-        // thing keeping a tag called `--layout` from reaching zellij's argv
-        // as a flag-shaped token. Pinned by
+        // names pass `validate_tag_name` (audit finding E-01), but that
+        // allows a leading `-`, so this unconditional prefix is still the
+        // only thing keeping a tag called `--layout` from reaching zellij's
+        // argv as a flag-shaped token. Pinned by
         // `pinned_terminal_session_name_can_never_begin_with_a_dash`
         // (audit finding D-03).
         let session_name = format!("tag-{}", tag.name);
@@ -2874,10 +2875,10 @@ mod tests {
         );
     }
 
-    /// Audit finding D-03: tag names are entirely unvalidated, so the
-    /// `tag-` prefix `claim_pinned_terminal_spawn` builds the session name
-    /// with is the only thing preventing a flag-shaped argv token reaching
-    /// `zellij`. It is an incidental property of a `format!` in a
+    /// Audit finding D-03: `validate_tag_name` accepts a name that begins
+    /// with `-`, so the `tag-` prefix `claim_pinned_terminal_spawn` builds
+    /// the session name with is the only thing preventing a flag-shaped
+    /// argv token reaching `zellij`. It is an incidental property of a `format!` in a
     /// bookkeeping function, so it needs a test of its own before someone
     /// reworks how session names are derived.
     #[test]

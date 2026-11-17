@@ -144,14 +144,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // A failed IPC-server bind (e.g. a permissions issue) is logged and
-    // does not abort WM startup: the WM's core job — managing windows —
-    // must not depend on the IPC server. Deliberate degrade-not-crash
-    // choice, consistent with NFR2's priority ordering, and mirrors this
-    // file's existing `log_wm_core_err`-style "log, don't abort"
-    // convention rather than `std::process::exit`, which this file
-    // otherwise reserves for unrecoverable Wayland-protocol-level
-    // failures only.
     // A failed IPC server is not fatal — the WM's core job, managing
     // windows, must not depend on it, and refusing to start is the one
     // outcome `SECURITY.md` rules out for the session leader. But three

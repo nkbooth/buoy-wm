@@ -25,14 +25,16 @@
 //! Code-review follow-up (Story 2.4): `Request::SwitchTag`'s arm claims
 //! that tag's pinned-terminal spawn slot (`WmCore::claim_pinned_terminal_
 //! spawn`, a pure state mutation, fully unit-tested here) but must NOT
-//! itself call `crate::spawn_pinned_terminal` — doing so made
+//! itself spawn the terminal — doing so made
 //! [`handle_request`] launch a real `foot`/`zellij` `Command::spawn()` as
 //! a side effect of `cargo test --workspace`, contradicting this module's
 //! own "zero socket/thread machinery" claim. Instead, [`handle_request`]
 //! returns the pending session name as data (the second element of its
 //! return tuple) for its caller to act on. `server.rs`'s
-//! `handle_connection_inner` is the one real caller and performs the
-//! actual `crate::spawn_pinned_terminal` call, after the response has
+//! `handle_connection_inner` is the one real caller and hands it to the
+//! injected
+//! [`SpawnPinnedTerminal`](crate::ipc::server::SpawnPinnedTerminal) (built
+//! by the binary's `pinned_terminal_spawner`), after the response has
 //! already been written back to the client and the `wm-core` mutex
 //! released — untested I/O glue, the same carve-out class as
 //! `Action::Terminal`, `Action::OpenAssignPicker`, and
@@ -133,9 +135,10 @@ pub struct PendingPinnedSpawn {
 /// `Request::SwitchTag`'s arm additionally claims that tag's pinned-
 /// terminal spawn slot (Story 2.4 Task 2). The claim itself is a pure
 /// `wm-core` state mutation and happens right here, but this function
-/// deliberately does NOT call `crate::spawn_pinned_terminal` itself — the
-/// second tuple element carries the [`PendingPinnedSpawn`] that needs
-/// spawning back to the caller instead, so this function stays free of real process
+/// deliberately does NOT call the injected
+/// [`SpawnPinnedTerminal`](crate::ipc::server::SpawnPinnedTerminal)
+/// itself — the second tuple element carries the [`PendingPinnedSpawn`]
+/// that needs spawning back to the caller instead, so this function stays free of real process
 /// spawns and safe to exercise from unit tests with no side effects beyond
 /// `wm_core`'s own state (see this module's doc comment for the full
 /// rationale). `None` means no spawn is needed: either the request wasn't
@@ -380,8 +383,8 @@ mod tests {
         // about the tag-switch mapping itself, not the pinned-terminal
         // side channel (covered by
         // `switch_tag_success_claims_pinned_terminal_spawn_for_the_target_tag`
-        // below). Note that `handle_request` never calls
-        // `crate::spawn_pinned_terminal` itself, so simply discarding this
+        // below). Note that `handle_request` never calls the injected
+        // `SpawnPinnedTerminal` itself, so simply discarding this
         // value — as this test does — is sufficient to guarantee no real
         // process is spawned.
         let (response, _pending_spawn) = handle_request(
@@ -547,9 +550,10 @@ mod tests {
     /// first-time successful switch, so `handle_request` does return
     /// `Some(_)` as its pending-spawn value here — but since this test, like
     /// every other test in this module, never acts on that value (never
-    /// calls `crate::spawn_pinned_terminal`), no real process is spawned by
-    /// running this sweep, which is exactly the property this code-review
-    /// follow-up fix restores.
+    /// calls the injected
+    /// [`SpawnPinnedTerminal`](crate::ipc::server::SpawnPinnedTerminal)),
+    /// no real process is spawned by running this sweep, which is exactly
+    /// the property this code-review follow-up fix restores.
     #[test]
     fn handle_request_never_panics_regardless_of_which_ids_are_bogus() {
         let mut core = WmCore::new();
@@ -593,17 +597,18 @@ mod tests {
     }
 
     /// Audit finding E-06: `buoy-tag-picker` uses this exact string as
-    /// *control flow* — `buoy-tag-picker/src/main.rs` compares a
+    /// *control flow* — `buoy-tag-picker/src/session.rs` compares a
     /// `create-tag` error response against its own hand-copied
     /// `picker::REJECTION_MESSAGE` to decide whether to reopen the
     /// picker with the rejected name restored, or to print an opaque line
-    /// and give up. The two literals live in crates whose test suites never
-    /// meet, so nothing else notices a reword.
+    /// and give up. The two strings live in different crates, so this test
+    /// compares against the picker's constant itself rather than a third
+    /// copy typed here.
     #[test]
     fn tag_limit_message_matches_the_pickers_hardcoded_copy() {
         assert_eq!(
             describe_wm_core_error(WmCoreError::TagLimitReached),
-            "tag limit reached (64)",
+            buoy_tag_picker::picker::REJECTION_MESSAGE,
             "buoy-tag-picker/src/picker.rs's REJECTION_MESSAGE is a \
              hand-copied duplicate of this string and compares against it by \
              equality as control flow — update it in lockstep, or the tag-cap \

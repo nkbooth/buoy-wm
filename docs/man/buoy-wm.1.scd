@@ -199,7 +199,8 @@ IPC socket.
 	warning sign and *unknown output* when it answers but has no output with
 	that id. It
 	exits 1 when the argument is not one number, or when *XDG_RUNTIME_DIR*
-	is unusable.
+	is unusable. The waybar module needs *"escape": true*, because the text
+	is a tag name and waybar otherwise reads it as Pango markup.
 
 # SEE ALSO
 

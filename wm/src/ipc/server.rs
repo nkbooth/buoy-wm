@@ -238,12 +238,13 @@ fn clear_socket_path(socket_path: &Path) -> std::io::Result<()> {
 /// (thread-per-connection — see the story's Technical notes "Concurrency
 /// model"). The bind itself happens synchronously in the calling thread,
 /// before any thread is spawned, so a caller can connect immediately after
-/// this function returns `Ok` with no race or `sleep` needed. A stale file
-/// left behind by a previous run (crash, or simply a non-socket file) is
-/// removed best-effort before binding — see the story's Technical notes
-/// "Stale socket handling" for why blind removal is acceptable here (this
-/// module does not distinguish a stale file from a second, still-running
-/// WM instance).
+/// this function returns `Ok` with no race or `sleep` needed. Before
+/// binding, [`clear_socket_path`] removes a dead socket left by a previous
+/// run, and returns an error instead when the path answers `connect` (a
+/// second, still-running instance, whose socket is left alone) or is not
+/// a socket at all (a file this module was merely pointed at). Either
+/// error is returned from here, so the caller does not start a second
+/// server over the first.
 ///
 /// `spawn_pinned_terminal` is the one effect this module has that is not
 /// reading or writing the socket; see [`SpawnPinnedTerminal`] for why it

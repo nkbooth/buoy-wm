@@ -25,6 +25,9 @@ Notable changes per release. Format follows
   moved to CONTRIBUTING.md. Every install step is unchanged.
 - The README's default keybindings are listed as the cheat-sheet labels
   them (`Super+space`, `Super+Escape`, `Super+LeftClick`).
+- Every High and Medium finding of the August 2026 audit is closed: fixed,
+  moved to the roadmap, or accepted with a reason. `docs/audit-2026-08.md`
+  records how each one was closed, and CI holds it to the code.
 
 ### Fixed
 
