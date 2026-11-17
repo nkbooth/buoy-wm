@@ -751,19 +751,42 @@ floor_regex="$(printf '%s\n' "$floor_step" | sed -nE "s/.*--ignore-filename-rege
 if [ -z "$floor_regex" ]; then
     fail "ci.yml: no '--ignore-filename-regex' in the step 'cargo llvm-cov (floor below the composition roots)'"
 else
-    # The bullet list under the heading, wrapped lines included, up to the
-    # blank line that ends it; only `….rs` paths in it count.
+    # The bullet list under the heading, wrapped lines and blank lines
+    # between items included (Markdown still renders one list), up to the
+    # first unindented line that is not an item; only `….rs` paths count.
     # shellcheck disable=SC2016 # literal Markdown backticks around a path
     floor_bullets="$(awk '
         $0 == "### The coverage floor" { inside = 1; next }
         inside && /^#+ / { exit }
         inside && /^- / { list = 1 }
-        list && /^$/ { exit }
+        list && /^$/ { next }
+        list && !/^- / && !/^[ \t]/ { exit }
         list' "$CONTRIBUTING" | grep -oE '`[A-Za-z0-9_./-]+\.rs`' | tr -d '`' | sort -u || true)"
     if [ -z "$floor_bullets" ]; then
         fail "CONTRIBUTING.md: no '.rs' paths in the bullet list under '### The coverage floor'"
     fi
     floor_exempt="$(floor_regex_paths "$floor_regex")"
+    # The regex matches anywhere in a path, so expanding it is not enough:
+    # the tracked .rs files it really matches must be exactly the expansion
+    # (an unanchored `src/main\.rs$` or an unescaped `.` reaches further).
+    if ! tracked_rs="$(git -C "$REPO_ROOT" ls-files -- '*.rs')"; then
+        fail "git ls-files failed; cannot hold the floor regex to the tracked files"
+    else
+        floor_matched="$(grep -E -- "$floor_regex" <<<"$tracked_rs" | sort -u || true)"
+        if [ "$floor_matched" != "$(grep -v '^!' <<<"$floor_exempt" | sort -u)" ]; then
+            fail "ci.yml: the floor regex matches these tracked files: $(tr '\n' ' ' <<<"$floor_matched")— not exactly the files it spells out"
+        fi
+    fi
+    # The floor itself, and nothing that could skip it or swallow it.
+    floor_percent="$(printf '%s\n' "$floor_step" | sed -nE 's/.*--fail-under-lines ([0-9]+).*/\1/p')"
+    if [ -z "$floor_percent" ]; then
+        fail "ci.yml: the floor step has no '--fail-under-lines <n>'"
+    elif ! section_text "$CONTRIBUTING" '### The coverage floor' | grep -qF -- "**$floor_percent%**"; then
+        fail "CONTRIBUTING.md: '### The coverage floor' does not state the floor ci.yml enforces (**$floor_percent%**)"
+    fi
+    if printf '%s\n' "$floor_step" | grep -qE '^[[:space:]]*(if|continue-on-error):'; then
+        fail "ci.yml: the floor step has an 'if:' or 'continue-on-error:' that could skip it or swallow its failure"
+    fi
     while IFS= read -r path; do
         case $path in
             '!'*) fail "ci.yml: the floor's ignore regex part '${path#!}' does not expand to a plain path" ;;

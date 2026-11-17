@@ -138,8 +138,9 @@ pub struct PendingPinnedSpawn {
 /// deliberately does NOT call the injected
 /// [`SpawnPinnedTerminal`](crate::ipc::server::SpawnPinnedTerminal)
 /// itself — the second tuple element carries the [`PendingPinnedSpawn`]
-/// that needs spawning back to the caller instead, so this function stays free of real process
-/// spawns and safe to exercise from unit tests with no side effects beyond
+/// that needs spawning back to the caller instead, so this function stays
+/// free of real process spawns and safe to exercise from unit tests with
+/// no side effects beyond
 /// `wm_core`'s own state (see this module's doc comment for the full
 /// rationale). `None` means no spawn is needed: either the request wasn't
 /// `SwitchTag`, the switch itself failed, or this tag's pinned terminal was

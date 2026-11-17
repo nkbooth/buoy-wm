@@ -98,10 +98,12 @@ codebase already; they are the most valuable thing in it.
 CI's `check` job fails when line coverage drops below **95%** across the
 workspace minus a short list of files (the `--ignore-filename-regex` of the
 step "cargo llvm-cov (floor below the composition roots)"). A file is on
-that list only when what is left in it is glue a test cannot drive: code
+that list when what is left in it is mostly glue a test cannot drive: code
 that needs a live river, a real child process or the process's own exit.
 Everything else is gated, including the parts of `compositor/` that hold
-pure logic beside their proxies.
+pure logic beside their proxies. Two exempt files still hold a little
+tested code (see below); they stay exempt because gating them would take
+the workspace below the floor, not because nothing in them can be tested.
 
 The exempt files, and why:
 
@@ -115,15 +117,17 @@ The exempt files, and why:
   `wm/src/compositor/libinput.rs`: the records that hold live protocol
   proxies, and the manage/render sequences that act on them. Their
   decisions are pushed down into `WmCore` and the pure helpers, which are
-  gated. Splitting these records into proxy-free halves is on the roadmap
-  ("The compositor glue has no unit tests") for when a feature next changes
-  them.
+  gated. Splitting the manager's and the seat's records into proxy-free
+  halves, together with the dispatch glue that feeds them, is on the
+  roadmap ("The compositor glue has no unit tests") for when a feature
+  next changes them.
 - `wm/src/compositor/child.rs` and `wm/src/compositor/report.rs`: child
   reaping and the panic and notification paths. Both hold a little tested
   code, but the rest needs a real child or a real panic, and gating them
   takes the workspace below the floor.
 
-When the list was last narrowed (v1.0.0), the gated workspace measured
+When the list was last narrowed (November 2026, before v1.0.0), the gated
+workspace measured
 95.06%, with `buoy-status-bar/src/main.rs`, `compositor/launch.rs`,
 `compositor/wire.rs` and `compositor/window.rs` newly inside the gate. That
 leaves little headroom: a patch that adds untested lines to one of those

@@ -76,13 +76,13 @@ until the next login.
 
 ## Tag names in the config are checked only when used
 
-**The problem.** A tag name from IPC goes through `validate_tag_name`
-before it is created. A tag name from the config does not: `default_tag`
-is checked only for being empty, and the `switch_tag` names in keybinds
-not at all. A name the rules refuse fails when it is first used — at the
-first output for `default_tag`, at the keypress for a `switch_tag` bind —
-and the only trace is a journal line. The config loaded cleanly, so the
-user has no reason to look.
+**The problem.** Every tag is checked by `validate_tag_name` when it is
+created, but a tag name from the config is created only when it is first
+used. At load, `default_tag` is checked only for being empty and the
+`switch_tag` names in keybinds not at all. So a name the rules refuse
+fails at the first output for `default_tag`, or at the keypress for a
+`switch_tag` bind, and the only trace is a journal line. The config loaded
+cleanly, so the user has no reason to look.
 
 **Direction.** Call `validate_tag_name` from config validation for
 `default_tag` and for every `switch_tag` name, and report a bad one
@@ -93,10 +93,10 @@ review.
 
 ## The compositor glue has no unit tests
 
-**The problem.** `compositor/manager.rs`, `compositor/seat.rs` and
-`compositor/dispatch.rs` hold the records that carry live river proxies
-and the code that acts on them. No unit test can build those records, so
-the three files sit outside the coverage floor (CONTRIBUTING.md, "The
+**The problem.** `compositor/manager.rs` and `compositor/seat.rs` hold
+the records that carry live river proxies, and `compositor/dispatch.rs`
+receives their events. No unit test can build those records, so these
+files are among the ones outside the coverage floor (CONTRIBUTING.md, "The
 coverage floor"). Their decisions are already pushed into `WmCore` and the
 pure helpers, which are gated, but what is left — the order of requests in
 a manage or render sequence, which proxy a binding press reaches — is
