@@ -125,8 +125,8 @@ _/usr/share/xdg-desktop-portal/buoy-portals.conf_
 	other portal interface to xdg-desktop-portal-gtk.
 
 _/usr/share/buoy-wm/config.example.toml_
-	The output of *buoy-wm --print-default-config*: the built-in
-	configuration, commented.
+	The output of *buoy-wm --print-default-config*, the built-in
+	configuration commented, under a licence header.
 
 _/usr/share/man/man1/buoy-wm.1.gz_, _/usr/share/man/man5/buoy-config.5.gz_
 	This page and *buoy-config*(5).

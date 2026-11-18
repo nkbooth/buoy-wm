@@ -55,7 +55,7 @@ default_tag = "default"
 # whichever multiplexer runs there. Both are replaced inside each argument,
 # never through a shell. foot sets a window's app id with `-a`; most other
 # terminals use `--class`, e.g.
-#   pinned_terminal_args = ["--class", "{app_id}", "-e", "zellij", "attach", "--create", "{session}"]
+# pinned_terminal_args = ["--class", "{app_id}", "-e", "zellij", "attach", "--create", "{session}"]
 pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]
 # Whether each tag gets a pinned terminal at all. Turn it off — this is the
 # supported way — if your terminal or zellij is broken, or if you simply do
@@ -164,7 +164,7 @@ action = "hotkeys"
 
 # --- Mousebinds -------------------------------------------------------------
 #
-# button = "left", "right" or "middle"
+#   button = "left", "right" or "middle"
 
 [[mousebind]]
 mod = ["super"]

@@ -262,13 +262,15 @@ from enabling tap, write an entry for the touchpad with *tap = false*.
 
 A list that leaves out a built-in is reported by a desktop notification at
 login, separately from skipped entries, and everything else still loads. A
-built-in binding counts as left out when no binding in your list has its
-action, so moving an action to another key is not reported. A built-in
-setting of an *[[input]]* entry counts as left out when the entry that
-matches the built-in pattern, read as a device name, does not set it at all;
-setting it to another value, such as *tap = false*, is not reported. Because the
-pattern's own text stands in for the device, a pattern of yours that matches
-real touchpads but not that text is reported too.
+built-in binding counts as left out when no binding in your key or pointer
+binding lists has its action, so moving an action to another key or button
+is not reported. A built-in setting of an *[[input]]* entry counts as left
+out when the entry that matches the built-in pattern, read as a device name,
+does not set it at all; setting it to another value, such as *tap = false*,
+is not reported. Because the pattern's own text stands in for the device, a
+pattern of yours that matches real touchpads but not that text is reported
+too, and an earlier entry of yours that matches a real touchpad but not that
+text can take a setting away without a report.
 
 # ERRORS
 
@@ -358,7 +360,8 @@ laptop touchpads.
 
 Running *buoy-wm --print-default-config* prints the built-in configuration
 written out with comments, with examples that are not built in commented out;
-_/usr/share/buoy-wm/config.example.toml_ is the same output. Because a *[[keybind]]* list replaces the built-ins, a file that adds
+_/usr/share/buoy-wm/config.example.toml_ is the same output under a licence
+header. Because a *[[keybind]]* list replaces the built-ins, a file that adds
 bindings must also list every built-in binding it keeps. Two additions,
 to be listed beside those:
 

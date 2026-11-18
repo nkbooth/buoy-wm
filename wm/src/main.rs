@@ -57,7 +57,9 @@ use buoy_wm::{config, ipc, wm_core};
 use config::Config;
 
 /// Writes `text` to stdout and exits 0, or reports the write error and
-/// exits 1: `print!` would panic on a closed stdout.
+/// exits 1: `print!` would panic on a closed stdout. A reader that closed
+/// the pipe early (`| head`) took what it wanted, so that is a success:
+/// Rust ignores SIGPIPE, which turns it into an `EPIPE` write error.
 fn print_and_exit(text: &str) -> ! {
     let mut stdout = std::io::stdout().lock();
     match stdout
@@ -65,6 +67,7 @@ fn print_and_exit(text: &str) -> ! {
         .and_then(|()| stdout.flush())
     {
         Ok(()) => std::process::exit(0),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(0),
         Err(e) => {
             log_err!("could not write to stdout: {e}");
             std::process::exit(1);
@@ -130,8 +133,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      everything else in the file is in effect."
                 ));
             }
-            // A third, separate notification: nothing was skipped and the
-            // mode is fine, so folding it into either would misdescribe it.
+            // A third, separate notification, independent of the other two:
+            // a dropped built-in is neither a skipped entry nor a problem
+            // with the file, so folding it into either would misdescribe it.
             if let Some(dropped) = loaded.dropped {
                 notify_user(&format!("{config_path}: {dropped}"));
             }

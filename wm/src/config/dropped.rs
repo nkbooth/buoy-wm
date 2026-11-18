@@ -32,8 +32,9 @@ use std::mem::discriminant;
 use super::{Action, Config, Defaults, InputConfig, Modifier, binding_label};
 
 /// The built-in entries a loaded config no longer has, as the lines a
-/// notification shows. Built only from built-in entries, so it can never
-/// carry a user's `exec` command line.
+/// notification shows. Built only from built-in entries, described with the
+/// built-in `[defaults]`, so it never carries text the user wrote — in
+/// particular never an `exec` command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DroppedBuiltIns {
     keybinds: Vec<String>,
@@ -45,40 +46,54 @@ impl Config {
     /// The built-ins this config's lists leave out, or `None` when it keeps
     /// them all.
     ///
-    /// A built-in binding is dropped when no binding in the same list has
-    /// its action: moving `close` to another key keeps it, and losing it
-    /// entirely is the harm worth a notification. A built-in `[[input]]`
-    /// setting is dropped when the entry that applies to the built-in
-    /// pattern — found with [`Config::input_for`], the WM's own first-match
-    /// rule, using the pattern's text as the device name — does not set it
-    /// at all; setting it to another value is a choice, not a drop. That is
-    /// an approximation: a user pattern such as `*Touchpad` matches real
-    /// touchpads but not the text `*Touchpad*`, so that user is told `tap`
-    /// was dropped. A list that fell back to the built-ins equals them, so
-    /// it drops nothing with no special case.
+    /// A built-in binding is dropped when no binding in either list has its
+    /// action: moving `close` to another key, or to a mouse button, keeps
+    /// it, and losing it entirely is the harm worth a notification. A
+    /// built-in `[[input]]` setting is dropped when the entry that applies
+    /// to the built-in pattern — found with [`Config::input_for`], the WM's
+    /// own first-match rule, using the pattern's text as the device name —
+    /// does not set it at all; setting it to another value is a choice, not
+    /// a drop. That is an approximation in both directions: a user pattern
+    /// such as `*Touchpad` matches real touchpads but not the text
+    /// `*Touchpad*`, so that user is told `tap` was dropped; and an earlier
+    /// entry such as `*Synaptics*` that matches a real touchpad but not that
+    /// text can take tap away unreported. A list that fell back to the
+    /// built-ins equals them, so it drops nothing with no special case.
     pub fn dropped_built_ins(&self) -> Option<DroppedBuiltIns> {
         // Destructured so a new list is a compile error here rather than
         // a list whose drops go unreported.
         let Config {
-            defaults,
+            // Built-ins are described with the built-in defaults.
+            defaults: _,
             keybinds,
             mousebinds,
             // Read through `input_for` below, so the WM's own matching rule decides.
             inputs: _,
         } = self;
+        let bound = |action: &Action| {
+            keybinds.iter().any(|bind| bind.action == *action)
+                || mousebinds.iter().any(|bind| bind.action == *action)
+        };
         let built_in = Config::default();
         let dropped = DroppedBuiltIns {
             keybinds: built_in
                 .keybinds
                 .iter()
-                .filter(|kept| !keybinds.iter().any(|bind| bind.action == kept.action))
-                .map(|kept| binding_line(&kept.mods, &kept.key, &kept.action, defaults))
+                .filter(|kept| !bound(&kept.action))
+                .map(|kept| binding_line(&kept.mods, &kept.key, &kept.action, &built_in.defaults))
                 .collect(),
             mousebinds: built_in
                 .mousebinds
                 .iter()
-                .filter(|kept| !mousebinds.iter().any(|bind| bind.action == kept.action))
-                .map(|kept| binding_line(&kept.mods, kept.button.label(), &kept.action, defaults))
+                .filter(|kept| !bound(&kept.action))
+                .map(|kept| {
+                    binding_line(
+                        &kept.mods,
+                        kept.button.label(),
+                        &kept.action,
+                        &built_in.defaults,
+                    )
+                })
                 .collect(),
             inputs: built_in
                 .inputs
@@ -100,7 +115,13 @@ impl Config {
             .settings()
             .iter()
             .filter(|setting| !applied.contains(&discriminant(*setting)))
-            .map(|setting| format!("{:?} {}", built_in.name, setting.config_name()))
+            .map(|setting| {
+                format!(
+                    "{:?} {} (now libinput's own default)",
+                    built_in.name,
+                    setting.config_name()
+                )
+            })
             .collect()
     }
 }
@@ -122,7 +143,7 @@ impl DroppedBuiltIns {
 
 impl fmt::Display for DroppedBuiltIns {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "these built-ins are not in your lists, so they are off:")?;
+        write!(f, "your config no longer has these built-ins:")?;
         for (list, lines) in [
             ("[[keybind]]", &self.keybinds),
             ("[[mousebind]]", &self.mousebinds),
@@ -163,7 +184,7 @@ action = "terminal"
 "#;
 
     #[test]
-    fn one_declared_keybind_reports_the_other_eight_built_ins() {
+    fn one_declared_keybind_reports_every_other_built_in() {
         let reported = keybinds_dropped(ONLY_A_TERMINAL_BIND);
         assert_eq!(reported.len(), Config::default().keybinds.len() - 1);
         assert!(
@@ -265,7 +286,10 @@ name = "*Logitech*"
 natural_scroll = true
 "#;
         let reported = dropped(contents).expect("tap is gone");
-        assert_eq!(reported.inputs, vec!["\"*Touchpad*\" tap".to_string()]);
+        assert_eq!(
+            reported.inputs,
+            vec!["\"*Touchpad*\" tap (now libinput's own default)".to_string()]
+        );
     }
 
     #[test]
@@ -276,7 +300,69 @@ name = "*Touchpad*"
 natural_scroll = true
 "#;
         let reported = dropped(contents).expect("tap is gone");
-        assert_eq!(reported.inputs, vec!["\"*Touchpad*\" tap".to_string()]);
+        assert_eq!(
+            reported.inputs,
+            vec!["\"*Touchpad*\" tap (now libinput's own default)".to_string()]
+        );
+    }
+
+    /// A built-in action moved to the other list is still bound.
+    #[test]
+    fn a_key_action_moved_to_a_mouse_button_is_not_a_drop() {
+        let contents = r#"
+[[keybind]]
+mod = ["super"]
+key = "Return"
+action = "terminal"
+
+[[mousebind]]
+mod = ["super"]
+button = "middle"
+action = "close"
+"#;
+        let reported = keybinds_dropped(contents);
+        assert!(
+            !reported
+                .iter()
+                .any(|line| line.contains("Close focused window")),
+            "close is bound to a button: {reported:?}"
+        );
+    }
+
+    /// The message describes a built-in with the built-in programs, never
+    /// with text the user wrote in `[defaults]`.
+    #[test]
+    fn a_dropped_launcher_is_described_with_the_built_in_program() {
+        let contents = r#"
+[defaults]
+launcher = "my-secret-launcher --token abc"
+
+[[keybind]]
+mod = ["super"]
+key = "Return"
+action = "terminal"
+"#;
+        let message = dropped(contents)
+            .expect("the launcher bind is gone")
+            .to_string();
+        assert!(!message.contains("my-secret-launcher"), "{message}");
+        assert!(message.contains("App launcher (fuzzel)"), "{message}");
+    }
+
+    /// The documented blind spot, pinned: an earlier entry that matches a
+    /// real touchpad but not the built-in pattern's own text is not seen.
+    #[test]
+    fn an_earlier_entry_that_only_matches_real_touchpads_is_not_seen() {
+        let contents = r#"
+[[input]]
+name = "*Synaptics*"
+natural_scroll = true
+
+[[input]]
+name = "*Touchpad*"
+tap = true
+"#;
+        assert_eq!(dropped(contents), None);
     }
 
     /// Turning a setting off is a choice the user wrote, not a drop.

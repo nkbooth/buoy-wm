@@ -466,12 +466,14 @@ mkdir -p ~/.config/buoy
 buoy-wm --print-default-config > ~/.config/buoy/config.toml
 ```
 
-then make it private with the `chmod 600` below. The same output ships as
-[`docs/config.example.toml`](docs/config.example.toml) and is installed as
-`/usr/share/buoy-wm/config.example.toml`; `man 5 buoy-config` is the full
-reference for every key, action and value. Remember that declaring any
-`[[keybind]]` replaces the whole built-in set; when your list leaves a
-built-in action bound to nothing, a notification at login names it.
+then make it private with the `chmod 600` below. The same output, under a
+licence header, ships as [`docs/config.example.toml`](docs/config.example.toml)
+and is installed as `/usr/share/buoy-wm/config.example.toml`;
+`man 5 buoy-config` is the full reference for every key, action and value.
+Remember that declaring any `[[keybind]]` replaces the whole built-in set, and
+`[[mousebind]]` and `[[input]]` work the same way; when your lists leave a
+built-in action bound to nothing, or stop applying a built-in `[[input]]`
+setting such as the touchpad's `tap`, a notification at login names it.
 
 ```toml
 [defaults]

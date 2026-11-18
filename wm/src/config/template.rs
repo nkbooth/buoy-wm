@@ -128,7 +128,7 @@ fn render_defaults(out: &mut String, defaults: &Defaults) {
 # whichever multiplexer runs there. Both are replaced inside each argument,
 # never through a shell. foot sets a window's app id with `-a`; most other
 # terminals use `--class`, e.g.
-#   pinned_terminal_args = [\"--class\", \"{app_id}\", \"-e\", \"zellij\", \"attach\", \"--create\", \"{session}\"]
+# pinned_terminal_args = [\"--class\", \"{app_id}\", \"-e\", \"zellij\", \"attach\", \"--create\", \"{session}\"]
 ",
     );
     let args: Vec<String> = pinned_terminal_args
@@ -218,7 +218,7 @@ const KEYBIND_EXAMPLES: &str = "
 const MOUSEBIND_PROSE: &str = "
 # --- Mousebinds -------------------------------------------------------------
 #
-# button = \"left\", \"right\" or \"middle\"
+#   button = \"left\", \"right\" or \"middle\"
 ";
 
 fn render_mousebind(out: &mut String, mousebind: &Mousebind) {
@@ -525,6 +525,70 @@ mod tests {
         }
     }
 
+    /// As [`check_spellings`], for the actions written as a bare string:
+    /// `exec` and `switch_tag` take an argument, so serde refuses them bare
+    /// and the round-trip tests cover them instead.
+    #[test]
+    fn every_bare_action_is_rendered_with_its_canonical_spelling() {
+        let document = |name: &str| format!("[[keybind]]\nkey = \"a\"\naction = \"{name}\"");
+        let parse = |name: &str| {
+            toml::from_str::<RawConfig>(&document(name)).map(|raw| raw.keybinds[0].action.clone())
+        };
+        let mut checked = 0;
+        for name in expected_names(&rejection(&document("bogus"))) {
+            let Ok(action) = parse(&name) else { continue };
+            let spelling = action.config_name();
+            assert_eq!(
+                spelling,
+                snake_case(&format!("{action:?}")),
+                "{action:?} is not rendered with its canonical spelling"
+            );
+            assert_eq!(parse(spelling).ok(), Some(action));
+            checked += 1;
+        }
+        assert!(checked > 0, "serde lists no bare action");
+    }
+
+    /// The words of the rendered file's comment lines.
+    fn comment_words(rendered: &str) -> Vec<String> {
+        rendered
+            .lines()
+            .filter(|line| line.starts_with('#'))
+            .flat_map(|line| line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The prose lists every action, modifier and button spelling by hand,
+    /// so each lowercase spelling serde accepts — canonical names and the
+    /// aliases the prose promises still work — must be named in a comment.
+    #[test]
+    fn every_lowercase_spelling_serde_accepts_is_named_in_the_comments() {
+        let words = comment_words(&default_config_toml());
+        for (what, document) in [
+            ("action", "[[keybind]]\nkey = \"a\"\naction = \"bogus\""),
+            (
+                "modifier",
+                "[[keybind]]\nmod = [\"bogus\"]\nkey = \"a\"\naction = \"close\"",
+            ),
+            (
+                "button",
+                "[[mousebind]]\nbutton = \"bogus\"\naction = \"move\"",
+            ),
+        ] {
+            let missing: Vec<String> = expected_names(&rejection(document))
+                .into_iter()
+                .filter(|name| name.chars().all(|c| !c.is_ascii_uppercase()))
+                .filter(|name| !words.contains(name))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "the comments do not name these {what} spellings: {missing:?}"
+            );
+        }
+    }
+
     #[test]
     fn every_modifier_is_rendered_with_its_canonical_spelling() {
         check_spellings(
@@ -613,13 +677,69 @@ mod tests {
                     edited[start..start + len].join("\n")
                 )
             });
-            let added = (config.keybinds.len() + config.mousebinds.len() + config.inputs.len())
-                - (built_in.keybinds.len() + built_in.mousebinds.len() + built_in.inputs.len());
+            let entries = |c: &Config| c.keybinds.len() + c.mousebinds.len() + c.inputs.len();
             assert_eq!(
-                added,
-                1,
+                entries(&config),
+                entries(&built_in) + 1,
                 "the example at line {} should add exactly one entry",
                 start + 1
+            );
+        }
+    }
+
+    /// The commented-out single settings outside those blocks — the inert
+    /// `[[input]]` knobs and the `--class` argv — as line indices: a line
+    /// `# <key> = <value>` with one space after the `#`, which the grammar
+    /// prose (indented further) never is.
+    fn commented_out_settings(lines: &[&str]) -> Vec<usize> {
+        let in_block: Vec<usize> = commented_out_blocks(lines)
+            .into_iter()
+            .flat_map(|(start, len)| start..start + len)
+            .collect();
+        (0..lines.len())
+            .filter(|i| !in_block.contains(i))
+            .filter(|&i| {
+                lines[i]
+                    .strip_prefix("# ")
+                    .and_then(|rest| rest.split_once(" = "))
+                    .is_some_and(|(key, _)| {
+                        !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    })
+            })
+            .collect()
+    }
+
+    /// Each commented-out setting, uncommented alone in place (replacing
+    /// the active line for the same key in its table, if there is one),
+    /// must still give a file with nothing wrong in it, and change it.
+    #[test]
+    fn every_commented_out_setting_parses_once_uncommented() {
+        let rendered = default_config_toml();
+        let lines: Vec<&str> = rendered.lines().collect();
+        let settings = commented_out_settings(&lines);
+        assert!(
+            settings.len() >= 2,
+            "expected the inert [[input]] knobs and the --class example, found {settings:?}"
+        );
+        for i in settings {
+            let uncommented = &lines[i]["# ".len()..];
+            let key_prefix = format!("{} = ", uncommented.split_once(" = ").expect("a setting").0);
+            let table_end = (i + 1..lines.len())
+                .find(|&j| lines[j].starts_with('['))
+                .unwrap_or(lines.len());
+            let replaced = (i + 1..table_end).find(|&j| lines[j].starts_with(&key_prefix));
+            let edited: Vec<&str> = (0..lines.len())
+                .filter(|&j| Some(j) != replaced)
+                .map(|j| if j == i { uncommented } else { lines[j] })
+                .collect();
+            let config = Config::parse(&edited.join("\n")).unwrap_or_else(|error| {
+                panic!("`{uncommented}` (line {}) does not parse ({error})", i + 1)
+            });
+            assert_ne!(
+                config,
+                Config::default(),
+                "`{uncommented}` (line {}) changes nothing",
+                i + 1
             );
         }
     }

@@ -31,7 +31,9 @@
 #
 # Blind spots, kept on purpose: an `env::var(NAME)` whose argument is not
 # a string literal is not seen, and a crate's test module is recognised
-# only in the conventional `#[cfg(test)]` + `mod … {` form.
+# only in the conventional `#[cfg(test)]` + `mod … {` form (further
+# attributes between the two allowed). OPTIONS reads only main.rs and
+# cli.rs, the two files that hold buoy-wm's argv checks.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -178,34 +180,44 @@ non_test_source() {
     awk '
         /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*(pub(\([a-z]+\))? )?mod [a-z_]+ \{/ { exit }
         /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ { pending = 1; next }
+        pending && /^[[:space:]]*#\[/ { next }
         pending && /^[[:space:]]*(pub(\([a-z]+\))? )?mod [a-z_]+ \{/ { exit }
         { pending = 0; print }' "$1"
 }
 
-# OPTIONS: the "--flag" string literals buoy-wm's main.rs and the shared
-# cli.rs compare its first argument with, outside their test modules,
-# must be exactly the *--flag* terms opening a line of the section. Both
-# directions, so an undocumented flag and a documented flag that no
-# longer exists are both red.
+# OPTIONS: the flag-shaped string literals ("-x", "--flag", digits and
+# underscores included) in buoy-wm's main.rs and the shared cli.rs,
+# outside their test modules and `//` comments, must be exactly the *-…*
+# terms opening a line of the section. Both directions, so an
+# undocumented flag and a documented flag that no longer exists are both
+# red. Any such literal counts, compared with argv or not: a false red
+# names the line to look at, a false green would hide a flag.
 scd_section "$MAN_WM" OPTIONS >"$tmp/options"
 if [ ! -s "$tmp/options" ]; then
     fail "docs/man/buoy-wm.1.scd: no OPTIONS section"
 fi
 : >"$tmp/flags"
 for source in "$REPO_ROOT/wm/src/main.rs" "$REPO_ROOT/buoy-common/src/cli.rs"; do
-    non_test_source "$source" | grep -oE '"--[a-z][a-z-]*"' | tr -d '"' >>"$tmp/flags" || true
+    if [ ! -r "$source" ]; then
+        fail "${source#"$REPO_ROOT/"}: missing or unreadable (the OPTIONS set is derived from it)"
+        continue
+    fi
+    non_test_source "$source" | sed -E 's@//.*$@@' |
+        { grep -oE '"--?[A-Za-z0-9][A-Za-z0-9_-]*"' || true; } | tr -d '"' >>"$tmp/flags"
 done
-sort -u "$tmp/flags" -o "$tmp/flags"
+# One collation for sort and comm, whatever the runner's locale.
+LC_ALL=C sort -u "$tmp/flags" -o "$tmp/flags"
 if [ ! -s "$tmp/flags" ]; then
     fail "no \"--flag\" literals found in wm/src/main.rs or buoy-common/src/cli.rs (the OPTIONS set is derived from them)"
 fi
-{ grep -oE '^\*--[a-z][a-z-]*\*' "$tmp/options" || true; } | tr -d '*' | sort -u >"$tmp/documented-flags"
+{ grep -oE '^\*--?[A-Za-z0-9][A-Za-z0-9_-]*\*' "$tmp/options" || true; } | tr -d '*' |
+    LC_ALL=C sort -u >"$tmp/documented-flags"
 while IFS= read -r flag; do
     fail "docs/man/buoy-wm.1.scd: OPTIONS does not document *$flag* (the binary reads it)"
-done < <(comm -23 "$tmp/flags" "$tmp/documented-flags")
+done < <(LC_ALL=C comm -23 "$tmp/flags" "$tmp/documented-flags")
 while IFS= read -r flag; do
     fail "docs/man/buoy-wm.1.scd: OPTIONS documents *$flag*, which the binary does not read"
-done < <(comm -13 "$tmp/flags" "$tmp/documented-flags")
+done < <(LC_ALL=C comm -13 "$tmp/flags" "$tmp/documented-flags")
 
 # ENVIRONMENT: every variable a crate's non-test source reads by literal
 # name, required as a bold term. Vendored crates are not ours, so a

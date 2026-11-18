@@ -97,6 +97,9 @@ fn the_flag_in_second_place_is_not_a_request() {
         )
         .output()
         .expect("run the real buoy-wm");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert_ne!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
+    // The connect is what failed, so startup really ran past the flags.
+    assert!(stderr.contains("NoCompositor"), "stderr: {stderr}");
 }
