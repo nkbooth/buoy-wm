@@ -138,9 +138,10 @@ and not planned" says.
 ## Channels
 
 The GitHub release assets are the source of truth (ADR-011, which replaces
-the ranking this section used to open with); COPR, a PPA and the Homebrew
-tap are optional mirrors made after the tag, never something a release
-waits on.
+the ranking this section used to open with); mirrors are made after the
+tag, never something a release waits on. The Homebrew tap is the one
+mirror planned (runbook step 5); COPR and a Launchpad PPA are deferred
+(see "Considered and not planned").
 
 ### 1. GitHub release tarball — primary
 
@@ -260,11 +261,17 @@ nothing else.
 
 ### 4. Homebrew tap — `nkbooth/homebrew-buoy`
 
-`packaging/homebrew/buoy-wm.rb`, built from source against Homebrew's own
-`wayland` formula. The tap carries no session entry, supervisor, target or
-portal config; a Homebrew install starts the WM from `~/.config/river/init`
-as the README's from-source section shows, and its supervisor recipe needs
-a checkout, since the tap installs the binaries only.
+`packaging/homebrew/buoy-wm.rb` builds the three binaries from the tag's
+source with Homebrew's `rust`. They link only glibc and libgcc (`brew
+linkage`; `wayland-client`'s pure-Rust backend loads no libwayland), so the
+formula has no runtime dependency. The tap carries no session entry,
+supervisor, target or portal config; a Homebrew install starts the WM from
+a hand-written `~/.config/river/init` as CONTRIBUTING.md's "Running a
+checkout as your session" shows, and that section's supervisor recipe
+needs a checkout, since the tap installs the binaries only.
+
+**The tap does not exist yet.** Runbook step 5 publishes it after
+`v1.0.0`; until then `brew tap nkbooth/buoy` fails.
 
 **This will not go into homebrew-core**, for two independent reasons worth
 knowing before spending effort on it: homebrew-core requires notability
@@ -279,8 +286,8 @@ brew tap nkbooth/buoy
 brew install buoy-wm
 ```
 
-Per release, the tap's copy of the formula needs exactly two lines changed
-(`url`, `sha256`). `brew bump-formula-pr` automates it.
+After each final tag, runbook step 5 refreshes the tap's copy, which
+differs from the tree's in its `sha256` line alone.
 
 ### 5. crates.io — `cargo install` fallback
 
@@ -330,12 +337,30 @@ unlikely to clear the DFSG. This is a direct consequence of the license
 choice, not of packaging effort, and no amount of packaging work changes
 it. It blocks only the *archives*: a `.deb` attached to the GitHub release
 and a Launchpad PPA need no DFSG review (ADR-011), so the release-asset
-`.deb` for each supported Ubuntu is built (channel 3 above). A PPA is an
-optional mirror after the tag (Story 6.5), and it needs a source package,
-which the release does not make: the orig tarball (`Source0`) plus an
-`orig-vendor` component holding the vendored crates, and a per-series
-version. ADR-014's MSRV keeps it buildable with Ubuntu's own rustc (see
-"Toolchain floor" above).
+`.deb` for each supported Ubuntu is built (channel 3 above). The PPA is
+deferred (below).
+
+**COPR — deferred.** The release RPMs already install by URL on Fedora 44
+and 45 and on `rpm-ostree` systems (channel 2). A COPR project would add
+`dnf copr enable` and upgrades alongside the rest of the system, at the
+cost of a COPR account, an API token and an SRPM upload per release. What
+it would take: an SRPM made with `rpmbuild -bs` from
+`packaging/rpm/buoy-wm.spec`, `Source0` and the release's vendor tarball,
+built in the `fedora-44-x86_64` and `fedora-45-x86_64` chroots. COPR
+builds without network, which the spec's `--offline` build already
+satisfies; the `release.yml` `packages` legs build it the same way.
+
+**Launchpad PPA — deferred.** The release `.deb`s already install on
+Ubuntu 26.04 and 26.10 (channel 3). A PPA would add `add-apt-repository`
+and upgrades alongside the system, and needs a Launchpad account with an
+uploaded GPG key and a source package the release does not make:
+`buoy-wm_<v>.orig.tar.gz` (the spec's `Source0`),
+`buoy-wm_<v>.orig-vendor.tar.gz` holding the vendored crates as a
+`3.0 (quilt)` component, a per-series version such as
+`1.0.0-1~ubuntu26.04.1`, and the series name where `debian/changelog`
+says `unstable`. None of this has been run: `dpkg-buildpackage -S` has
+never built that source package. ADR-014's MSRV keeps it buildable with
+Ubuntu's own rustc (see "Toolchain floor" above).
 
 **Flatpak / Snap.** Category mismatch. Both sandbox applications; a window
 manager is the session, needs the compositor's private protocol socket, and
@@ -398,7 +423,35 @@ buys nothing.
    is not optional: a `buoy-wm` binary that fails to start means a black
    screen and a bounce back to the display manager, with no shell to
    recover from.
-5. Mirrors, after the tag (Story 6.5): `brew bump-formula-pr` against the
-   tap, or edit `url`/`sha256` by hand; COPR from `Source0`'s URL plus the
-   release's vendor tarball; once the crates are renamed, `cargo publish`
-   in dependency order.
+5. Mirrors, after every final tag (never for `-rc.N`). The Homebrew tap:
+   1. Once, before the first: create the public GitHub repository
+      `nkbooth/homebrew-buoy`; the formula lives at `Formula/buoy-wm.rb`.
+   2. Download the tag archive and hash it:
+      `curl -fsSLO https://github.com/nkbooth/buoy-wm/archive/refs/tags/v<x.y.z>.tar.gz`,
+      then `sha256sum v<x.y.z>.tar.gz`. GitHub's tag archives are
+      byte-stable (two downloads of rc.3's hashed the same).
+   3. Copy `packaging/homebrew/buoy-wm.rb` to the tap's
+      `Formula/buoy-wm.rb` and change only its `sha256` line, to that
+      hash. The `url` already names the tag (step 1 moved it and
+      `release-version.sh` held it). The tree's copy keeps the all-zeros
+      placeholder, because the archive it describes contains it;
+      `tests/docs.sh` holds that.
+   4. Prove the tap copy in `docker.io/homebrew/brew:latest`. Run
+      `brew update` first: the image's bundled Homebrew cannot pour
+      current bottles and fails inside a dependency, which looks like a
+      formula fault. Then `brew tap-new --no-git local/probe`, copy the
+      tap copy into `$(brew --repository local/probe)/Formula/`,
+      `brew trust local/probe` (Homebrew 7 refuses to audit a formula
+      from an untrusted tap), and run
+      `brew style`, `brew audit --strict --online --formula`,
+      `brew install --build-from-source`, `brew test` and `brew linkage`
+      against `local/probe/buoy-wm`; each must exit 0. The test checks
+      each binary's `--version` against the formula's version; the build
+      takes about five minutes.
+   5. Commit and push the tap, then, in a fresh container of the same
+      image after `brew update`, check that `brew tap nkbooth/buoy` and
+      `brew install buoy-wm` install it.
+
+   COPR and a Launchpad PPA are deferred ("Considered and not planned").
+   Once the crates are renamed (channel 5), `cargo publish` in dependency
+   order.

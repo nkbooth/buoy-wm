@@ -15,9 +15,9 @@
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
 #
-# Built for COPR, which has no network access during builds — hence the
-# vendored-crates tarball as Source1. See docs/PACKAGING.md for how to
-# produce it.
+# Built without network access — hence the vendored-crates tarball as
+# Source1. The release.yml `packages` legs build it that way; COPR, an
+# optional mirror, would too. See docs/PACKAGING.md for how to produce it.
 
 # The git tag archive unpacks as %%{name}-%%{upstream_version}/ and the tag
 # keeps its hyphen; rpm Version cannot carry one (ADR-012: 1.0.0-rc.1 is
@@ -31,8 +31,8 @@ Release:        1%{?dist}
 Summary:        Keyboard-driven window manager for the river Wayland compositor
 
 # Reciprocal Public License 1.5. Note this is not on Fedora's reviewed
-# allowed-licenses list, so this package targets COPR rather than Fedora
-# proper; see docs/PACKAGING.md.
+# allowed-licenses list, so this package ships as a GitHub release asset
+# rather than in Fedora proper; see docs/PACKAGING.md.
 License:        RPL-1.5
 URL:            https://github.com/nkbooth/buoy-wm
 Source0:        %{url}/archive/refs/tags/v%{upstream_version}/%{name}-%{upstream_version}.tar.gz

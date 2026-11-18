@@ -30,8 +30,9 @@
 # each package in a clean container of its release and runs the
 # binaries (NFR6); and `publish` attests and uploads. The write
 # permissions live on `publish` alone, which runs `gh` and the attest
-# action and nothing from the tree. See docs/PACKAGING.md for how this
-# feeds the Homebrew tap and the COPR RPM.
+# action and nothing from the tree. See docs/PACKAGING.md for the
+# mirrors made after a final tag (the Homebrew tap; COPR and a PPA are
+# deferred).
 name: Release
 
 on:

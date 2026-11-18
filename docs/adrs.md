@@ -216,7 +216,10 @@ packaging directory joins the RPM spec. The README's supported-platforms
 table is what the matrix is derived from, so a release leaving support is a
 one-line change in one place. The Homebrew formula keeps its placeholder
 checksum until a post-tag step fills it, and that step is in the runbook
-rather than implied.
+rather than implied. Amended 2026-11-17: the in-tree formula keeps the
+placeholder for good, since the tag archive it describes contains it; only
+the tap's copy carries the real checksum, written by PACKAGING.md's
+runbook step 5 after each final tag.
 
 ## ADR-012: RC tags map to tilde versions
 **Date:** 2026-11-03

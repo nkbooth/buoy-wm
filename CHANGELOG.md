@@ -37,6 +37,11 @@ Notable changes per release. Format follows
 - Every High and Medium finding of the August 2026 audit is closed: fixed,
   moved to the roadmap, or accepted with a reason. `docs/audit-2026-08.md`
   records how each one was closed, and CI holds it to the code.
+- The Homebrew formula no longer depends on `wayland` or `pkgconf` (the
+  binaries never linked libwayland), passes `brew audit --strict`, and its test checks each
+  binary's `--version`. PACKAGING.md now says plainly that the Homebrew
+  tap, a COPR project and a Launchpad PPA do not exist yet: the tap is
+  published after v1.0.0, and COPR and the PPA are deferred.
 
 ### Fixed
 

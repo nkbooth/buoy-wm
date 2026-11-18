@@ -488,6 +488,14 @@ forbid_text "$PACKAGING" 'river -c /usr/libexec/buoy-wm/buoy-wm' \
 if grep -qE '^\s*zellij\b.*\(required\)' "$FORMULA"; then
     fail "packaging/homebrew/buoy-wm.rb: caveats call zellij '(required)' (it is the default multiplexer, swappable in config)"
 fi
+# The formula's url is the tag archive and the archive contains the
+# formula, so a real checksum here would change the archive it describes
+# (ADR-011). The tap copy carries the real one; this copy keeps zeros.
+formula_sha_lines="$(count_lines "$FORMULA" '^[[:space:]]*sha256\b')"
+formula_placeholders="$(count_lines "$FORMULA" '^[[:space:]]*sha256 "0{64}"$')"
+if [ "$formula_sha_lines" -ne 1 ] || [ "$formula_placeholders" -ne 1 ]; then
+    fail "packaging/homebrew/buoy-wm.rb: has $formula_sha_lines sha256 lines and $formula_placeholders all-zero placeholders, not exactly one of each (the real checksum lives only in the tap copy, PACKAGING runbook step 5)"
+fi
 
 # The README's "Supported platforms" table is what the CI and release
 # matrices are derived from (ADR-013: the list lives in the README), so

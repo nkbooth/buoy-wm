@@ -16,8 +16,11 @@
 # language governing rights and limitations under the RPL.
 #
 # Canonical copy. The published tap (nkbooth/homebrew-buoy) holds a copy of
-# this file at Formula/buoy-wm.rb; `sha256` and `url` are the only lines
-# that change per release. See docs/PACKAGING.md.
+# this file at Formula/buoy-wm.rb that differs only in `sha256`. The url is
+# the tag archive and the archive contains this file, so a real checksum
+# here would change the archive it describes: this copy keeps the all-zeros
+# placeholder, and docs/PACKAGING.md's release runbook step 5 writes the
+# real one into the tap copy after each final tag.
 
 class BuoyWm < Formula
   desc "Keyboard-driven window manager for the river Wayland compositor"
@@ -27,12 +30,8 @@ class BuoyWm < Formula
   license "RPL-1.5"
   head "https://github.com/nkbooth/buoy-wm.git", branch: "main"
 
-  depends_on "pkgconf" => :build
   depends_on "rust" => :build
-  # Provides libwayland-client, which wayland-client/wayland-backend link.
-  depends_on "wayland"
-  # river is Linux-only, so anything managing its windows is too. Homebrew's
-  # own `wayland` formula carries the same requirement.
+  # river is Linux-only, so anything managing its windows is too.
   depends_on :linux
 
   def install
@@ -68,8 +67,8 @@ class BuoyWm < Formula
 
       This formula installs the binaries only: the buoy login entry, the
       session supervisor, the user target and the portal config ship in
-      the RPM. Start a session from ~/.config/river/init (see the README,
-      Running it) with:
+      the RPM and the .deb. Start a session from ~/.config/river/init (see
+      CONTRIBUTING.md, Running a checkout as your session) with:
         river -c #{opt_bin}/buoy-wm
 
       An example config is at:
@@ -84,11 +83,8 @@ class BuoyWm < Formula
     assert_path_exists libexec/"bin/buoy-tag-picker"
     assert_path_exists libexec/"bin/buoy-status-bar"
 
-    # Both helpers validate their arguments before touching the IPC socket,
-    # so this exercises real code without needing a compositor.
-    assert_match "usage: buoy-status-bar",
-                 shell_output("#{libexec}/bin/buoy-status-bar 2>&1", 1)
-    assert_match "usage: buoy-tag-picker",
-                 shell_output("#{libexec}/bin/buoy-tag-picker a b c d 2>&1", 1)
+    %w[buoy-wm buoy-tag-picker buoy-status-bar].each do |name|
+      assert_equal "#{name} #{version}\n", shell_output("#{libexec}/bin/#{name} --version")
+    end
   end
 end
