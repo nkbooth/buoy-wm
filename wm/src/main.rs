@@ -56,14 +56,17 @@ use buoy_wm::{config, ipc, wm_core};
 
 use config::Config;
 
-/// Writes `line` to stdout and exits 0, or reports the write error and
-/// exits 1: `println!` would panic on a closed stdout.
-fn print_version_and_exit(line: &str) -> ! {
+/// Writes `text` to stdout and exits 0, or reports the write error and
+/// exits 1: `print!` would panic on a closed stdout.
+fn print_and_exit(text: &str) -> ! {
     let mut stdout = std::io::stdout().lock();
-    match writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
         Ok(()) => std::process::exit(0),
         Err(e) => {
-            log_err!("could not write the version: {e}");
+            log_err!("could not write to stdout: {e}");
             std::process::exit(1);
         }
     }
@@ -81,7 +84,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|arg| arg.into_string().ok())
         .collect();
     if let Some(line) = version_line(&args, env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")) {
-        print_version_and_exit(&line);
+        print_and_exit(&format!("{line}\n"));
+    }
+    // Reads no config and needs no compositor, so a user can run it from
+    // a TTY or a clean container to start their own file.
+    if args.first().map(String::as_str) == Some("--print-default-config") {
+        print_and_exit(&config::template::default_config_toml());
     }
 
     install_panic_reporter();
@@ -121,6 +129,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "{config_path}: {error}\nThose entries were skipped; \
                      everything else in the file is in effect."
                 ));
+            }
+            // A third, separate notification: nothing was skipped and the
+            // mode is fine, so folding it into either would misdescribe it.
+            if let Some(dropped) = loaded.dropped {
+                notify_user(&format!("{config_path}: {dropped}"));
             }
             loaded.config
         }

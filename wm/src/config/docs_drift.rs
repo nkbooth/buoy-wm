@@ -33,7 +33,7 @@ const README: &str = include_str!("../../../README.md");
 
 /// The backticked names after "expected" in a serde error message, which
 /// is how serde lists the fields or variants it would have accepted.
-fn expected_names(message: &str) -> Vec<String> {
+pub(super) fn expected_names(message: &str) -> Vec<String> {
     let (_, list) = message
         .rsplit_once("expected ")
         .unwrap_or_else(|| panic!("no 'expected' list in serde's message: {message}"));
@@ -51,7 +51,7 @@ fn expected_names(message: &str) -> Vec<String> {
 }
 
 /// The error a document with one unknown name produces, as displayed.
-fn rejection(document: &str) -> String {
+pub(super) fn rejection(document: &str) -> String {
     match toml::from_str::<RawConfig>(document) {
         Ok(_) => panic!("expected a rejection for:\n{document}"),
         Err(error) => error.to_string(),

@@ -158,6 +158,16 @@ next to `action = "resize"`, PascalCase and snake_case values in a
 four-line block. A `rename_all` change silently changes the spelling a
 user's config has to use, so each one is pinned by a test.
 
+**`docs/config.example.toml` is generated.** It is its licence header, one
+blank line, then the output of `buoy-wm --print-default-config`, which
+`wm/src/config/template.rs` renders from `Config::default()`. Never edit
+the body by hand: change the defaults or the renderer's prose, keep the
+header block, and replace everything after it with the output of
+`cargo run -q -p buoy-wm -- --print-default-config`.
+`the_shipped_example_is_the_licence_header_plus_the_rendered_defaults`
+fails until you do, and `wm/tests/print_default_config.rs` holds the real
+binary's output to the same file.
+
 **American English**, because the protocol, `libinput` and serde all are,
 and one file switching halfway is worse than either choice.
 

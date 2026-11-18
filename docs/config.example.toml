@@ -15,18 +15,16 @@
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
 
-# buoy-wm example configuration.
+# buoy-wm configuration: every built-in default, written out.
 #
-# Copy to ~/.config/buoy/config.toml. Every section is optional — with no
-# config file at all, buoy-wm uses the built-in defaults.
-#
-# This file is those defaults PLUS four illustrative extras that are NOT
-# built in: the two `switch_tag` binds on Super+1/Super+2 and the two `exec`
-# binds on Super+p / Super+Shift+B. They are marked in place below. That
-# distinction matters because declaring any [[keybind]] replaces the whole
-# built-in set — so copying this file wholesale gives you the defaults *and*
-# those four, one of which runs `~/bin/toggle-bluetooth.sh`, a script you
-# almost certainly do not have. Delete what you do not want.
+# This is what `buoy-wm --print-default-config` prints, and exactly what
+# buoy-wm runs with when there is no config file at all. To start your own
+# config from it:
+#   buoy-wm --print-default-config > ~/.config/buoy/config.toml
+#   chmod 600 ~/.config/buoy/config.toml
+# Every section is optional. A [defaults] key you delete keeps its built-in
+# value, and a list you delete entirely ([[keybind]], [[mousebind]] or
+# [[input]]) comes back as the built-in list written below.
 #
 # An entry the parser can read but the WM cannot use — an unknown key name,
 # an uppercase letter without "shift", `move` or `resize` on a key, a
@@ -55,8 +53,8 @@ default_tag = "default"
 # belongs to, and is replaced per tag with `pinned-term-<tag id>` — and
 # `{session}` is replaced with `tag-<tag name>`, the session name for
 # whichever multiplexer runs there. Both are replaced inside each argument,
-# never through a shell. The default is foot's spelling; most other
-# terminals use `--class` instead of `-a`, e.g.
+# never through a shell. foot sets a window's app id with `-a`; most other
+# terminals use `--class`, e.g.
 #   pinned_terminal_args = ["--class", "{app_id}", "-e", "zellij", "attach", "--create", "{session}"]
 pinned_terminal_args = ["-a", "{app_id}", "zellij", "attach", "--create", "{session}"]
 # Whether each tag gets a pinned terminal at all. Turn it off — this is the
@@ -69,20 +67,22 @@ pinned_terminals = true
 # --- Keybinds ---------------------------------------------------------------
 #
 # Declaring ANY [[keybind]] replaces the entire built-in set, so list every
-# binding you want. Mousebinds are a separate list with the same rule.
+# binding you want. Mousebinds are a separate list with the same rule. When
+# your list leaves a built-in action bound to nothing, a notification at
+# login names it; binding that action to a different key is not a drop.
 #
 #   mod    = any of "super" ("mod4", "logo", "win"), "ctrl" ("control"),
 #            "alt" ("mod1"), "shift". Optional — omit it for an unmodified
 #            key. The PascalCase spellings ("Super", "Ctrl", …) are
 #            accepted as well, and always will be.
-#   key    = a keysym name: a single character ("a", "1", "?"), one of the
+#   key    = a keysym name: a single character ("x", "1", "?"), one of the
 #            named keys `man 5 buoy-config` lists ("Return", "Tab",
 #            "Escape", …), or a function key ("F1".."F35", "f1" too).
 #            Named keys are case-insensitive;
-#            single characters are NOT — "a" and "A" are different keysyms,
+#            single characters are NOT — "x" and "X" are different keysyms,
 #            and an uppercase letter is the *shifted* symbol, so it must be
-#            bound with "Shift" or it can never fire. Write "q", not "Q",
-#            for Super+q. (Checked at load; a binding that fails is skipped
+#            bound with "shift" or it can never fire. Write "x", not "X",
+#            for Super+x. (Checked at load; a binding that fails is skipped
 #            and reported, not silently dead.)
 #   action = a bare string, or a single-key table for the two that take an
 #            argument.
@@ -103,13 +103,8 @@ pinned_terminals = true
 
 [[keybind]]
 mod = ["super"]
-key = "Space"
+key = "space"
 action = "terminal"
-
-[[keybind]]
-mod = ["super"]
-key = "r"
-action = "launcher"
 
 [[keybind]]
 mod = ["super"]
@@ -120,6 +115,11 @@ action = "close"
 mod = ["super"]
 key = "n"
 action = "focus_next"
+
+[[keybind]]
+mod = ["super"]
+key = "Escape"
+action = "exit"
 
 [[keybind]]
 mod = ["super"]
@@ -137,40 +137,30 @@ key = "s"
 action = "open_switch_picker"
 
 [[keybind]]
+mod = ["super"]
+key = "r"
+action = "launcher"
+
+[[keybind]]
 mod = ["super", "shift"]
 key = "?"
 action = "hotkeys"
 
-[[keybind]]
-mod = ["super"]
-key = "Escape"
-action = "exit"
-
-# NOT A DEFAULT — illustrative. Named tags: the tag is created the first
-# time the bind is pressed, so these work on a fresh session with no setup.
-
-[[keybind]]
-mod = ["super"]
-key = "1"
-action = { switch_tag = "email" }
-
-[[keybind]]
-mod = ["super"]
-key = "2"
-action = { switch_tag = "misc" }
-
-# NOT A DEFAULT — illustrative. Arbitrary commands, run through `sh -c`, so
-# pipes, arguments and `~` all work as they would in a shell.
-
-[[keybind]]
-mod = ["super"]
-key = "p"
-action = { exec = "grim -g \"$(slurp)\" ~/screenshot.png" }
-
-[[keybind]]
-mod = ["super", "shift"]
-key = "B"
-action = { exec = "~/bin/toggle-bluetooth.sh" }
+# Not built in — uncomment to add. A named tag is created the first time its
+# bind is pressed, so `switch_tag` works on a fresh session with no setup.
+# `exec` runs its command line through `sh -c`, so pipes, arguments and `~`
+# work as they would in a shell. Uncommenting one keeps every binding above,
+# because they are still listed.
+#
+# [[keybind]]
+# mod = ["super"]
+# key = "1"
+# action = { switch_tag = "email" }
+#
+# [[keybind]]
+# mod = ["super"]
+# key = "p"
+# action = { exec = "grim -g \"$(slurp)\" ~/screenshot.png" }
 
 # --- Mousebinds -------------------------------------------------------------
 #
@@ -197,32 +187,32 @@ action = "resize"
 #           Case-sensitive. Matched top to bottom, first match wins, so put
 #           specific devices above a catch-all `name = "*"`.
 #
-# Every setting below is optional, and OMITTING one is not the same as setting
-# it to false: an omitted setting sends no request at all, leaving libinput's
-# own default in place, while `tap = false` actively disables tap. That is why
-# there is no way to write "leave this alone" explicitly — just don't list it.
+# Every setting is optional, and OMITTING one is not the same as setting it
+# to false: an omitted setting sends no request at all, leaving libinput's
+# own default in place, while `tap = false` actively disables tap. That is
+# why there is no way to write "leave this alone" explicitly — just don't
+# list it. The commented-out settings below are ones the built-in entries
+# leave alone.
 #
 # As with [[keybind]]/[[mousebind]], declaring ANY [[input]] replaces the
-# whole built-in list. The only built-in entry is the touchpad one below, so
-# if you add a block for some other device, restate `tap = true` here too or
-# your touchpad silently loses tap-to-click.
+# whole built-in list, which is every [[input]] block below. If you add a
+# block for some other device, restate these too; a notification at login
+# names each built-in setting your list no longer applies.
 #
 # Skipped and reported at load (rather than looking configured and doing
 # nothing): an empty `name`, a block that sets nothing, a repeated `name`,
 # and an `accel_speed` outside -1.0..=1.0. A `name` that matches no device
 # is accepted silently, so check it against `libinput list-devices`.
 
-# The built-in default, written out explicitly. libinput ships tap-to-click
-# DISABLED on any device that has physical buttons, which is every laptop
-# clickpad — without this, the touchpad moves the cursor and scrolls but
-# taps do nothing at all.
 [[input]]
 name = "*Touchpad*"
-# Tap-to-click. With `tap_button_map = "lrm"` (libinput's default) one finger
-# is left click, two fingers right click, three middle. Tap-and-drag and
-# double-tap come along with it — they are the same libinput feature.
+# Tap-to-click. libinput ships it DISABLED on any device that has physical
+# buttons, which is every laptop clickpad, so without it a touchpad moves
+# the cursor and scrolls but ignores taps. Tap-and-drag and double-tap come
+# along with it — they are the same libinput feature.
 tap = true
-# "lrm" = 1/2/3 fingers -> left/right/middle. "lmr" = left/middle/right.
+# Which button each finger count taps: "lrm" = 1/2/3 fingers ->
+# left/right/middle, "lmr" = left/middle/right.
 # tap_button_map = "lrm"
 # How a PHYSICAL press resolves to a button, independent of tap:
 #   "button_areas" — the bottom of the pad is split into left/right zones
@@ -231,6 +221,7 @@ tap = true
 # Leave unset to keep whatever the device defaults to; for any device
 # configured here the WM logs `click method is …` and `tap-to-click is …`.
 # click_method = "button_areas"
+# Content follows the fingers, as on a phone.
 # natural_scroll = true
 # libinput calls this "dwt": ignore the touchpad briefly while typing.
 # disable_while_typing = true
@@ -238,9 +229,9 @@ tap = true
 # default, not "no acceleration".
 # accel_speed = 0.3
 
-# Other devices are left entirely alone unless you name them. Uncommenting
-# this would ALSO mean restating the touchpad block above, since any
-# [[input]] replaces the built-in list.
+# Not built in — uncomment to add. Other devices are left entirely alone
+# unless you name them; uncommenting this keeps the blocks above, because
+# they are still listed.
 #
 # [[input]]
 # name = "*Logitech*"

@@ -24,8 +24,12 @@
 
 #[cfg(test)]
 mod docs_drift;
+pub mod dropped;
 pub mod glob;
 pub mod keysym;
+pub mod template;
+
+pub use dropped::DroppedBuiltIns;
 
 use serde::Deserialize;
 use std::ffi::OsStr;
@@ -321,6 +325,20 @@ pub enum LibinputSetting {
     NaturalScroll(bool),
     DisableWhileTyping(bool),
     AccelSpeed(f64),
+}
+
+impl LibinputSetting {
+    /// The `[[input]]` field this setting comes from.
+    fn config_name(&self) -> &'static str {
+        match self {
+            LibinputSetting::Tap(_) => "tap",
+            LibinputSetting::TapButtonMap(_) => "tap_button_map",
+            LibinputSetting::ClickMethod(_) => "click_method",
+            LibinputSetting::NaturalScroll(_) => "natural_scroll",
+            LibinputSetting::DisableWhileTyping(_) => "disable_while_typing",
+            LibinputSetting::AccelSpeed(_) => "accel_speed",
+        }
+    }
 }
 
 impl InputConfig {
@@ -744,6 +762,12 @@ pub struct LoadedConfig {
     /// Set when the file's own ownership or mode is a risk (audit finding
     /// C-08). Independent of `skipped`: the file was used either way.
     pub trust_problem: Option<ConfigTrustProblem>,
+    /// Set when a list the file declares leaves out a built-in entry. Kept
+    /// apart from `skipped` and `trust_problem` because neither applies:
+    /// nothing was skipped and the file's mode is fine — the user wrote a
+    /// list, and a list replaces the built-ins rather than adding to them,
+    /// so one `[[input]]` block could silently cost tap-to-click.
+    pub dropped: Option<DroppedBuiltIns>,
 }
 
 impl Config {
@@ -898,6 +922,7 @@ impl Config {
                 config: Config::default(),
                 skipped: Vec::new(),
                 trust_problem: None,
+                dropped: None,
             });
         };
         Config::load_from(&path)
@@ -914,6 +939,7 @@ impl Config {
                     config: Config::default(),
                     skipped: Vec::new(),
                     trust_problem: None,
+                    dropped: None,
                 });
             }
             Err(e) => return Err(ConfigError::Io(e)),
@@ -934,6 +960,7 @@ impl Config {
         );
         let (config, skipped) = Config::parse_lenient(&contents)?;
         Ok(LoadedConfig {
+            dropped: config.dropped_built_ins(),
             config,
             skipped,
             trust_problem,
@@ -1068,6 +1095,16 @@ impl Modifier {
             Modifier::Shift => "Shift",
         }
     }
+
+    /// This modifier's canonical spelling in the config file.
+    fn config_name(self) -> &'static str {
+        match self {
+            Modifier::Super => "super",
+            Modifier::Ctrl => "ctrl",
+            Modifier::Alt => "alt",
+            Modifier::Shift => "shift",
+        }
+    }
 }
 
 impl Button {
@@ -1076,6 +1113,36 @@ impl Button {
             Button::Left => "LeftClick",
             Button::Right => "RightClick",
             Button::Middle => "MiddleClick",
+        }
+    }
+
+    /// This button's canonical spelling in the config file.
+    fn config_name(self) -> &'static str {
+        match self {
+            Button::Left => "left",
+            Button::Right => "right",
+            Button::Middle => "middle",
+        }
+    }
+}
+
+impl TapButtonMap {
+    /// This map's canonical spelling in the config file.
+    fn config_name(self) -> &'static str {
+        match self {
+            TapButtonMap::Lrm => "lrm",
+            TapButtonMap::Lmr => "lmr",
+        }
+    }
+}
+
+impl ClickMethod {
+    /// This click method's canonical spelling in the config file.
+    fn config_name(self) -> &'static str {
+        match self {
+            ClickMethod::None => "none",
+            ClickMethod::ButtonAreas => "button_areas",
+            ClickMethod::Clickfinger => "clickfinger",
         }
     }
 }
@@ -1457,6 +1524,38 @@ tap = true
             1,
             "the warning must not cost the user their keybinds"
         );
+    }
+
+    /// A dropped built-in, a skipped entry and a trust problem are three
+    /// different things the user can act on, and none hides another.
+    #[test]
+    fn a_drop_a_skipped_entry_and_a_trust_problem_are_reported_independently() {
+        let dir = TempDir::new("three-reports");
+        let contents = "[[keybind]]\nmod = [\"super\"]\nkey = \"z\"\naction = \"close\"\n\n\
+                        [[keybind]]\nmod = [\"super\"]\nkey = \"NoSuchKeysym\"\naction = \"exit\"\n";
+        let path = dir.write_config(contents, 0o664);
+        let loaded = Config::load_from(&path).expect("the file is still used");
+        assert_eq!(loaded.skipped.len(), 1);
+        assert_eq!(
+            loaded.trust_problem,
+            Some(ConfigTrustProblem::WritableByOthers { mode: 0o664 })
+        );
+        let dropped = loaded
+            .dropped
+            .expect("the other built-in keybinds are gone");
+        assert!(dropped.to_string().contains("Exit session"), "{dropped}");
+        assert_eq!(loaded.config.keybinds.len(), 1);
+    }
+
+    /// No file, or no list declared, is the built-in set: nothing dropped.
+    #[test]
+    fn a_missing_or_list_free_file_reports_no_drop() {
+        let dir = TempDir::new("no-drop");
+        let missing = Config::load_from(&dir.0.join("config.toml")).expect("no file is fine");
+        assert_eq!(missing.dropped, None);
+        let path = dir.write_config("[defaults]\nterminal = \"alacritty\"\n", 0o600);
+        let loaded = Config::load_from(&path).expect("a defaults-only file loads");
+        assert_eq!(loaded.dropped, None);
     }
 
     /// The decision, tabulated: only the `0o022` bits matter. Readability
@@ -2053,11 +2152,12 @@ action = "close"
         );
     }
 
-    /// The built-in set and the shipped example must both satisfy the rule
-    /// they are validated by — this is the guard that would have caught the
-    /// original defect.
+    /// The built-in set must satisfy the rule it is validated by — this is
+    /// the guard that would have caught the original defect. The shipped
+    /// example is the built-in set written out, so `template`'s strict
+    /// parse of it covers the file.
     #[test]
-    fn built_in_defaults_and_shipped_example_have_no_shift_less_uppercase() {
+    fn built_in_defaults_have_no_shift_less_uppercase() {
         for keybind in &Config::default().keybinds {
             assert!(
                 shifted_without_shift(keybind).is_none(),
@@ -2065,8 +2165,6 @@ action = "close"
                 keybind.key
             );
         }
-        let example = include_str!("../../../docs/config.example.toml");
-        Config::parse(example).expect("shipped example must satisfy its own validation");
     }
 
     #[test]
@@ -2302,26 +2400,6 @@ action = "close"
             help.iter().any(|line| line.contains("Super+LeftClick")),
             "got: {help:?}"
         );
-    }
-
-    /// The shipped example is documentation users copy verbatim, so it has
-    /// to stay parseable by the code it documents — including every action
-    /// spelling it advertises.
-    #[test]
-    fn the_shipped_example_config_parses() {
-        let example = include_str!("../../../docs/config.example.toml");
-        let config = Config::parse(example).expect("docs/config.example.toml must parse");
-        assert!(config.keybinds.iter().any(|bind| matches!(
-            &bind.action,
-            Action::SwitchTag(name) if name == "email"
-        )));
-        assert!(
-            config
-                .keybinds
-                .iter()
-                .any(|bind| matches!(&bind.action, Action::Exec(_)))
-        );
-        assert_eq!(config.mousebinds.len(), 2);
     }
 
     #[test]

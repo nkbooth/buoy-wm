@@ -24,7 +24,9 @@
 # spec's %files installs, and its ENVIRONMENT section every variable the
 # crates' non-test sources read by literal name; both sets are derived,
 # so a path or a variable added to the code without the page is red
-# here. buoy-config(5)'s names are held to the code by the Rust tests in
+# here. Its OPTIONS section is held both ways to the flag literals
+# buoy-wm's main.rs and buoy-common's cli.rs compare against.
+# buoy-config(5)'s names are held to the code by the Rust tests in
 # wm/src/config (docs_drift.rs and keysym.rs), which can ask serde.
 #
 # Blind spots, kept on purpose: an `env::var(NAME)` whose argument is not
@@ -169,22 +171,52 @@ for source in "$REPO_ROOT"/docs/man/*.scd; do
     fi
 done
 
+# non_test_source <file>: a Rust source file up to its test module, by
+# convention the last item in the file, written on one line or with the
+# attribute on the line before.
+non_test_source() {
+    awk '
+        /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*(pub(\([a-z]+\))? )?mod [a-z_]+ \{/ { exit }
+        /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ { pending = 1; next }
+        pending && /^[[:space:]]*(pub(\([a-z]+\))? )?mod [a-z_]+ \{/ { exit }
+        { pending = 0; print }' "$1"
+}
+
+# OPTIONS: the "--flag" string literals buoy-wm's main.rs and the shared
+# cli.rs compare its first argument with, outside their test modules,
+# must be exactly the *--flag* terms opening a line of the section. Both
+# directions, so an undocumented flag and a documented flag that no
+# longer exists are both red.
+scd_section "$MAN_WM" OPTIONS >"$tmp/options"
+if [ ! -s "$tmp/options" ]; then
+    fail "docs/man/buoy-wm.1.scd: no OPTIONS section"
+fi
+: >"$tmp/flags"
+for source in "$REPO_ROOT/wm/src/main.rs" "$REPO_ROOT/buoy-common/src/cli.rs"; do
+    non_test_source "$source" | grep -oE '"--[a-z][a-z-]*"' | tr -d '"' >>"$tmp/flags" || true
+done
+sort -u "$tmp/flags" -o "$tmp/flags"
+if [ ! -s "$tmp/flags" ]; then
+    fail "no \"--flag\" literals found in wm/src/main.rs or buoy-common/src/cli.rs (the OPTIONS set is derived from them)"
+fi
+{ grep -oE '^\*--[a-z][a-z-]*\*' "$tmp/options" || true; } | tr -d '*' | sort -u >"$tmp/documented-flags"
+while IFS= read -r flag; do
+    fail "docs/man/buoy-wm.1.scd: OPTIONS does not document *$flag* (the binary reads it)"
+done < <(comm -23 "$tmp/flags" "$tmp/documented-flags")
+while IFS= read -r flag; do
+    fail "docs/man/buoy-wm.1.scd: OPTIONS documents *$flag*, which the binary does not read"
+done < <(comm -13 "$tmp/flags" "$tmp/documented-flags")
+
 # ENVIRONMENT: every variable a crate's non-test source reads by literal
-# name, required as a bold term. A source file is read up to its test
-# module, by convention the last item in the file, written on one line
-# or with the attribute on the line before. Vendored crates are not
-# ours, so a `vendor/` tree (cargo vendor, the package builds) is skipped.
+# name, required as a bold term. Vendored crates are not ours, so a
+# `vendor/` tree (cargo vendor, the package builds) is skipped.
 scd_section "$MAN_WM" ENVIRONMENT >"$tmp/environment"
 if [ ! -s "$tmp/environment" ]; then
     fail "docs/man/buoy-wm.1.scd: no ENVIRONMENT section"
 fi
 : >"$tmp/variables"
 while IFS= read -r -d '' source; do
-    awk '
-        /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*(pub(\([a-z]+\))? )?mod [a-z_]+ \{/ { exit }
-        /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ { pending = 1; next }
-        pending && /^[[:space:]]*(pub(\([a-z]+\))? )?mod [a-z_]+ \{/ { exit }
-        { pending = 0; print }' "$source" |
+    non_test_source "$source" |
         grep -oE 'env::var(_os)?\("[A-Za-z_][A-Za-z0-9_]*"\)' |
         sed -E 's/.*\("(.*)"\)/\1/' >>"$tmp/variables" || true
 done < <(find "$REPO_ROOT" -mindepth 1 \( -name '.*' -o -name target -o -name vendor \) -prune -o -path '*/src/*.rs' -type f -print0)

@@ -458,13 +458,20 @@ protocol for scripting against it.
 ## Configuration
 
 Optional, at `~/.config/buoy/config.toml` (or under `$XDG_CONFIG_HOME`). With
-no config file the built-in defaults apply unchanged.
-[`docs/config.example.toml`](docs/config.example.toml) is a fully commented
-copy of those defaults plus four clearly-marked illustrative extras — start
-there, and delete what you do not want. The packages install it as
-`/usr/share/buoy-wm/config.example.toml`, and `man 5 buoy-config` is the
-full reference for every key, action and value. Remember that declaring any
-`[[keybind]]` replaces the whole built-in set.
+no config file the built-in defaults apply unchanged. To start your own file
+from every default, written out and commented:
+
+```sh
+mkdir -p ~/.config/buoy
+buoy-wm --print-default-config > ~/.config/buoy/config.toml
+```
+
+then make it private with the `chmod 600` below. The same output ships as
+[`docs/config.example.toml`](docs/config.example.toml) and is installed as
+`/usr/share/buoy-wm/config.example.toml`; `man 5 buoy-config` is the full
+reference for every key, action and value. Remember that declaring any
+`[[keybind]]` replaces the whole built-in set; when your list leaves a
+built-in action bound to nothing, a notification at login names it.
 
 ```toml
 [defaults]

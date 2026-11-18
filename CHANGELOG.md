@@ -16,6 +16,15 @@ Notable changes per release. Format follows
   log line or notification to look for and the fix for each failure a new
   session meets.
 - An Uninstall section in the README.
+- `buoy-wm --print-default-config` prints every built-in setting as a
+  complete, commented config file to start your own from. The shipped
+  `config.example.toml` is now exactly that output, so it can no longer
+  claim defaults the program does not have; its illustrative bindings are
+  commented out.
+- A desktop notification at login when a `[[keybind]]`, `[[mousebind]]` or
+  `[[input]]` list in your config leaves out a built-in — for instance one
+  `[[input]]` block for a mouse, which used to cost the touchpad its
+  tap-to-click without a word.
 
 ### Changed
 

@@ -30,6 +30,12 @@ Its behaviour is set by one optional file, described in *buoy-config*(5).
 	Print *buoy-wm* followed by the version and exit, before connecting to
 	Wayland. Only the first argument is read; any other argument is ignored.
 
+*--print-default-config*
+	Print the built-in configuration as a complete, commented config file
+	and exit. It reads no config file and needs no compositor, so it works
+	from a TTY: redirect it to _~/.config/buoy/config.toml_ to start your
+	own. Like *--version*, it counts only as the first argument.
+
 # REQUIREMENTS
 
 *buoy-wm* needs a Wayland connection to river and these river globals:
@@ -119,7 +125,8 @@ _/usr/share/xdg-desktop-portal/buoy-portals.conf_
 	other portal interface to xdg-desktop-portal-gtk.
 
 _/usr/share/buoy-wm/config.example.toml_
-	A commented copy of the built-in configuration.
+	The output of *buoy-wm --print-default-config*: the built-in
+	configuration, commented.
 
 _/usr/share/man/man1/buoy-wm.1.gz_, _/usr/share/man/man5/buoy-config.5.gz_
 	This page and *buoy-config*(5).
