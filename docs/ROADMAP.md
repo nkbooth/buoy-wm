@@ -58,3 +58,35 @@ the proxies and sends requests. The proxy-free half can then be tested and
 gated. Do this when a feature next changes `compositor/`, not
 speculatively: the split costs about as much as the decomposition of the
 old `main.rs` did, and it should be paid for by a change that needs it.
+
+## A dropped built-in input setting is judged by the pattern, not the device
+
+**The problem.** At login buoy-wm reports a built-in `[[input]]` setting
+that the user's list no longer applies, such as the touchpad's `tap`. It
+decides this at config load, before any device exists, by asking which of
+the user's entries would apply to a device literally named after the
+built-in pattern, `*Touchpad*`. That is wrong both ways. An entry that
+names the real device more exactly (`name = "PIXA3854:00 093A:0274
+Touchpad"`, copied from `libinput list-devices` as the man page suggests,
+or `*Touchpad`) keeps tap working but does not match the text
+`*Touchpad*`, so the user is told at every login that tap was dropped and
+can silence it only by rewriting the entry. And an earlier entry that
+matches the real touchpad but not that text (`name = "*093A*"` with only
+`natural_scroll`) takes tap away, first match winning, with no report.
+Both cases are documented in buoy-config(5) and pinned by
+`wm/src/config/dropped.rs`'s tests.
+
+**Direction.** Judge each real device when river announces it. For a
+device name, compare the settings the built-in `[[input]]` list would
+apply (`Config::default().input_for(name)`) with the settings the loaded
+config applies (`input_for(name)`), by setting, as the load-time check
+does now; report what is missing once per device per session through
+`notify_user`, naming the device. Keep that comparison a pure function in
+`wm/src/config/` so it stays tested and inside the coverage floor, and
+call it from `compositor/libinput.rs` where devices arrive. The
+`[[keybind]]` and `[[mousebind]]` half of the report stays at load, where
+it is already exact, and the load-time `[[input]]` half goes.
+
+**Open questions.** Whether a device that disappears and comes back (a
+dock, a Bluetooth mouse) is reported again in the same session.
+
