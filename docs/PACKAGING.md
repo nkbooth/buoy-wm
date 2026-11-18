@@ -132,16 +132,16 @@ with the target series' own rustc and only what `Build-Depends` names from
 the archive, so with the floor at 26.04's rustc and the crates vendored
 into the source package (the same tarball the RPM's `Source1` carries,
 since the builders have no network) a `buoy-wm` upload would build for
-26.04 and 26.10. It stays an optional mirror after the tag, as "Considered
-and not planned" says.
+26.04 and 26.10. It is deferred, as "Deferred and not planned" says.
 
 ## Channels
 
 The GitHub release assets are the source of truth (ADR-011, which replaces
 the ranking this section used to open with); mirrors are made after the
 tag, never something a release waits on. The Homebrew tap is the one
-mirror planned (runbook step 5); COPR and a Launchpad PPA are deferred
-(see "Considered and not planned").
+mirror planned for v1.0.0 (runbook step 5; crates.io waits on a rename,
+channel 5); COPR and a Launchpad PPA are deferred (see "Deferred and not
+planned").
 
 ### 1. GitHub release tarball — primary
 
@@ -278,12 +278,14 @@ knowing before spending effort on it: homebrew-core requires notability
 (roughly 30+ stars/forks/watchers) that a new personal project does not
 have, and Homebrew on Linux is a poor fit for login-session software — a
 display-manager entry pointing into `/home/linuxbrew/.linuxbrew` is
-unconventional at best. A custom tap is the realistic route, and it exists
-mainly so `brew`-centric users are not locked out:
+unconventional at best. A custom tap is the realistic route, and once
+published it serves mainly so `brew`-centric users are not locked out.
+Install by the qualified name: Homebrew 7 refuses a bare `buoy-wm` from an
+untrusted tap, and naming the formula in full trusts it.
 
 ```sh
 brew tap nkbooth/buoy
-brew install buoy-wm
+brew install nkbooth/buoy/buoy-wm
 ```
 
 After each final tag, runbook step 5 refreshes the tap's copy, which
@@ -318,7 +320,7 @@ Users install all three:
 cargo install buoy-wm buoy-tag-picker buoy-status-bar
 ```
 
-## Considered and not planned
+## Deferred and not planned
 
 **AUR — the strongest case for adding a channel.** river's user base skews
 heavily toward Arch, so an AUR `PKGBUILD` would plausibly reach more actual
@@ -354,11 +356,11 @@ satisfies; the `release.yml` `packages` legs build it the same way.
 Ubuntu 26.04 and 26.10 (channel 3). A PPA would add `add-apt-repository`
 and upgrades alongside the system, and needs a Launchpad account with an
 uploaded GPG key and a source package the release does not make:
-`buoy-wm_<v>.orig.tar.gz` (the spec's `Source0`),
+`buoy-wm_<v>.orig.tar.gz` (the tag archive, renamed),
 `buoy-wm_<v>.orig-vendor.tar.gz` holding the vendored crates as a
 `3.0 (quilt)` component, a per-series version such as
-`1.0.0-1~ubuntu26.04.1`, and the series name where `debian/changelog`
-says `unstable`. None of this has been run: `dpkg-buildpackage -S` has
+`1.0.0-1~ubuntu26.04.1`, and the series name in place of `unstable` in
+`debian/changelog`. None of this has been run: `dpkg-buildpackage -S` has
 never built that source package. ADR-014's MSRV keeps it buildable with
 Ubuntu's own rustc (see "Toolchain floor" above).
 
@@ -424,19 +426,24 @@ buys nothing.
    screen and a bounce back to the display manager, with no shell to
    recover from.
 5. Mirrors, after every final tag (never for `-rc.N`). The Homebrew tap:
-   1. Once, before the first: create the public GitHub repository
-      `nkbooth/homebrew-buoy`; the formula lives at `Formula/buoy-wm.rb`.
+   1. Once, before the first: the repository owner creates the public
+      GitHub repository `nkbooth/homebrew-buoy`; the formula lives at
+      `Formula/buoy-wm.rb`.
    2. Download the tag archive and hash it:
       `curl -fsSLO https://github.com/nkbooth/buoy-wm/archive/refs/tags/v<x.y.z>.tar.gz`,
-      then `sha256sum v<x.y.z>.tar.gz`. GitHub's tag archives are
-      byte-stable (two downloads of rc.3's hashed the same).
-   3. Copy `packaging/homebrew/buoy-wm.rb` to the tap's
-      `Formula/buoy-wm.rb` and change only its `sha256` line, to that
-      hash. The `url` already names the tag (step 1 moved it and
-      `release-version.sh` held it). The tree's copy keeps the all-zeros
+      then `sha256sum v<x.y.z>.tar.gz`. Two downloads of rc.3's archive
+      hashed the same, but GitHub does not promise stable archive bytes;
+      if they ever change, `brew install` rejects the checksum and this
+      step is rerun.
+   3. Take the formula as tagged,
+      `git show v<x.y.z>:packaging/homebrew/buoy-wm.rb`, not from a `main`
+      that may already be bumped, into the tap's `Formula/buoy-wm.rb`, and
+      change only its `sha256` line, to that hash. The `url` already names
+      the tag (runbook step 1 moved it and `release-version.sh` held it). The tree's copy keeps the all-zeros
       placeholder, because the archive it describes contains it;
       `tests/docs.sh` holds that.
-   4. Prove the tap copy in `docker.io/homebrew/brew:latest`. Run
+   4. Prove the tap copy in `docker.io/homebrew/brew:latest`, with the
+      file mounted in (`podman run -v`). Run
       `brew update` first: the image's bundled Homebrew cannot pour
       current bottles and fails inside a dependency, which looks like a
       formula fault. Then `brew tap-new --no-git local/probe`, copy the
@@ -450,8 +457,8 @@ buys nothing.
       takes about five minutes.
    5. Commit and push the tap, then, in a fresh container of the same
       image after `brew update`, check that `brew tap nkbooth/buoy` and
-      `brew install buoy-wm` install it.
+      `brew install nkbooth/buoy/buoy-wm` install it.
 
-   COPR and a Launchpad PPA are deferred ("Considered and not planned").
+   COPR and a Launchpad PPA are deferred ("Deferred and not planned").
    Once the crates are renamed (channel 5), `cargo publish` in dependency
    order.

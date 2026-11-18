@@ -15,12 +15,13 @@
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
 #
-# Canonical copy. The published tap (nkbooth/homebrew-buoy) holds a copy of
-# this file at Formula/buoy-wm.rb that differs only in `sha256`. The url is
-# the tag archive and the archive contains this file, so a real checksum
-# here would change the archive it describes: this copy keeps the all-zeros
-# placeholder, and docs/PACKAGING.md's release runbook step 5 writes the
-# real one into the tap copy after each final tag.
+# The canonical copy is packaging/homebrew/buoy-wm.rb in buoy-wm; the tap
+# nkbooth/homebrew-buoy holds it at Formula/buoy-wm.rb with only `sha256`
+# changed. The url is the tag archive and the archive contains the
+# canonical copy, so a real checksum there would change the archive it
+# describes: the canonical copy keeps the all-zeros placeholder, and
+# docs/PACKAGING.md's release runbook step 5 writes the real one into the
+# tap after each final tag.
 
 class BuoyWm < Formula
   desc "Keyboard-driven window manager for the river Wayland compositor"
@@ -84,7 +85,13 @@ class BuoyWm < Formula
     assert_path_exists libexec/"bin/buoy-status-bar"
 
     %w[buoy-wm buoy-tag-picker buoy-status-bar].each do |name|
-      assert_equal "#{name} #{version}\n", shell_output("#{libexec}/bin/#{name} --version")
+      output = shell_output("#{libexec}/bin/#{name} --version")
+      # A --HEAD install's version is HEAD-<sha>; the binary prints Cargo's.
+      if version.head?
+        assert_match(/\A#{name} \S+\n\z/, output)
+      else
+        assert_equal "#{name} #{version}\n", output
+      end
     end
   end
 end

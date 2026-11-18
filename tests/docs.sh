@@ -496,6 +496,13 @@ formula_placeholders="$(count_lines "$FORMULA" '^[[:space:]]*sha256 "0{64}"$')"
 if [ "$formula_sha_lines" -ne 1 ] || [ "$formula_placeholders" -ne 1 ]; then
     fail "packaging/homebrew/buoy-wm.rb: has $formula_sha_lines sha256 lines and $formula_placeholders all-zero placeholders, not exactly one of each (the real checksum lives only in the tap copy, PACKAGING runbook step 5)"
 fi
+# Ruby's last sha256 call wins, and one can sit mid-line
+# (`license "x"; sha256 "…"`, `stable { sha256 "…" }`), so any 64-hex
+# run other than the zeros is a real checksum.
+formula_real_hashes="$(grep -oE '[0-9a-fA-F]{64}' "$FORMULA" | grep -cvE '^0{64}$' || true)"
+if [ "$formula_real_hashes" -ne 0 ]; then
+    fail "packaging/homebrew/buoy-wm.rb: carries $formula_real_hashes 64-hex value(s) other than the all-zero placeholder (the real checksum lives only in the tap copy, PACKAGING runbook step 5)"
+fi
 
 # The README's "Supported platforms" table is what the CI and release
 # matrices are derived from (ADR-013: the list lives in the README), so

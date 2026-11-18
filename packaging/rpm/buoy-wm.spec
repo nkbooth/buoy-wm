@@ -15,7 +15,7 @@
 # PURPOSE, QUIET ENJOYMENT, OR NON-INFRINGEMENT. See the RPL for specific
 # language governing rights and limitations under the RPL.
 #
-# Built without network access — hence the vendored-crates tarball as
+# Builds without network access — hence the vendored-crates tarball as
 # Source1. The release.yml `packages` legs build it that way; COPR, an
 # optional mirror, would too. See docs/PACKAGING.md for how to produce it.
 
